@@ -85,6 +85,10 @@ public final class PartialReloadCommand {
                 .then(Commands.literal("active")
                         .then(Commands.literal("functions")
                                 .executes(context -> activeFunctions(context.getSource()))))
+                .then(Commands.literal("debug")
+                        .then(Commands.literal("manager_fingerprints")
+                                .requires(source -> !net.minecraftforge.fml.loading.FMLEnvironment.production)
+                                .executes(context -> managerFingerprints(context.getSource()))))
                 .then(unsupported("reload"))
                 );
     }
@@ -574,6 +578,22 @@ public final class PartialReloadCommand {
                         .ticking(manager).size()), false);
         source.sendSuccess(() -> Component.literal("Load pending: " +
                 com.gabriel0liv.partialreload.function.FunctionLibraryBridge.loadPending(manager)), false);
+        return 1;
+    }
+
+    private static int managerFingerprints(CommandSourceStack source) {
+        var server = source.getServer();
+        source.sendSuccess(() -> Component.literal("FunctionManager: "
+                + System.identityHashCode(server.getFunctions())), false);
+        source.sendSuccess(() -> Component.literal("FunctionLibrary: "
+                + System.identityHashCode(com.gabriel0liv.partialreload.function.FunctionLibraryBridge
+                .activeLibrary(server.getFunctions()))), false);
+        source.sendSuccess(() -> Component.literal("LootDataManager: "
+                + System.identityHashCode(server.getLootData())), false);
+        source.sendSuccess(() -> Component.literal("RecipeManager: "
+                + System.identityHashCode(server.getRecipeManager())), false);
+        source.sendSuccess(() -> Component.literal("AdvancementManager: "
+                + System.identityHashCode(server.getAdvancements())), false);
         return 1;
     }
 

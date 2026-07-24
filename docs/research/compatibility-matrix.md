@@ -43,3 +43,10 @@ Functions e o grafo conjunto de loot foram aprovados somente para preparação
 passiva. GLM permanece separado. Nenhum manager ativo é substituído. A coluna
 “preparação” descreve elegibilidade técnica do candidato, não suporte a
 `apply`/commit.
+
+## Atualização da aceitação dedicada
+
+No Forge 47.4.10/Minecraft 1.20.1, o commit vanilla de functions foi validado
+com ticks, schedules por ID/tag e fingerprints dos managers laterais. Schedules
+resolvem os IDs/tags no disparo; targets removidos são ignorados sem crash.
+Loot, recipes e advancements permaneceram sem mutação.

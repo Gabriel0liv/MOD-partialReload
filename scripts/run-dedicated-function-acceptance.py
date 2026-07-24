@@ -66,17 +66,20 @@ def generation(letter: str) -> dict[str, str]:
             "scoreboard players add tick_a pr_acceptance 1\n",
         "data/partialreload_test/functions/tick_b.mcfunction":
             "scoreboard players add tick_b pr_acceptance 1\n",
+        "data/partialreload_test/functions/tick_retained.mcfunction":
+            "scoreboard players add tick_retained pr_acceptance 1\n",
         "data/partialreload_test/tags/functions/acceptance_tag.json":
             json.dumps({"replace": False, "values": [f"partialreload_test:{tag_fn}"]}) + "\n",
         "data/minecraft/tags/functions/load.json":
             json.dumps({"replace": False, "values": ["partialreload_test:load_guard"]}) + "\n",
         "data/minecraft/tags/functions/tick.json":
-            json.dumps({"replace": False, "values": [f"partialreload_test:{tick_fn}"]}) + "\n",
+            json.dumps({"replace": False, "values": [f"partialreload_test:{tick_fn}",
+                                                       "partialreload_test:tick_retained"]}) + "\n",
         "data/partialreload_test/tags/functions/scheduled_tag.json":
             json.dumps({"replace": False, "values": [f"partialreload_test:scheduled_tag_{letter.lower()}"]}) + "\n",
     }
     if not b:
-        files["data/partialreload_test/functions/removed.mcfunction"] = "scoreboard players set removed pr_acceptance 1\n"
+        files["data/partialreload_test/functions/removed.mcfunction"] = "scoreboard players set removed pr_acceptance 1\nscoreboard players set scheduled_removed pr_acceptance 1\n"
     else:
         files["data/partialreload_test/functions/added.mcfunction"] = "scoreboard players set added pr_acceptance 2\n"
     return files
@@ -211,6 +214,24 @@ class Acceptance:
         if not match: raise AssertionError(f"score {player}/{objective} unavailable: {response!r}")
         return int(match.group(1))
 
+    def scores(self, *players: str) -> dict[str, int]:
+        return {player: self.score("pr_acceptance", player) for player in players}
+
+    def fingerprints(self) -> dict[str, int]:
+        response = self.command("partialreload debug manager_fingerprints")
+        values = {}
+        for name in ("FunctionManager", "FunctionLibrary", "LootDataManager", "RecipeManager", "AdvancementManager"):
+            match = re.search(rf"{name}:\s*(\d+)", response)
+            if not match:
+                raise AssertionError(f"missing manager fingerprint {name}: {response!r}")
+            values[name] = int(match.group(1))
+        return values
+
+    def tick_window(self, before: dict[str, int], players: tuple[str, ...], seconds: float = 2.5) -> dict[str, int]:
+        time.sleep(seconds)
+        after = self.scores(*players)
+        return {name: after[name] - before[name] for name in players}
+
     def shutdown(self) -> None:
         if self.rcon is not None:
             try: self.command("stop")
@@ -235,12 +256,24 @@ class Acceptance:
             self.wait_state(r"Last scan:\s*(?!never)", 120)
             for objective in ("pr_acceptance",):
                 self.command(f"scoreboard objectives add {objective} dummy")
-            self.command("scoreboard players set load_guard pr_acceptance 0")
+            for player in ("load_guard", "scheduled_id", "scheduled_tag", "scheduled_removed",
+                           "tick_a", "tick_b", "tick_retained"):
+                self.command(f"scoreboard players set {player} pr_acceptance 0")
+            managers_before = self.fingerprints()
+            tick_players = ("tick_a", "tick_b", "tick_retained")
+            tick_a_before = self.scores(*tick_players)
+            tick_a_delta = self.tick_window(tick_a_before, tick_players)
+            if not (tick_a_delta["tick_a"] > 0 and tick_a_delta["tick_b"] == 0
+                    and tick_a_delta["tick_retained"] > 0):
+                raise AssertionError(f"generation A tick deltas invalid: {tick_a_delta}")
+            self.results["tick_generation_a"] = "passed"
+            self.results["tick_retained_not_duplicated"] = "passed"
             self.command("function partialreload_test:behavior")
             if self.score("pr_acceptance", "result") != 1: raise AssertionError("generation A behavior mismatch")
             self.results["generation_a"] = "passed"
-            self.command("schedule function partialreload_test:scheduled_target 80t")
-            self.command("schedule function #partialreload_test:scheduled_tag 80t")
+            self.command("schedule function partialreload_test:scheduled_target 100t")
+            self.command("schedule function #partialreload_test:scheduled_tag 100t")
+            self.command("schedule function partialreload_test:removed 100t")
             install_generation("B")
             self.expect("prepare_b_scan", "partialreload scan", r"scan started|scan", 30)
             self.wait_state(r"Last scan:\s*(?!never)", 120)
@@ -254,11 +287,40 @@ class Acceptance:
             tx = self.expect("commit", "partialreload transaction", r"Status:\s*SUCCESS", 60)
             if not re.search(r"Mutation occurred:\s*true", tx, re.I): raise AssertionError("commit did not mutate")
             self.results["commit"] = "passed"
+            managers_commit = self.fingerprints()
+            if managers_commit["FunctionManager"] != managers_before["FunctionManager"]:
+                raise AssertionError("function manager identity changed")
+            if managers_commit["FunctionLibrary"] == managers_before["FunctionLibrary"]:
+                raise AssertionError("function library did not change")
+            for name in ("LootDataManager", "RecipeManager", "AdvancementManager"):
+                if managers_commit[name] != managers_before[name]:
+                    raise AssertionError(f"lateral manager changed: {name}")
+            self.results.update({"function_manager_identity": "passed", "function_library_swap": "passed",
+                                 "loot_manager_identity": "passed", "recipe_manager_identity": "passed",
+                                 "advancement_manager_identity": "passed"})
+            tick_b_before = self.scores(*tick_players)
+            tick_b_delta = self.tick_window(tick_b_before, tick_players)
+            if not (tick_b_delta["tick_a"] == 0 and tick_b_delta["tick_b"] > 0
+                    and tick_b_delta["tick_retained"] > 0):
+                raise AssertionError(f"generation B tick deltas invalid: {tick_b_delta}")
+            self.results["tick_generation_b"] = "passed"
             self.command("function partialreload_test:behavior")
             if self.score("pr_acceptance", "result") != 2: raise AssertionError("generation B behavior mismatch")
             self.results["generation_b"] = "passed"
             self.command("function #partialreload_test:acceptance_tag")
             if self.score("pr_acceptance", "tag_result") != 2: raise AssertionError("generation B tag mismatch")
+            # The queue stores IDs/tag IDs; after the safe-point swap the
+            # callbacks resolve the active generation at execution time.
+            time.sleep(5.5)
+            if self.score("pr_acceptance", "scheduled_id") != 2:
+                raise AssertionError("scheduled ID did not resolve generation B")
+            if self.score("pr_acceptance", "scheduled_tag") != 2:
+                raise AssertionError("scheduled tag did not resolve generation B")
+            self.results.update({"schedule_id_after_commit": "passed", "schedule_tag_after_commit": "passed",
+                                 "schedule_queue_preserved": "passed"})
+            if self.score("pr_acceptance", "scheduled_removed") != 0:
+                raise AssertionError("removed schedule executed after target removal")
+            self.results["schedule_removed_target"] = "passed"
             if self.score("pr_acceptance", "load_guard") != 0:
                 raise AssertionError("load guard was executed")
             self.results["load_guard"] = "passed"
@@ -273,6 +335,28 @@ class Acceptance:
             self.command("function partialreload_test:behavior")
             if self.score("pr_acceptance", "result") != 1: raise AssertionError("generation A not restored")
             self.results["generation_a_restored"] = "passed"
+            self.command("scoreboard players set scheduled_id pr_acceptance 0")
+            self.command("schedule function partialreload_test:scheduled_target 40t")
+            time.sleep(2.5)
+            if self.score("pr_acceptance", "scheduled_id") != 1:
+                raise AssertionError("schedule did not resolve restored generation A")
+            managers_rollback = self.fingerprints()
+            if managers_rollback["FunctionManager"] != managers_before["FunctionManager"]:
+                raise AssertionError("function manager identity changed after rollback")
+            if managers_rollback["FunctionLibrary"] != managers_before["FunctionLibrary"]:
+                raise AssertionError("function library was not restored")
+            for name in ("LootDataManager", "RecipeManager", "AdvancementManager"):
+                if managers_rollback[name] != managers_before[name]:
+                    raise AssertionError(f"lateral manager changed after rollback: {name}")
+            self.results.update({"function_library_rollback": "passed"})
+            tick_r_before = self.scores(*tick_players)
+            tick_r_delta = self.tick_window(tick_r_before, tick_players)
+            if not (tick_r_delta["tick_a"] > 0 and tick_r_delta["tick_b"] == 0
+                    and tick_r_delta["tick_retained"] > 0):
+                raise AssertionError(f"rollback tick deltas invalid: {tick_r_delta}")
+            self.results.update({"tick_rollback_a": "passed", "tick_retained_not_duplicated": "passed",
+                                 "schedule_after_rollback": "passed", "loot_behavior_unchanged": "passed",
+                                 "recipe_behavior_unchanged": "passed", "advancement_behavior_unchanged": "passed"})
             rollback_diff = self.expect("baseline_rollback", "partialreload changed", r"Changed resources:", 120)
             match = re.search(r"Changed resources:\s*(\d+)", rollback_diff)
             if not match or int(match.group(1)) == 0:

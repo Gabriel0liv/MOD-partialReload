@@ -54,3 +54,5 @@ PowerShell), que configura RCON efêmero em loopback, restaura
 relatórios em `build/reports/`. Nunca registrar a senha RCON. A aceitação
 aprovada deve observar `Done`, `SUCCESS`, `ROLLED_BACK` e shutdown normal;
 falhas devem preservar o log para diagnóstico.
+`partialreload debug manager_fingerprints` é userdev-only, read-only e serve
+somente para aceitação; não criar equivalente de produção sem nova spec.

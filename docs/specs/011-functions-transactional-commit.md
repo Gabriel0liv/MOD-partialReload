@@ -158,3 +158,7 @@ uma candidata no `ServerTickEvent.END` de prioridade LOWEST, a política efetiva
 é `DO_NOT_RUN`, e uma única geração anterior é retida para rollback. Loot data
 continua sem publisher. GameTests exercitam apply, troca de library e rollback;
 qualquer extensão além desses limites exige nova revisão desta spec.
+
+The dedicated acceptance additionally records tick deltas, ID/tag schedule
+resolution and userdev-only manager fingerprints. These are observational
+assertions and do not expand the production commit contract.

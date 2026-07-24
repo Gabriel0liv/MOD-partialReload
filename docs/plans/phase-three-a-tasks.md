@@ -31,3 +31,7 @@ O harness reutilizável é `scripts/run-dedicated-function-acceptance.py` (ou o
 wrapper PowerShell). Ele instala fixtures A/B em `run/world/datapacks`, captura
 relatório JSON/texto em `build/reports/`, restaura fixtures e `server.properties`
 e nunca registra a senha RCON.
+
+O relatório aprovado também contém assertions individuais para ticks,
+schedules e fingerprints laterais; `debug manager_fingerprints` não é uma API
+de produção.
