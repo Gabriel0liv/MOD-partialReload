@@ -3,8 +3,23 @@ package com.gabriel0liv.partialreload.gametest;
 import com.gabriel0liv.partialreload.PartialReloadMod;
 import com.gabriel0liv.partialreload.function.FunctionPreparationContext;
 import com.gabriel0liv.partialreload.function.VanillaFunctionsProvider;
+import com.gabriel0liv.partialreload.api.ReloadCategory;
+import com.gabriel0liv.partialreload.loot.LootPreparationContext;
+import com.gabriel0liv.partialreload.loot.PreparedLootData;
+import com.gabriel0liv.partialreload.loot.VanillaLootDataProvider;
 import com.gabriel0liv.partialreload.resource.ResourceScanner;
 import net.minecraft.resources.ResourceLocation;
+import net.minecraft.core.BlockPos;
+import net.minecraft.world.entity.EntityType;
+import net.minecraft.world.entity.decoration.ArmorStand;
+import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.storage.loot.LootDataId;
+import net.minecraft.world.level.storage.loot.LootDataType;
+import net.minecraft.world.level.storage.loot.LootParams;
+import net.minecraft.world.level.storage.loot.parameters.LootContextParamSets;
+import net.minecraft.world.level.storage.loot.parameters.LootContextParams;
+import net.minecraft.world.level.storage.PrimaryLevelData;
+import net.minecraft.world.phys.Vec3;
 import net.minecraft.world.scores.Objective;
 import net.minecraft.world.scores.criteria.ObjectiveCriteria;
 import net.minecraft.gametest.framework.GameTest;
@@ -49,7 +64,7 @@ public final class PartialReloadGameTests {
         helper.succeed();
     }
 
-    @GameTest(template = "empty", batch = "phase1-read-only", timeoutTicks = 400)
+    @GameTest(template = "empty", batch = "phase1-read-only", timeoutTicks = 1200)
     public static void scanCommandExecutes(GameTestHelper helper) {
         var server = helper.getLevel().getServer();
         int result = server.getCommands().performPrefixedCommand(
@@ -214,5 +229,229 @@ public final class PartialReloadGameTests {
         );
         helper.assertTrue(server.getFunctions() == activeManager, "The active function manager changed");
         helper.succeed();
+    }
+
+    @GameTest(template = "empty", batch = "phase3b-loot-prepare", timeoutTicks = 1200)
+    public static void jointLootDataPreparesWithoutMutatingActiveServer(GameTestHelper helper) {
+        var server = helper.getLevel().getServer();
+        var mod = ModList.get().getModObjectById(PartialReloadMod.MOD_ID)
+                .filter(PartialReloadMod.class::isInstance)
+                .map(PartialReloadMod.class::cast)
+                .orElseThrow();
+        mod.service().discardPrepared();
+
+        var activeLoot = server.getLootData();
+        var predicateId = ResourceLocation.parse("partialreload:gametest/always");
+        var modifierId = ResourceLocation.parse("partialreload:gametest/set_one");
+        var tableId = ResourceLocation.parse("partialreload:gametest/valid");
+        var activePredicate = activeLoot.getElement(new LootDataId<>(LootDataType.PREDICATE, predicateId));
+        var activeModifier = activeLoot.getElement(new LootDataId<>(LootDataType.MODIFIER, modifierId));
+        var activeTable = activeLoot.getElement(new LootDataId<>(LootDataType.TABLE, tableId));
+        helper.assertTrue(activePredicate != null, "Active predicate fixture was not loaded");
+        helper.assertTrue(activeModifier != null, "Active modifier fixture was not loaded");
+        helper.assertTrue(activeTable != null, "Active loot table fixture was not loaded");
+
+        var activeRecipes = server.getRecipeManager();
+        var activeFunctions = server.getFunctions();
+        var activeAdvancements = server.getAdvancements();
+        int objectiveCount = server.getScoreboard().getObjectives().size();
+        var scheduledBefore =
+                ((PrimaryLevelData) server.getWorldData()).getScheduledEvents().store().copy();
+
+        BlockPos chestPos = helper.absolutePos(new BlockPos(1, 1, 1));
+        helper.getLevel().setBlockAndUpdate(chestPos, Blocks.CHEST.defaultBlockState());
+        var chestBefore = helper.getLevel().getBlockEntity(chestPos);
+        ArmorStand marker = new ArmorStand(EntityType.ARMOR_STAND, helper.getLevel());
+        marker.setPos(Vec3.atCenterOf(helper.absolutePos(new BlockPos(2, 1, 1))));
+        marker.addTag("partialreload_non_mutation_probe");
+        helper.getLevel().addFreshEntity(marker);
+        Set<String> entityTagsBefore = Set.copyOf(marker.getTags());
+
+        var params = new LootParams.Builder(helper.getLevel())
+                .withParameter(LootContextParams.ORIGIN, Vec3.atCenterOf(chestPos))
+                .create(LootContextParamSets.CHEST);
+        var activeResultBefore = activeTable.getRandomItems(params, 42L).stream()
+                .map(stack -> stack.getItem().toString() + ":" + stack.getCount())
+                .toList();
+
+        int result = server.getCommands().performPrefixedCommand(
+                server.createCommandSourceStack(),
+                "partialreload prepare predicates"
+        );
+        helper.assertTrue(result == 1, "Joint loot preparation command should start");
+
+        helper.succeedWhen(() -> {
+            PreparedLootData artifact = mod.service().preparedLootData();
+            helper.assertTrue(artifact != null, "Prepared loot data should become available");
+            helper.assertTrue(artifact.isApplicable(), "Bundled loot data should validate");
+            helper.assertTrue(
+                    artifact.requestedCategories().equals(Set.of(ReloadCategory.PREDICATES)),
+                    "Requested category was not preserved"
+            );
+            helper.assertTrue(
+                    artifact.expandedCategories().equals(PreparedLootData.COMPLETE_SCOPE),
+                    "Loot scope was not expanded"
+            );
+            helper.assertTrue(artifact.predicates().containsKey(predicateId), "Predicate was not prepared");
+            helper.assertTrue(artifact.itemModifiers().containsKey(modifierId), "Modifier was not prepared");
+            helper.assertTrue(artifact.lootTables().containsKey(tableId), "Table was not prepared");
+            helper.assertTrue(
+                    artifact.dependencyGraph().dependencies().stream()
+                            .anyMatch(edge -> edge.target().equals(predicateId)),
+                    "Predicate reference was not graphed"
+            );
+            helper.assertTrue(
+                    artifact.dependencyGraph().dependencies().stream()
+                            .anyMatch(edge -> edge.target().equals(modifierId)),
+                    "Modifier reference was not graphed"
+            );
+
+            helper.assertTrue(server.getLootData() == activeLoot, "Active LootDataManager changed");
+            helper.assertTrue(
+                    activeLoot.getElement(new LootDataId<>(LootDataType.PREDICATE, predicateId))
+                            == activePredicate,
+                    "Active predicate instance changed"
+            );
+            helper.assertTrue(
+                    activeLoot.getElement(new LootDataId<>(LootDataType.MODIFIER, modifierId))
+                            == activeModifier,
+                    "Active modifier instance changed"
+            );
+            helper.assertTrue(
+                    activeLoot.getElement(new LootDataId<>(LootDataType.TABLE, tableId))
+                            == activeTable,
+                    "Active loot table instance changed"
+            );
+            helper.assertTrue(server.getRecipeManager() == activeRecipes, "RecipeManager changed");
+            helper.assertTrue(server.getFunctions() == activeFunctions, "ServerFunctionManager changed");
+            helper.assertTrue(server.getAdvancements() == activeAdvancements, "Advancement manager changed");
+            helper.assertTrue(
+                    server.getScoreboard().getObjectives().size() == objectiveCount,
+                    "Scoreboards changed"
+            );
+            helper.assertTrue(
+                    ((PrimaryLevelData) server.getWorldData())
+                            .getScheduledEvents().store().equals(scheduledBefore),
+                    "Scheduled functions changed"
+            );
+            helper.assertTrue(
+                    helper.getLevel().getBlockEntity(chestPos) == chestBefore,
+                    "Container block entity changed"
+            );
+            helper.assertTrue(marker.getTags().equals(entityTagsBefore), "Entity tags changed");
+            var activeResultAfter = activeTable.getRandomItems(params, 42L).stream()
+                    .map(stack -> stack.getItem().toString() + ":" + stack.getCount())
+                    .toList();
+            helper.assertTrue(
+                    activeResultAfter.equals(activeResultBefore),
+                    "Active loot behavior changed"
+            );
+
+            helper.assertTrue(
+                    server.getCommands().performPrefixedCommand(
+                            server.createCommandSourceStack(), "partialreload prepared"
+                    ) == 1,
+                    "Prepared command should inspect loot artifact"
+            );
+            helper.assertTrue(
+                    server.getCommands().performPrefixedCommand(
+                            server.createCommandSourceStack(), "partialreload apply anything"
+                    ) == 0,
+                    "Apply stub must remain blocked"
+            );
+            helper.assertTrue(
+                    server.getCommands().performPrefixedCommand(
+                            server.createCommandSourceStack(), "partialreload discard"
+                    ) == 1,
+                    "Discard should remove the candidate"
+            );
+            helper.assertTrue(mod.service().preparedArtifact() == null, "Discard left an artifact");
+            helper.assertTrue(server.getLootData() == activeLoot, "Discard changed active manager");
+            marker.discard();
+        });
+    }
+
+    @GameTest(template = "empty", batch = "phase3b-loot-prepare")
+    public static void invalidPredicateInvalidatesJointCandidate(GameTestHelper helper) {
+        PreparedLootData artifact = prepareLootFixture(helper, Map.of(
+                ResourceLocation.parse("partialreload:predicates/bad.json"),
+                "{\"condition\":\"partialreload:not_registered\"}"
+        ));
+        helper.assertTrue(!artifact.isApplicable(), "Invalid predicate must invalidate candidate");
+        helper.assertTrue(
+                artifact.validation().issues().stream()
+                        .anyMatch(issue -> issue.code().equals("LOOT_UNKNOWN_CONDITION_TYPE")
+                                || issue.code().equals("LOOT_DESERIALIZATION_ERROR")),
+                "Invalid predicate should be structured"
+        );
+        helper.succeed();
+    }
+
+    @GameTest(template = "empty", batch = "phase3b-loot-prepare")
+    public static void invalidModifierInvalidatesJointCandidate(GameTestHelper helper) {
+        PreparedLootData artifact = prepareLootFixture(helper, Map.of(
+                ResourceLocation.parse("partialreload:item_modifiers/bad.json"),
+                "{\"function\":\"partialreload:not_registered\"}"
+        ));
+        helper.assertTrue(!artifact.isApplicable(), "Invalid modifier must invalidate candidate");
+        helper.assertTrue(
+                artifact.validation().issues().stream()
+                        .anyMatch(issue -> issue.code().equals("LOOT_UNKNOWN_FUNCTION_TYPE")
+                                || issue.code().equals("LOOT_DESERIALIZATION_ERROR")),
+                "Invalid modifier should be structured"
+        );
+        helper.succeed();
+    }
+
+    @GameTest(template = "empty", batch = "phase3b-loot-prepare")
+    public static void invalidTableAndMissingReferenceInvalidateJointCandidate(GameTestHelper helper) {
+        PreparedLootData invalid = prepareLootFixture(helper, Map.of(
+                ResourceLocation.parse("partialreload:loot_tables/bad.json"),
+                "{\"pools\":[{\"rolls\":1,\"entries\":[{\"type\":\"partialreload:not_registered\"}]}]}"
+        ));
+        helper.assertTrue(!invalid.isApplicable(), "Invalid table must invalidate candidate");
+
+        PreparedLootData missing = prepareLootFixture(helper, Map.of(
+                ResourceLocation.parse("partialreload:loot_tables/missing.json"),
+                "{\"pools\":[{\"rolls\":1,\"entries\":["
+                        + "{\"type\":\"minecraft:loot_table\",\"name\":\"partialreload:absent\"}]}]}"
+        ));
+        helper.assertTrue(!missing.isApplicable(), "Missing table reference must invalidate candidate");
+        helper.assertTrue(
+                missing.validation().issues().stream()
+                        .anyMatch(issue -> issue.code().equals("LOOT_TABLE_REFERENCE_MISSING")),
+                "Missing table should have a structured issue"
+        );
+        helper.succeed();
+    }
+
+    private static PreparedLootData prepareLootFixture(
+            GameTestHelper helper,
+            Map<ResourceLocation, String> resources
+    ) {
+        var server = helper.getLevel().getServer();
+        var activeManager = server.getLootData();
+        var provider = new VanillaLootDataProvider(new ResourceScanner(Clock.systemUTC()));
+        var context = new LootPreparationContext(
+                new GameTestResourceManager(resources),
+                Set.of(ReloadCategory.LOOT),
+                null,
+                Duration.ofSeconds(10),
+                100,
+                100,
+                100,
+                1_000_000,
+                10_000,
+                Clock.systemUTC(),
+                UUID::randomUUID,
+                System::nanoTime
+        );
+        try {
+            PreparedLootData artifact = provider.prepare(context);
+            helper.assertTrue(server.getLootData() == activeManager, "Active manager changed");
+            return artifact;
+        } catch (com.gabriel0liv.partialreload.loot.LootPreparationException exception) {
+            throw new AssertionError("Content errors should produce an invalid artifact", exception);
+        }
     }
 }

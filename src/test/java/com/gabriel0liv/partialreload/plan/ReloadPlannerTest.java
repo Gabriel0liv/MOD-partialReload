@@ -56,14 +56,14 @@ class ReloadPlannerTest {
     }
 
     @Test
-    void blocksPredicatesUntilPreparedWithLootGraph() {
+    void plansPredicatesThroughTheJointLootGraph() {
         ReloadPlan predicates = planner.createPlan(
                 new ChangeSet(List.of(change(ReloadCategory.PREDICATES)))
         );
 
-        assertEquals(SupportStatus.PLANNED, predicates.supportStatus());
-        assertTrue(predicates.blockers().stream()
-                .anyMatch(value -> value.contains("PREDICATES_COUPLED_TO_LOOT")));
+        assertEquals(SupportStatus.PREPARE_SUPPORTED, predicates.supportStatus());
+        assertTrue(predicates.warnings().stream()
+                .anyMatch(value -> value.contains("LOOT_CATEGORY_SCOPE_EXPANDED")));
     }
 
     private static ResourceChange change(ReloadCategory category) {

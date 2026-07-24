@@ -15,7 +15,8 @@ public record ValidationIssue(
         @Nullable String packId,
         String message,
         @Nullable SourceLocation sourceLocation,
-        @Nullable String cause
+        @Nullable String cause,
+        @Nullable ValidationDetails details
 ) {
     public ValidationIssue {
         Objects.requireNonNull(severity, "severity");
@@ -26,9 +27,23 @@ public record ValidationIssue(
     public ValidationIssue(
             ValidationSeverity severity,
             String code,
+            @Nullable ReloadCategory category,
+            @Nullable ResourceLocation provider,
+            @Nullable ResourceLocation resource,
+            @Nullable String packId,
+            String message,
+            @Nullable SourceLocation sourceLocation,
+            @Nullable String cause
+    ) {
+        this(severity, code, category, provider, resource, packId, message, sourceLocation, cause, null);
+    }
+
+    public ValidationIssue(
+            ValidationSeverity severity,
+            String code,
             String message,
             @Nullable ResourceLocation resource
     ) {
-        this(severity, code, null, null, resource, null, message, null, null);
+        this(severity, code, null, null, resource, null, message, null, null, null);
     }
 }

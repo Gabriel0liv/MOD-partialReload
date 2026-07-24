@@ -4,6 +4,7 @@ import com.gabriel0liv.partialreload.PartialReloadMod;
 import com.gabriel0liv.partialreload.api.ReloadCategory;
 import com.gabriel0liv.partialreload.api.ReloadEnvironment;
 import com.gabriel0liv.partialreload.api.ScanContext;
+import com.gabriel0liv.partialreload.api.PreparedReloadArtifact;
 import com.gabriel0liv.partialreload.change.ResourceChange;
 import com.gabriel0liv.partialreload.config.PartialReloadConfig;
 import com.gabriel0liv.partialreload.core.PartialReloadService;
@@ -12,6 +13,9 @@ import com.gabriel0liv.partialreload.plan.ReloadPlan;
 import com.gabriel0liv.partialreload.function.FunctionPreparationContext;
 import com.gabriel0liv.partialreload.function.PreparedFunctions;
 import com.gabriel0liv.partialreload.function.VanillaFunctionsProvider;
+import com.gabriel0liv.partialreload.loot.LootPreparationContext;
+import com.gabriel0liv.partialreload.loot.PreparedLootData;
+import com.gabriel0liv.partialreload.loot.VanillaLootDataProvider;
 import com.mojang.brigadier.CommandDispatcher;
 import com.mojang.brigadier.arguments.StringArgumentType;
 import com.mojang.brigadier.suggestion.SuggestionsBuilder;
@@ -54,9 +58,18 @@ public final class PartialReloadCommand {
                                 ))))
                 .then(Commands.literal("prepare")
                         .then(Commands.literal("changed")
-                                .executes(context -> prepareFunctions(context.getSource(), service, true)))
+                                .executes(context -> prepareChanged(context.getSource(), service)))
                         .then(Commands.literal("functions")
-                                .executes(context -> prepareFunctions(context.getSource(), service, false))))
+                                .executes(context -> prepareFunctions(context.getSource(), service, false)))
+                        .then(Commands.literal("predicates")
+                                .executes(context -> prepareLootData(
+                                        context.getSource(), service, ReloadCategory.PREDICATES, false)))
+                        .then(Commands.literal("item_modifiers")
+                                .executes(context -> prepareLootData(
+                                        context.getSource(), service, ReloadCategory.ITEM_MODIFIERS, false)))
+                        .then(Commands.literal("loot")
+                                .executes(context -> prepareLootData(
+                                        context.getSource(), service, ReloadCategory.LOOT, false))))
                 .then(Commands.literal("prepared")
                         .executes(context -> prepared(context.getSource(), service)))
                 .then(Commands.literal("discard")
@@ -96,8 +109,7 @@ public final class PartialReloadCommand {
             String support = switch (category) {
                 case DYNAMIC_REGISTRIES -> "RESTART_REQUIRED";
                 case UNKNOWN -> "UNKNOWN";
-                case FUNCTIONS -> "PREPARE_SUPPORTED";
-                case PREDICATES -> "PREDICATES_COUPLED_TO_LOOT";
+                case FUNCTIONS, PREDICATES, ITEM_MODIFIERS, LOOT -> "PREPARE_SUPPORTED";
                 case ORIGINS, KUBEJS, SILENTGEAR -> "PLANNED";
                 default -> "SUPPORTED_READ_ONLY";
             };
@@ -261,13 +273,93 @@ public final class PartialReloadCommand {
         return 1;
     }
 
-    private static int prepared(CommandSourceStack source, PartialReloadService service) {
-        PreparedFunctions artifact = service.preparedFunctions();
-        if (artifact == null) {
-            source.sendFailure(Component.literal("No prepared function artifact is available."));
+    private static int prepareChanged(CommandSourceStack source, PartialReloadService service) {
+        if (service.hasMixedFunctionAndLootChanges()) {
+            source.sendFailure(Component.literal(
+                    "Changed resources span functions and loot data. Select an explicit category; "
+                            + "only one global preparation may run at a time."
+            ));
             return 0;
         }
-        return showPrepared(source, artifact);
+        if (service.hasFunctionChanges()) return prepareFunctions(source, service, true);
+        if (service.hasLootDataChanges()) {
+            Set<ReloadCategory> changed = service.lastChangeSet().changedResources().stream()
+                    .map(ResourceChange::category)
+                    .filter(PreparedLootData.COMPLETE_SCOPE::contains)
+                    .collect(Collectors.toUnmodifiableSet());
+            ReloadCategory requested = changed.stream().findFirst().orElse(ReloadCategory.LOOT);
+            return prepareLootData(source, service, requested, true);
+        }
+        source.sendFailure(Component.literal(
+                "No changed functions or loot data are present in the current ChangeSet."
+        ));
+        return 0;
+    }
+
+    private static int prepareLootData(
+            CommandSourceStack source,
+            PartialReloadService service,
+            ReloadCategory requested,
+            boolean changedOnly
+    ) {
+        if (changedOnly && !service.hasLootDataChanges()) {
+            source.sendFailure(Component.literal("No changed loot data are present."));
+            return 0;
+        }
+        LootPreparationContext preparationContext = new LootPreparationContext(
+                source.getServer().getResourceManager(),
+                Set.of(requested),
+                service.activeReference(),
+                Duration.ofSeconds(PartialReloadConfig.lootPrepareTimeoutSeconds()),
+                PartialReloadConfig.maxPredicates(),
+                PartialReloadConfig.maxItemModifiers(),
+                PartialReloadConfig.maxLootTables(),
+                PartialReloadConfig.maxTotalJsonBytes(),
+                PartialReloadConfig.maxDependencyEdges(),
+                Clock.systemUTC(),
+                UUID::randomUUID,
+                System::nanoTime
+        );
+        try {
+            service.prepareLootDataAsync(
+                    preparationContext,
+                    Util.backgroundExecutor(),
+                    source.getServer()
+            ).whenComplete((artifact, throwable) -> {
+                if (throwable != null) {
+                    PartialReloadMod.LOGGER.error(
+                            "Loot data preparation failed safely [provider={}]",
+                            VanillaLootDataProvider.ID,
+                            unwrap(throwable)
+                    );
+                    source.sendFailure(Component.literal(
+                            "Loot data preparation failed safely: " + rootMessage(throwable)
+                    ));
+                    return;
+                }
+                showPreparedLoot(source, artifact);
+            });
+        } catch (RuntimeException exception) {
+            source.sendFailure(Component.literal("Preparation rejected: " + exception.getMessage()));
+            return 0;
+        }
+        source.sendSuccess(() -> Component.literal(
+                "Joint loot data preparation started for requested category "
+                        + requested.commandName() + ". Active LootDataManager remains unchanged."
+        ), false);
+        return 1;
+    }
+
+    private static int prepared(CommandSourceStack source, PartialReloadService service) {
+        PreparedReloadArtifact artifact = service.preparedArtifact();
+        if (artifact == null) {
+            source.sendFailure(Component.literal("No prepared artifact is available."));
+            return 0;
+        }
+        if (artifact instanceof PreparedFunctions functions) return showPrepared(source, functions);
+        if (artifact instanceof PreparedLootData lootData) return showPreparedLoot(source, lootData);
+        source.sendFailure(Component.literal("Unknown prepared artifact type."));
+        return 0;
     }
 
     private static int showPrepared(CommandSourceStack source, PreparedFunctions artifact) {
@@ -334,11 +426,76 @@ public final class PartialReloadCommand {
         return 1;
     }
 
+    private static int showPreparedLoot(CommandSourceStack source, PreparedLootData artifact) {
+        source.sendSuccess(() -> Component.literal("Preparation #" + artifact.preparationId()), false);
+        source.sendSuccess(() -> Component.literal(
+                "Requested categories: " + artifact.requestedCategories().stream()
+                        .map(ReloadCategory::commandName).sorted().toList()
+        ), false);
+        source.sendSuccess(() -> Component.literal(
+                "Expanded scope: " + artifact.expandedCategories().stream()
+                        .map(ReloadCategory::commandName).sorted().toList()
+        ), false);
+        source.sendSuccess(() -> Component.literal(
+                "Changed resources: " + artifact.delta().changedCount()
+        ), false);
+        source.sendSuccess(() -> Component.literal(
+                "Predicates prepared: " + artifact.predicates().size()
+        ), false);
+        source.sendSuccess(() -> Component.literal(
+                "Item modifiers prepared: " + artifact.itemModifiers().size()
+        ), false);
+        source.sendSuccess(() -> Component.literal(
+                "Loot tables prepared: " + artifact.lootTables().size()
+        ), false);
+        source.sendSuccess(() -> Component.literal(
+                "Dependency edges: " + artifact.dependencyGraph().dependencies().size()
+        ), false);
+        long unsupported = artifact.validation().issues().stream()
+                .filter(issue -> issue.code().equals("LOOT_EXTERNAL_PROVIDER_UNSUPPORTED"))
+                .count();
+        long warnings = artifact.validation().count(
+                com.gabriel0liv.partialreload.validation.ValidationSeverity.WARNING
+        );
+        long errors = artifact.validation().issues().stream()
+                .filter(issue -> issue.severity()
+                        == com.gabriel0liv.partialreload.validation.ValidationSeverity.ERROR
+                        || issue.severity()
+                        == com.gabriel0liv.partialreload.validation.ValidationSeverity.BLOCKER)
+                .count();
+        source.sendSuccess(() -> Component.literal(
+                "Unsupported external resources: " + unsupported
+        ), false);
+        source.sendSuccess(() -> Component.literal(
+                "Warnings: " + warnings + ", errors/blockers: " + errors
+        ), false);
+        source.sendSuccess(() -> Component.literal(
+                "Technically applicable: " + artifact.isApplicable()
+        ), false);
+        artifact.validation().issues().stream().limit(20).forEach(issue -> {
+            Component message = Component.literal(
+                    issue.severity() + " " + issue.code() + " "
+                            + (issue.resource() == null ? "" : issue.resource())
+                            + " — " + issue.message()
+            );
+            if (issue.severity() == com.gabriel0liv.partialreload.validation.ValidationSeverity.ERROR
+                    || issue.severity()
+                    == com.gabriel0liv.partialreload.validation.ValidationSeverity.BLOCKER) {
+                source.sendFailure(message);
+            } else {
+                source.sendSuccess(() -> message, false);
+            }
+        });
+        source.sendFailure(Component.literal("Commit support: not implemented"));
+        source.sendSuccess(() -> Component.literal("Active LootDataManager: unchanged"), false);
+        return 1;
+    }
+
     private static int discard(CommandSourceStack source, PartialReloadService service) {
         try {
             boolean discarded = service.discardPrepared();
             source.sendSuccess(() -> Component.literal(
-                    discarded ? "Prepared function artifact discarded." : "No prepared artifact existed."
+                    discarded ? "Prepared artifact discarded." : "No prepared artifact existed."
             ), false);
             return discarded ? 1 : 0;
         } catch (RuntimeException exception) {

@@ -2,6 +2,7 @@ package com.gabriel0liv.partialreload.core;
 
 import com.gabriel0liv.partialreload.api.ReloadCategory;
 import com.gabriel0liv.partialreload.api.ReloadProvider;
+import com.gabriel0liv.partialreload.api.PreparedReloadArtifact;
 import com.gabriel0liv.partialreload.api.ScanContext;
 import com.gabriel0liv.partialreload.api.ScanResult;
 import com.gabriel0liv.partialreload.change.ChangeDetector;
@@ -11,6 +12,9 @@ import com.gabriel0liv.partialreload.plan.ReloadPlanner;
 import com.gabriel0liv.partialreload.function.FunctionPreparationContext;
 import com.gabriel0liv.partialreload.function.PreparedFunctions;
 import com.gabriel0liv.partialreload.function.VanillaFunctionsProvider;
+import com.gabriel0liv.partialreload.loot.LootPreparationContext;
+import com.gabriel0liv.partialreload.loot.PreparedLootData;
+import com.gabriel0liv.partialreload.loot.VanillaLootDataProvider;
 import com.gabriel0liv.partialreload.resource.ResourceSnapshot;
 
 import javax.annotation.Nullable;
@@ -24,6 +28,7 @@ public final class PartialReloadService {
     private final ReloadProvider scannerProvider;
     private final ReloadPlanner planner;
     private final VanillaFunctionsProvider functionsProvider;
+    private final VanillaLootDataProvider lootDataProvider;
     private final PartialReloadStateMachine stateMachine = new PartialReloadStateMachine();
 
     @Nullable
@@ -36,18 +41,20 @@ public final class PartialReloadService {
     @Nullable
     private String lastError;
     @Nullable
-    private PreparedFunctions preparedFunctions;
+    private PreparedReloadArtifact preparedArtifact;
 
     public PartialReloadService(
             ProviderRegistry providerRegistry,
             ReloadProvider scannerProvider,
             ReloadPlanner planner,
-            VanillaFunctionsProvider functionsProvider
+            VanillaFunctionsProvider functionsProvider,
+            VanillaLootDataProvider lootDataProvider
     ) {
         this.providerRegistry = Objects.requireNonNull(providerRegistry, "providerRegistry");
         this.scannerProvider = Objects.requireNonNull(scannerProvider, "scannerProvider");
         this.planner = Objects.requireNonNull(planner, "planner");
         this.functionsProvider = Objects.requireNonNull(functionsProvider, "functionsProvider");
+        this.lootDataProvider = Objects.requireNonNull(lootDataProvider, "lootDataProvider");
     }
 
     public CompletableFuture<ScanResult> scanAsync(ScanContext context, Executor background, Executor owner) {
@@ -76,7 +83,7 @@ public final class PartialReloadService {
                 }
                 lastChangeSet = ChangeDetector.diff(activeReference, latestScan);
                 stateMachine.transitionTo(
-                        preparedFunctions == null ? PartialReloadState.IDLE : PartialReloadState.READY
+                        preparedArtifact == null ? PartialReloadState.IDLE : PartialReloadState.READY
                 );
                 return result;
             }
@@ -99,7 +106,7 @@ public final class PartialReloadService {
         synchronized (this) {
             resetTerminalState();
             stateMachine.transitionTo(PartialReloadState.PREPARING);
-            preparedFunctions = null;
+            preparedArtifact = null;
             lastError = null;
         }
         return CompletableFuture.supplyAsync(() -> {
@@ -116,7 +123,7 @@ public final class PartialReloadService {
                     throw new CompletionException(throwable);
                 }
                 stateMachine.transitionTo(PartialReloadState.VALIDATING);
-                preparedFunctions = artifact;
+                preparedArtifact = artifact;
                 lastError = null;
                 stateMachine.transitionTo(PartialReloadState.READY);
                 return artifact;
@@ -130,7 +137,57 @@ public final class PartialReloadService {
     }
 
     public synchronized PreparedFunctions preparedFunctions() {
-        return preparedFunctions;
+        return preparedArtifact instanceof PreparedFunctions functions ? functions : null;
+    }
+
+    public CompletableFuture<PreparedLootData> prepareLootDataAsync(
+            LootPreparationContext context,
+            Executor background,
+            Executor owner
+    ) {
+        synchronized (this) {
+            resetTerminalState();
+            stateMachine.transitionTo(PartialReloadState.PREPARING);
+            preparedArtifact = null;
+            lastError = null;
+        }
+        return CompletableFuture.supplyAsync(() -> {
+            try {
+                return lootDataProvider.prepare(context);
+            } catch (Exception exception) {
+                throw new CompletionException(exception);
+            }
+        }, background).handleAsync((artifact, throwable) -> {
+            synchronized (this) {
+                if (throwable != null) {
+                    lastError = rootMessage(throwable);
+                    stateMachine.transitionTo(PartialReloadState.FAILED_SAFE);
+                    throw new CompletionException(throwable);
+                }
+                stateMachine.transitionTo(PartialReloadState.VALIDATING);
+                preparedArtifact = artifact;
+                lastError = null;
+                stateMachine.transitionTo(PartialReloadState.READY);
+                return artifact;
+            }
+        }, owner);
+    }
+
+    public synchronized boolean hasLootDataChanges() {
+        return lastChangeSet.changedResources().stream()
+                .anyMatch(change -> PreparedLootData.COMPLETE_SCOPE.contains(change.category()));
+    }
+
+    public synchronized boolean hasMixedFunctionAndLootChanges() {
+        return hasFunctionChanges() && hasLootDataChanges();
+    }
+
+    public synchronized PreparedLootData preparedLootData() {
+        return preparedArtifact instanceof PreparedLootData lootData ? lootData : null;
+    }
+
+    public synchronized PreparedReloadArtifact preparedArtifact() {
+        return preparedArtifact;
     }
 
     public synchronized boolean discardPrepared() {
@@ -138,8 +195,8 @@ public final class PartialReloadService {
         if (state == PartialReloadState.PREPARING || state == PartialReloadState.VALIDATING) {
             throw new IllegalStateException("A function preparation is still in progress");
         }
-        boolean existed = preparedFunctions != null;
-        preparedFunctions = null;
+        boolean existed = preparedArtifact != null;
+        preparedArtifact = null;
         if (state == PartialReloadState.READY || state == PartialReloadState.FAILED_SAFE) {
             stateMachine.transitionTo(PartialReloadState.IDLE);
         }
@@ -168,8 +225,8 @@ public final class PartialReloadService {
                 3,
                 latestScan == null ? null : latestScan.scannedAt(),
                 lastChangeSet.changedResources().size(),
-                preparedFunctions == null ? null : preparedFunctions.preparationId(),
-                preparedFunctions == null ? null : preparedFunctions.isApplicable(),
+                preparedArtifact == null ? null : preparedArtifact.preparationId(),
+                preparedArtifact == null ? null : preparedArtifact.isApplicable(),
                 lastError
         );
     }
@@ -180,6 +237,10 @@ public final class PartialReloadService {
 
     public synchronized ResourceSnapshot latestScan() {
         return latestScan;
+    }
+
+    public synchronized ResourceSnapshot activeReference() {
+        return activeReference;
     }
 
     public ProviderRegistry providerRegistry() {

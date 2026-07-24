@@ -7,6 +7,9 @@ import com.gabriel0liv.partialreload.core.PartialReloadState;
 import com.gabriel0liv.partialreload.core.ProviderRegistry;
 import com.gabriel0liv.partialreload.plan.ReloadPlanner;
 import com.gabriel0liv.partialreload.resource.ResourceScanner;
+import com.gabriel0liv.partialreload.loot.VanillaLootDataProvider;
+import com.gabriel0liv.partialreload.loot.LootPreparationContext;
+import com.gabriel0liv.partialreload.api.ReloadCategory;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
 import net.minecraft.server.commands.FunctionCommand;
@@ -47,6 +50,19 @@ class FunctionPreparationLifecycleTest {
                         worker,
                         Runnable::run
                 ));
+        assertThrows(InvalidStateTransitionException.class, () ->
+                service.prepareLootDataAsync(
+                        new LootPreparationContext(
+                                resources,
+                                Set.of(ReloadCategory.LOOT),
+                                null,
+                                Duration.ofSeconds(10),
+                                100, 100, 100, 100_000, 100,
+                                CLOCK, UUID::randomUUID, System::nanoTime
+                        ),
+                        worker,
+                        Runnable::run
+                ));
 
         worker.runNext();
         assertTrue(future.isDone());
@@ -84,7 +100,8 @@ class FunctionPreparationLifecycleTest {
                 registry,
                 provider,
                 new ReloadPlanner(CLOCK, UUID::randomUUID),
-                provider
+                provider,
+                new VanillaLootDataProvider(new ResourceScanner(CLOCK))
         );
     }
 

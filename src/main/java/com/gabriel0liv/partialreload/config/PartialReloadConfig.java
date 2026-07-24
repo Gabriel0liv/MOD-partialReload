@@ -13,6 +13,12 @@ public final class PartialReloadConfig {
     private static final ForgeConfigSpec.IntValue PREPARE_TIMEOUT_SECONDS;
     private static final ForgeConfigSpec.IntValue MAX_FUNCTION_COUNT;
     private static final ForgeConfigSpec.IntValue MAX_FUNCTION_LINES;
+    private static final ForgeConfigSpec.IntValue LOOT_PREPARE_TIMEOUT_SECONDS;
+    private static final ForgeConfigSpec.IntValue MAX_PREDICATES;
+    private static final ForgeConfigSpec.IntValue MAX_ITEM_MODIFIERS;
+    private static final ForgeConfigSpec.IntValue MAX_LOOT_TABLES;
+    private static final ForgeConfigSpec.LongValue MAX_TOTAL_JSON_BYTES;
+    private static final ForgeConfigSpec.IntValue MAX_DEPENDENCY_EDGES;
 
     static {
         ForgeConfigSpec.Builder builder = new ForgeConfigSpec.Builder();
@@ -42,6 +48,21 @@ public final class PartialReloadConfig {
         MAX_FUNCTION_LINES = builder
                 .comment("Hard limit for total function source lines in one preparation.")
                 .defineInRange("max_function_lines", 1_000_000, 1, 10_000_000);
+        builder.push("loot");
+        LOOT_PREPARE_TIMEOUT_SECONDS = builder
+                .comment("Cooperative timeout for joint loot data preparation.")
+                .defineInRange("prepare_timeout_seconds", 60, 1, 3_600);
+        MAX_PREDICATES = builder
+                .defineInRange("max_predicates", 100_000, 1, 1_000_000);
+        MAX_ITEM_MODIFIERS = builder
+                .defineInRange("max_item_modifiers", 100_000, 1, 1_000_000);
+        MAX_LOOT_TABLES = builder
+                .defineInRange("max_loot_tables", 100_000, 1, 1_000_000);
+        MAX_TOTAL_JSON_BYTES = builder
+                .defineInRange("max_total_json_bytes", 268_435_456L, 1L, 2_147_483_647L);
+        MAX_DEPENDENCY_EDGES = builder
+                .defineInRange("max_dependency_edges", 1_000_000, 1, 10_000_000);
+        builder.pop();
         builder.pop();
 
         builder.push("experimental");
@@ -86,5 +107,29 @@ public final class PartialReloadConfig {
 
     public static int maxFunctionLines() {
         return MAX_FUNCTION_LINES.get();
+    }
+
+    public static int lootPrepareTimeoutSeconds() {
+        return LOOT_PREPARE_TIMEOUT_SECONDS.get();
+    }
+
+    public static int maxPredicates() {
+        return MAX_PREDICATES.get();
+    }
+
+    public static int maxItemModifiers() {
+        return MAX_ITEM_MODIFIERS.get();
+    }
+
+    public static int maxLootTables() {
+        return MAX_LOOT_TABLES.get();
+    }
+
+    public static long maxTotalJsonBytes() {
+        return MAX_TOTAL_JSON_BYTES.get();
+    }
+
+    public static int maxDependencyEdges() {
+        return MAX_DEPENDENCY_EDGES.get();
     }
 }

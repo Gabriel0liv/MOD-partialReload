@@ -8,6 +8,7 @@ import com.gabriel0liv.partialreload.core.VanillaDatapackProvider;
 import com.gabriel0liv.partialreload.plan.ReloadPlanner;
 import com.gabriel0liv.partialreload.resource.ResourceScanner;
 import com.gabriel0liv.partialreload.function.VanillaFunctionsProvider;
+import com.gabriel0liv.partialreload.loot.VanillaLootDataProvider;
 import com.mojang.logging.LogUtils;
 import net.minecraftforge.common.MinecraftForge;
 import net.minecraftforge.event.RegisterCommandsEvent;
@@ -36,13 +37,16 @@ public final class PartialReloadMod {
         ResourceScanner scanner = new ResourceScanner(clock);
         VanillaDatapackProvider provider = new VanillaDatapackProvider(scanner);
         VanillaFunctionsProvider functionsProvider = new VanillaFunctionsProvider(scanner);
+        VanillaLootDataProvider lootDataProvider = new VanillaLootDataProvider(scanner);
         registry.register(provider);
         registry.register(functionsProvider);
+        registry.register(lootDataProvider);
         this.service = new PartialReloadService(
                 registry,
                 provider,
                 new ReloadPlanner(clock, UUID::randomUUID),
-                functionsProvider
+                functionsProvider,
+                lootDataProvider
         );
 
         MinecraftForge.EVENT_BUS.addListener(this::registerCommands);

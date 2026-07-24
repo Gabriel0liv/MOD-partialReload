@@ -69,12 +69,12 @@ public final class ReloadPlanner {
                     risk = ReloadRisk.max(risk, ReloadRisk.MODERATE);
                     dependencies.add("loot data and player advancement synchronization");
                 }
-                case PREDICATES -> {
+                case PREDICATES, LOOT, ITEM_MODIFIERS -> {
                     dependencies.add("shared LootDataManager validation graph");
-                    if (support == SupportStatus.SUPPORTED_READ_ONLY) support = SupportStatus.PLANNED;
-                    blockers.add("PREDICATES_COUPLED_TO_LOOT: prepare with loot tables and item modifiers");
+                    risk = ReloadRisk.max(risk, ReloadRisk.MODERATE);
+                    support = SupportStatus.PREPARE_SUPPORTED;
+                    warnings.add("LOOT_CATEGORY_SCOPE_EXPANDED: prepare predicates, item modifiers and loot together");
                 }
-                case LOOT, ITEM_MODIFIERS -> dependencies.add("shared LootDataManager validation graph");
                 case TAGS -> dependencies.add("registry tag binding, Forge events and client synchronization");
             }
         }

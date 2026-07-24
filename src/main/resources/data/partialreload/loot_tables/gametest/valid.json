@@ -1,0 +1,26 @@
+{
+  "type": "minecraft:chest",
+  "pools": [
+    {
+      "rolls": 1,
+      "entries": [
+        {
+          "type": "minecraft:item",
+          "name": "minecraft:stone",
+          "conditions": [
+            {
+              "condition": "minecraft:reference",
+              "name": "partialreload:gametest/always"
+            }
+          ],
+          "functions": [
+            {
+              "function": "minecraft:reference",
+              "name": "partialreload:gametest/set_one"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
