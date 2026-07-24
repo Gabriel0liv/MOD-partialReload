@@ -30,9 +30,8 @@ exato Forge 47.4.10.
 - Global Loot Modifiers (provider separado, planejado);
 - integrações KubeJS, Origins e Silent Gear.
 
-Isso ainda não é hot reload funcional. Uma preparação válida apenas demonstra
-que a geração candidata compilou e foi validada; o servidor continua usando a
-geração ativa anterior.
+O commit transacional de functions vanilla foi validado em servidor dedicado
+headless no alvo exato Forge 47.4.10. Loot continua apenas em preparação.
 
 ## Comandos
 
@@ -70,7 +69,12 @@ Requisitos: Java 17 e PowerShell/Gradle Wrapper.
 .\gradlew.bat clean build
 .\gradlew.bat runGameTestServer
 .\gradlew.bat runServer
+python scripts/run-dedicated-function-acceptance.py
 ```
+
+O teste dedicado usa RCON temporário em `127.0.0.1`, com senha/porta efêmeras,
+backup e restauração de `run/server.properties`. O servidor chegou a `Done`,
+publicou a geração B, voltou à geração A por rollback e encerrou normalmente.
 
 O projeto segue Spec-Driven Development. Leia `AGENTS.md`,
 `docs/specs/010-loot-data-prepare.md` e as ADRs antes de alterar

@@ -23,6 +23,11 @@
 - [x] GameTests de commit/rollback/non-mutation;
 - [x] `clean build`;
 - [x] `runGameTestServer`;
-- [ ] dedicated com comandos reais;
-- [ ] auditorias e `git diff --check`;
-- [ ] atualizar documentação apenas com resultados executados.
+- [x] dedicated com comandos reais via RCON temporário;
+- [x] auditorias e `git diff --check`;
+- [x] atualizar documentação apenas com resultados executados.
+
+O harness reutilizável é `scripts/run-dedicated-function-acceptance.py` (ou o
+wrapper PowerShell). Ele instala fixtures A/B em `run/world/datapacks`, captura
+relatório JSON/texto em `build/reports/`, restaura fixtures e `server.properties`
+e nunca registra a senha RCON.

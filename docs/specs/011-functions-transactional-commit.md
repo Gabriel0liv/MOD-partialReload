@@ -62,6 +62,9 @@ imutável de eventos observados.
 - RF-011-16: self-check produz COMPATIBLE, DISABLED_INCOMPATIBLE_TARGET ou
   DISABLED_UNVERIFIED.
 - RF-011-17: timeout separado para quiesce/commit/verify/rollback.
+- RF-011-18: manual rollback may be requested after the service returns to
+  `IDLE` (for example after discarding an unrelated prepared loot artifact),
+  while apply remains restricted to a `READY` prepared-functions state.
 
 ## 7. Requisitos não funcionais
 
@@ -97,6 +100,19 @@ Códigos: `FUNCTION_COMMIT_NOT_COMPATIBLE`, `FUNCTION_PREPARATION_REQUIRED`,
 Issues/eventos carregam transaction/preparation/generation/state, mensagem,
 causa e flags de mutação/rollback quando aplicável. Falha pré-mudança é
 FAILED_SAFE; rollback exitoso é ROLLED_BACK; rollback falho é DEGRADED.
+
+### Dedicated acceptance finding
+
+The first headless RCON run exposed a state-machine edge case: a successful
+function commit followed by `prepare loot`/`discard` returned the service to
+`IDLE`, but manual rollback still had a retained generation and attempted the
+safe point from that state. The contract therefore permits `IDLE -> QUIESCING`
+only for the rollback request path; `apply prepared` checks that its state is
+`READY` before entering the same transition.
+
+The retained generation also carries the active baseline from before the
+candidate scan, not `latestScan` (which describes B). Consequently rollback
+restores the library and makes unchanged B files visible again in `changed`.
 
 ## 10. Riscos
 

@@ -542,9 +542,8 @@ public final class PartialReloadCommand {
         source.sendSuccess(() -> Component.literal("Status: " + tx.status()), false);
         source.sendSuccess(() -> Component.literal("Load policy: " + tx.policy()), false);
         source.sendSuccess(() -> Component.literal(
-                "Mutation occurred: " + (tx.candidateGeneration() != null)), false);
-        source.sendSuccess(() -> Component.literal("Verification: " +
-                (tx.status() == com.gabriel0liv.partialreload.function.FunctionTransactionStatus.SUCCESS)), false);
+                "Mutation occurred: " + tx.mutationOccurred()), false);
+        source.sendSuccess(() -> Component.literal("Verification: " + tx.verificationPassed()), false);
         source.sendSuccess(() -> Component.literal(
                 "Rollback retained: " + (service.retainedGeneration() != null)), false);
         return 1;

@@ -19,6 +19,8 @@ public final class FunctionCommitTransaction {
     private FunctionGeneration previousGeneration;
     private FunctionGeneration candidateGeneration;
     private ValidationReport validation = ValidationReport.VALID;
+    private boolean mutationOccurred;
+    private boolean verificationPassed;
 
     public FunctionCommitTransaction(
             UUID transactionId,
@@ -45,11 +47,15 @@ public final class FunctionCommitTransaction {
     public synchronized FunctionGeneration candidateGeneration() { return candidateGeneration; }
     public synchronized List<TransactionEvent> events() { return List.copyOf(events); }
     public synchronized ValidationReport validation() { return validation; }
+    public synchronized boolean mutationOccurred() { return mutationOccurred; }
+    public synchronized boolean verificationPassed() { return verificationPassed; }
 
     public synchronized void status(FunctionTransactionStatus value) { status = value; }
     public synchronized void previousGeneration(FunctionGeneration value) { previousGeneration = value; }
     public synchronized void candidateGeneration(FunctionGeneration value) { candidateGeneration = value; }
     public synchronized void validation(ValidationReport value) { validation = value; }
+    public synchronized void mutationOccurred(boolean value) { mutationOccurred = value; }
+    public synchronized void verificationPassed(boolean value) { verificationPassed = value; }
     public synchronized void event(Instant at, TransactionEventType type, String detail) {
         events.add(new TransactionEvent(at, type, detail));
     }

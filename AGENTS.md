@@ -44,3 +44,13 @@ modifiers e loot tables; `VanillaLootDataProvider` nunca publica no
 
 `reload` e qualquer apply de loot devem falhar de modo explícito e seguro. Não
 escreva os maps privados do `LootDataManager`.
+
+## Aceitação dedicada
+
+O console stdin do `runServer` via wrapper Gradle não é um transporte confiável.
+Use `python scripts/run-dedicated-function-acceptance.py` (ou o wrapper
+PowerShell), que configura RCON efêmero em loopback, restaura
+`run/server.properties` e as fixtures em `run/world/datapacks` e grava os
+relatórios em `build/reports/`. Nunca registrar a senha RCON. A aceitação
+aprovada deve observar `Done`, `SUCCESS`, `ROLLED_BACK` e shutdown normal;
+falhas devem preservar o log para diagnóstico.

@@ -25,7 +25,8 @@ public final class PartialReloadStateMachine {
         map.put(PartialReloadState.IDLE, EnumSet.of(
                 PartialReloadState.SCANNING,
                 PartialReloadState.PLANNING,
-                PartialReloadState.PREPARING
+                PartialReloadState.PREPARING,
+                PartialReloadState.QUIESCING
         ));
         map.put(PartialReloadState.SCANNING, EnumSet.of(
                 PartialReloadState.IDLE,

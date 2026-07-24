@@ -146,13 +146,20 @@ Essas integrações exigem contrato próprio.
 
 ## Execução dedicada headless
 
-Em 24/07/2026, `runServer` foi iniciado por processo filho e alcançou
-`Done (8.152s)! For help, type "help"`. O wrapper Gradle/Forge em execução
-headless não encaminhou os comandos escritos em `stdin` ao console do
-`DedicatedServer`: `partialreload status` não produziu uma linha de comando no
-log e a sequência não pôde prosseguir. Não há evidência válida de apply/rollback
-interativos nessa instância. O GameTestServer continua sendo a evidência
-automatizada do commit e rollback reais. Os scripts
-`scripts/run-dedicated-function-acceptance.py` e
-`scripts/run-dedicated-function-acceptance.ps1` registram a tentativa e devem
-ser executados num terminal com stdin de console Forge disponível.
+O diagnóstico confirmou que o wrapper Gradle/Forge não encaminha stdin
+redirecionado ao console do `DedicatedServer`; por isso o harness não depende de
+stdin. `scripts/run-dedicated-function-acceptance.py` configura RCON temporário
+com senha aleatória e porta livre, inicia `runServer`, aguarda `Done`, executa
+os comandos uma única vez e restaura `run/server.properties` no `finally`.
+
+Na execução aprovada de 24/07/2026 o servidor chegou a `Done`, autenticou via
+RCON, preparou a geração B, publicou-a (`SUCCESS`, mutation/verification true),
+observou behavior/tag B e `load_guard=0`, recusou commit de loot, executou
+rollback manual (`ROLLED_BACK`, mutation/verification true), restaurou behavior
+A e encerrou com salvamento normal e exit code zero. O relatório completo fica
+em `build/reports/dedicated-function-acceptance.json` e `.log`.
+
+O pack é instalado em `run/world/datapacks` porque esse é o diretório carregado
+por este DedicatedServer; a troca A/B usa staging e renames atômicos. RCON pode
+escutar além do loopback em algumas implementações; a mitigação é senha forte
+efêmera, porta aleatória, janela curta e restauração obrigatória.

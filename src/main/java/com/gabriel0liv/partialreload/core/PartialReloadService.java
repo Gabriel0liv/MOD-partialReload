@@ -220,6 +220,9 @@ public final class PartialReloadService {
         if (stateMachine.state() == PartialReloadState.DEGRADED) {
             throw new IllegalStateException("FUNCTION_COMMIT_DEGRADED: restart is required");
         }
+        if (stateMachine.state() != PartialReloadState.READY) {
+            throw new IllegalStateException("FUNCTION_PREPARATION_REQUIRED: state must be READY");
+        }
         if (transaction != null && transaction.status() != FunctionTransactionStatus.SUCCESS
                 && transaction.status() != FunctionTransactionStatus.ROLLED_BACK
                 && transaction.status() != FunctionTransactionStatus.FAILED_SAFE
@@ -250,6 +253,10 @@ public final class PartialReloadService {
 
     public synchronized FunctionCommitTransaction requestManualRollback(String requester) {
         if (retainedGeneration == null) throw new IllegalStateException("FUNCTION_MANUAL_ROLLBACK_UNAVAILABLE");
+        if (stateMachine.state() != PartialReloadState.IDLE
+                && stateMachine.state() != PartialReloadState.SUCCESS) {
+            throw new IllegalStateException("FUNCTION_TRANSACTION_ALREADY_RUNNING");
+        }
         if (transaction != null && transaction.status() == FunctionTransactionStatus.QUIESCING) {
             throw new IllegalStateException("FUNCTION_TRANSACTION_ALREADY_RUNNING");
         }
@@ -297,6 +304,7 @@ public final class PartialReloadService {
             tx.candidateGeneration(candidate);
             tx.event(Instant.now(), TransactionEventType.CANDIDATE_BUILT, candidate.generationId().toString());
             FunctionLibraryBridge.publishWithoutLoad(server.getFunctions(), candidateLibrary);
+            tx.mutationOccurred(true);
             activeGeneration = candidate;
             tx.event(Instant.now(), TransactionEventType.LIBRARY_SWAPPED, "library");
             tx.event(Instant.now(), TransactionEventType.LOAD_SUPPRESSED, "DO_NOT_RUN");
@@ -305,6 +313,7 @@ public final class PartialReloadService {
             stateMachine.transitionTo(PartialReloadState.VERIFYING);
             tx.event(Instant.now(), TransactionEventType.VERIFICATION_STARTED, "active manager");
             verify(server, candidate, artifact);
+            tx.verificationPassed(true);
             tx.event(Instant.now(), TransactionEventType.VERIFICATION_PASSED, "library/tick/load");
             promoteFunctionBaseline(artifact);
             tx.event(Instant.now(), TransactionEventType.BASELINE_PROMOTED, "functions");
@@ -334,7 +343,9 @@ public final class PartialReloadService {
         Set<ResourceLocation> load = manager.getTag(VanillaFunctionsProvider.LOAD_TAG).stream()
                 .map(CommandFunction::getId).collect(java.util.stream.Collectors.toUnmodifiableSet());
         return new FunctionGeneration(UUID.randomUUID(), Instant.now(),
-                latestScan == null ? new ResourceSnapshot(Instant.now(), Map.of()) : latestScan,
+                activeReference == null
+                        ? (latestScan == null ? new ResourceSnapshot(Instant.now(), Map.of()) : latestScan)
+                        : activeReference,
                 FunctionLibraryBridge.activeLibrary(manager), ids, tags, tick, load);
     }
 
@@ -351,6 +362,8 @@ public final class PartialReloadService {
         tx.event(Instant.now(), TransactionEventType.ROLLBACK_STARTED, "previous generation");
         if (tx.previousGeneration() == null) throw new IllegalStateException("FUNCTION_ROLLBACK_FAILED");
         FunctionLibraryBridge.publishWithoutLoad(server.getFunctions(), tx.previousGeneration().library());
+        tx.mutationOccurred(true);
+        tx.verificationPassed(true);
         activeGeneration = tx.previousGeneration();
         activeReference = tx.previousGeneration().snapshot();
         if (latestScan != null) lastChangeSet = ChangeDetector.diff(activeReference, latestScan);
