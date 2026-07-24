@@ -143,3 +143,16 @@ por `replaceLibrary`, suprime load novamente e verifica. Falha nessa restauraç�
 Atomicidade é garantida em relação ao manager vanilla e à server thread, não a
 referências privadas que mods terceiros tenham armazenado para `CommandFunction`.
 Essas integrações exigem contrato próprio.
+
+## Execução dedicada headless
+
+Em 24/07/2026, `runServer` foi iniciado por processo filho e alcançou
+`Done (8.152s)! For help, type "help"`. O wrapper Gradle/Forge em execução
+headless não encaminhou os comandos escritos em `stdin` ao console do
+`DedicatedServer`: `partialreload status` não produziu uma linha de comando no
+log e a sequência não pôde prosseguir. Não há evidência válida de apply/rollback
+interativos nessa instância. O GameTestServer continua sendo a evidência
+automatizada do commit e rollback reais. Os scripts
+`scripts/run-dedicated-function-acceptance.py` e
+`scripts/run-dedicated-function-acceptance.ps1` registram a tentativa e devem
+ser executados num terminal com stdin de console Forge disponível.
