@@ -32,14 +32,15 @@ Este repositório usa Spec-Driven Development (SDD). Leia `docs/specs/` e os ADR
 
 ## Fase atual
 
-A fase 3B implementa preparação conjunta e passiva de predicates, item
-modifiers e loot tables conforme `docs/specs/010-loot-data-prepare.md`.
-`VanillaLootDataProvider` reconstrói o grafo completo com parsers/registries
-reais, mas nunca publica o candidato no `LootDataManager`. GLM permanece num
-provider separado planejado conforme ADR-007. A preparação de functions da
-Spec 009 continua disponível.
+A fase 3A implementa commit transacional somente de functions vanilla conforme
+`docs/specs/011-functions-transactional-commit.md`. O bridge usa Access
+Transformer com nomes SRG exatos do Forge 47.4.10, publica apenas no safe point
+`ServerTickEvent.END` e aplica `DO_NOT_RUN` para load functions. Uma geração
+anterior é retida em memória para rollback único.
 
-`apply`, `reload` e `rollback` devem continuar falhando de modo explícito e
-seguro. Não exponha candidatos por API executável, não chame
-`ServerFunctionManager.replaceLibrary` e não escreva os maps privados do
-`LootDataManager` antes de specs de commit.
+A fase 3B continua somente preparação conjunta e passiva de predicates, item
+modifiers e loot tables; `VanillaLootDataProvider` nunca publica no
+`LootDataManager`. GLM permanece separado conforme ADR-007.
+
+`reload` e qualquer apply de loot devem falhar de modo explícito e seguro. Não
+escreva os maps privados do `LootDataManager`.

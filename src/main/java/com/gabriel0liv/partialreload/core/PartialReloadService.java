@@ -12,6 +12,14 @@ import com.gabriel0liv.partialreload.plan.ReloadPlanner;
 import com.gabriel0liv.partialreload.function.FunctionPreparationContext;
 import com.gabriel0liv.partialreload.function.PreparedFunctions;
 import com.gabriel0liv.partialreload.function.VanillaFunctionsProvider;
+import com.gabriel0liv.partialreload.function.FunctionCommitCompatibility;
+import com.gabriel0liv.partialreload.function.FunctionCommitPolicy;
+import com.gabriel0liv.partialreload.function.FunctionCommitResult;
+import com.gabriel0liv.partialreload.function.FunctionCommitTransaction;
+import com.gabriel0liv.partialreload.function.FunctionGeneration;
+import com.gabriel0liv.partialreload.function.FunctionLibraryBridge;
+import com.gabriel0liv.partialreload.function.FunctionTransactionStatus;
+import com.gabriel0liv.partialreload.function.TransactionEventType;
 import com.gabriel0liv.partialreload.loot.LootPreparationContext;
 import com.gabriel0liv.partialreload.loot.PreparedLootData;
 import com.gabriel0liv.partialreload.loot.VanillaLootDataProvider;
@@ -19,6 +27,13 @@ import com.gabriel0liv.partialreload.resource.ResourceSnapshot;
 
 import javax.annotation.Nullable;
 import java.util.Objects;
+import java.util.Map;
+import java.util.Set;
+import java.util.UUID;
+import java.time.Instant;
+import net.minecraft.commands.CommandFunction;
+import net.minecraft.resources.ResourceLocation;
+import net.minecraft.server.MinecraftServer;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.Executor;
@@ -42,6 +57,12 @@ public final class PartialReloadService {
     private String lastError;
     @Nullable
     private PreparedReloadArtifact preparedArtifact;
+    @Nullable
+    private FunctionCommitTransaction transaction;
+    @Nullable
+    private FunctionGeneration retainedGeneration;
+    @Nullable
+    private FunctionGeneration activeGeneration;
 
     public PartialReloadService(
             ProviderRegistry providerRegistry,
@@ -190,6 +211,166 @@ public final class PartialReloadService {
         return preparedArtifact;
     }
 
+    public synchronized FunctionCommitCompatibility functionCommitCompatibility(MinecraftServer server) {
+        return FunctionCommitCompatibility.inspect(server);
+    }
+
+    public synchronized FunctionCommitTransaction requestFunctionCommit(
+            MinecraftServer server, String requester) {
+        if (stateMachine.state() == PartialReloadState.DEGRADED) {
+            throw new IllegalStateException("FUNCTION_COMMIT_DEGRADED: restart is required");
+        }
+        if (transaction != null && transaction.status() != FunctionTransactionStatus.SUCCESS
+                && transaction.status() != FunctionTransactionStatus.ROLLED_BACK
+                && transaction.status() != FunctionTransactionStatus.FAILED_SAFE
+                && transaction.status() != FunctionTransactionStatus.DEGRADED) {
+            throw new IllegalStateException("FUNCTION_TRANSACTION_ALREADY_RUNNING");
+        }
+        if (!(preparedArtifact instanceof PreparedFunctions functions)) {
+            if (preparedArtifact instanceof PreparedLootData) {
+                throw new IllegalArgumentException("Commit is not implemented for loot data. Prepared artifact remains unchanged.");
+            }
+            throw new IllegalArgumentException("FUNCTION_PREPARATION_REQUIRED");
+        }
+        if (!functions.isApplicable()) throw new IllegalArgumentException("FUNCTION_PREPARATION_INVALID");
+        FunctionCommitCompatibility compatibility = FunctionCommitCompatibility.inspect(server);
+        if (!compatibility.compatible()) throw new IllegalStateException(
+                "FUNCTION_COMMIT_NOT_COMPATIBLE: " + compatibility.detail());
+        FunctionCommitTransaction next = new FunctionCommitTransaction(
+                UUID.randomUUID(), functions.preparationId(), Instant.now(), requester,
+                FunctionCommitPolicy.DO_NOT_RUN);
+        next.event(Instant.now(), TransactionEventType.REQUESTED, "apply prepared");
+        next.event(Instant.now(), TransactionEventType.VALIDATED, compatibility.detail());
+        next.status(FunctionTransactionStatus.QUIESCING);
+        next.event(Instant.now(), TransactionEventType.QUEUED, "server tick safe point");
+        transaction = next;
+        stateMachine.transitionTo(PartialReloadState.QUIESCING);
+        return next;
+    }
+
+    public synchronized FunctionCommitTransaction requestManualRollback(String requester) {
+        if (retainedGeneration == null) throw new IllegalStateException("FUNCTION_MANUAL_ROLLBACK_UNAVAILABLE");
+        if (transaction != null && transaction.status() == FunctionTransactionStatus.QUIESCING) {
+            throw new IllegalStateException("FUNCTION_TRANSACTION_ALREADY_RUNNING");
+        }
+        FunctionCommitTransaction next = new FunctionCommitTransaction(
+                UUID.randomUUID(), null, Instant.now(), requester, FunctionCommitPolicy.DO_NOT_RUN);
+        next.previousGeneration(retainedGeneration);
+        next.status(FunctionTransactionStatus.QUIESCING);
+        next.event(Instant.now(), TransactionEventType.REQUESTED, "manual rollback");
+        transaction = next;
+        stateMachine.transitionTo(PartialReloadState.QUIESCING);
+        return next;
+    }
+
+    public synchronized FunctionCommitTransaction transaction() { return transaction; }
+    public synchronized FunctionGeneration retainedGeneration() { return retainedGeneration; }
+
+    public synchronized void processFunctionSafePoint(MinecraftServer server) {
+        if (transaction == null || transaction.status() != FunctionTransactionStatus.QUIESCING) return;
+        FunctionCommitTransaction tx = transaction;
+        tx.status(FunctionTransactionStatus.COMMITTING);
+        stateMachine.transitionTo(PartialReloadState.COMMITTING);
+        tx.event(Instant.now(), TransactionEventType.SAFE_POINT_REACHED, "ServerTickEvent.END");
+        if (FunctionLibraryBridge.executionActive(server.getFunctions())) {
+            tx.status(FunctionTransactionStatus.FAILED_SAFE);
+            tx.event(Instant.now(), TransactionEventType.FAILED, "FUNCTION_APPLY_FROM_ACTIVE_CHAIN_REJECTED");
+            stateMachine.transitionTo(PartialReloadState.FAILED_SAFE);
+            return;
+        }
+        try {
+            if (tx.preparationId() == null) {
+                rollbackAtSafePoint(server, tx);
+                return;
+            }
+            PreparedFunctions artifact = preparedArtifact instanceof PreparedFunctions p ? p : null;
+            if (artifact == null || !artifact.preparationId().equals(tx.preparationId()))
+                throw new IllegalStateException("FUNCTION_PREPARATION_STALE");
+            FunctionGeneration previous = captureGeneration(server);
+            tx.previousGeneration(previous);
+            retainedGeneration = previous;
+            tx.event(Instant.now(), TransactionEventType.PREVIOUS_GENERATION_CAPTURED, previous.generationId().toString());
+            var candidateLibrary = FunctionLibraryBridge.buildCandidate(artifact);
+            FunctionGeneration candidate = new FunctionGeneration(UUID.randomUUID(), Instant.now(),
+                    artifact.sourceSnapshot(), candidateLibrary, artifact.functions().keySet(),
+                    artifact.functionTags(), artifact.tickFunctions(), artifact.loadFunctions());
+            tx.candidateGeneration(candidate);
+            tx.event(Instant.now(), TransactionEventType.CANDIDATE_BUILT, candidate.generationId().toString());
+            FunctionLibraryBridge.publishWithoutLoad(server.getFunctions(), candidateLibrary);
+            activeGeneration = candidate;
+            tx.event(Instant.now(), TransactionEventType.LIBRARY_SWAPPED, "library");
+            tx.event(Instant.now(), TransactionEventType.LOAD_SUPPRESSED, "DO_NOT_RUN");
+            tx.event(Instant.now(), TransactionEventType.TICK_SET_UPDATED, artifact.tickFunctions().toString());
+            tx.status(FunctionTransactionStatus.VERIFYING);
+            stateMachine.transitionTo(PartialReloadState.VERIFYING);
+            tx.event(Instant.now(), TransactionEventType.VERIFICATION_STARTED, "active manager");
+            verify(server, candidate, artifact);
+            tx.event(Instant.now(), TransactionEventType.VERIFICATION_PASSED, "library/tick/load");
+            promoteFunctionBaseline(artifact);
+            tx.event(Instant.now(), TransactionEventType.BASELINE_PROMOTED, "functions");
+            preparedArtifact = null;
+            tx.status(FunctionTransactionStatus.SUCCESS);
+            tx.event(Instant.now(), TransactionEventType.SUCCESS, "FUNCTION_COMMIT_SUCCEEDED");
+            stateMachine.transitionTo(PartialReloadState.SUCCESS);
+        } catch (RuntimeException failure) {
+            tx.event(Instant.now(), TransactionEventType.FAILED, failure.getMessage());
+            try { rollbackAtSafePoint(server, tx); }
+            catch (RuntimeException rollbackFailure) {
+                tx.status(FunctionTransactionStatus.DEGRADED);
+                tx.event(Instant.now(), TransactionEventType.DEGRADED, rollbackFailure.getMessage());
+                stateMachine.transitionTo(PartialReloadState.DEGRADED);
+            }
+        }
+    }
+
+    private FunctionGeneration captureGeneration(MinecraftServer server) {
+        var manager = server.getFunctions();
+        Map<ResourceLocation, Set<ResourceLocation>> tags = new java.util.LinkedHashMap<>();
+        manager.getTagNames().forEach(id -> tags.put(id, manager.getTag(id).stream()
+                .map(CommandFunction::getId).collect(java.util.stream.Collectors.toUnmodifiableSet())));
+        Set<ResourceLocation> ids = java.util.stream.StreamSupport.stream(manager.getFunctionNames().spliterator(), false)
+                .collect(java.util.stream.Collectors.toUnmodifiableSet());
+        Set<ResourceLocation> tick = Set.copyOf(FunctionLibraryBridge.ticking(manager));
+        Set<ResourceLocation> load = manager.getTag(VanillaFunctionsProvider.LOAD_TAG).stream()
+                .map(CommandFunction::getId).collect(java.util.stream.Collectors.toUnmodifiableSet());
+        return new FunctionGeneration(UUID.randomUUID(), Instant.now(),
+                latestScan == null ? new ResourceSnapshot(Instant.now(), Map.of()) : latestScan,
+                FunctionLibraryBridge.activeLibrary(manager), ids, tags, tick, load);
+    }
+
+    private void verify(MinecraftServer server, FunctionGeneration candidate, PreparedFunctions artifact) {
+        var manager = server.getFunctions();
+        if (FunctionLibraryBridge.activeLibrary(manager) != candidate.library()
+                || FunctionLibraryBridge.loadPending(manager)
+                || !Set.copyOf(FunctionLibraryBridge.ticking(manager)).equals(artifact.tickFunctions())) {
+            throw new IllegalStateException("FUNCTION_VERIFICATION_FAILED");
+        }
+    }
+
+    private void rollbackAtSafePoint(MinecraftServer server, FunctionCommitTransaction tx) {
+        tx.event(Instant.now(), TransactionEventType.ROLLBACK_STARTED, "previous generation");
+        if (tx.previousGeneration() == null) throw new IllegalStateException("FUNCTION_ROLLBACK_FAILED");
+        FunctionLibraryBridge.publishWithoutLoad(server.getFunctions(), tx.previousGeneration().library());
+        activeGeneration = tx.previousGeneration();
+        activeReference = tx.previousGeneration().snapshot();
+        if (latestScan != null) lastChangeSet = ChangeDetector.diff(activeReference, latestScan);
+        retainedGeneration = null;
+        tx.status(FunctionTransactionStatus.ROLLED_BACK);
+        tx.event(Instant.now(), TransactionEventType.ROLLBACK_COMPLETED, "FUNCTION_ROLLBACK_SUCCEEDED");
+        stateMachine.transitionTo(PartialReloadState.ROLLED_BACK);
+    }
+
+    private void promoteFunctionBaseline(PreparedFunctions artifact) {
+        if (activeReference == null) return;
+        Map<ResourceLocation, com.gabriel0liv.partialreload.resource.ResourceDescriptor> merged = new java.util.LinkedHashMap<>(activeReference.resources());
+        merged.entrySet().removeIf(entry -> entry.getValue().category() == ReloadCategory.FUNCTIONS);
+        artifact.sourceSnapshot().resources().forEach((id, descriptor) -> {
+            if (descriptor.category() == ReloadCategory.FUNCTIONS) merged.put(id, descriptor);
+        });
+        activeReference = new ResourceSnapshot(Instant.now(), merged);
+        if (latestScan != null) lastChangeSet = ChangeDetector.diff(activeReference, latestScan);
+    }
+
     public synchronized boolean discardPrepared() {
         PartialReloadState state = stateMachine.state();
         if (state == PartialReloadState.PREPARING || state == PartialReloadState.VALIDATING) {
@@ -197,8 +378,11 @@ public final class PartialReloadService {
         }
         boolean existed = preparedArtifact != null;
         preparedArtifact = null;
-        if (state == PartialReloadState.READY || state == PartialReloadState.FAILED_SAFE) {
+        if (state == PartialReloadState.READY || state == PartialReloadState.FAILED_SAFE
+                || state == PartialReloadState.SUCCESS || state == PartialReloadState.ROLLED_BACK) {
             stateMachine.transitionTo(PartialReloadState.IDLE);
+        } else if (state == PartialReloadState.DEGRADED) {
+            throw new IllegalStateException("FUNCTION_COMMIT_DEGRADED: restart is required");
         }
         return existed;
     }
@@ -249,7 +433,8 @@ public final class PartialReloadService {
 
     private void resetTerminalState() {
         PartialReloadState state = stateMachine.state();
-        if (state == PartialReloadState.READY || state == PartialReloadState.FAILED_SAFE) {
+        if (state == PartialReloadState.READY || state == PartialReloadState.FAILED_SAFE
+                || state == PartialReloadState.SUCCESS || state == PartialReloadState.ROLLED_BACK) {
             stateMachine.transitionTo(PartialReloadState.IDLE);
         } else if (state == PartialReloadState.PREPARING
                 || state == PartialReloadState.VALIDATING) {

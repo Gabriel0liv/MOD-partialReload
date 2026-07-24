@@ -30,9 +30,21 @@ public record FunctionCommitCompatibility(
                                 + minecraft + "/" + forge
                 );
             }
+            var manager = server.getFunctions();
+            if (manager.library == null
+                    || manager.getDispatcher() != server.getCommands().getDispatcher()
+                    || manager.ticking == null) {
+                return new FunctionCommitCompatibility(
+                        FunctionCommitCompatibilityStatus.FUNCTION_COMMIT_DISABLED_UNVERIFIED,
+                        "Function manager bridge fields or dispatcher could not be verified");
+            }
+            // Constructing an empty candidate validates the constructor/dispatcher contract
+            // without publishing or mutating the active manager.
+            new net.minecraft.server.ServerFunctionLibrary(
+                    server.getFunctionCompilationLevel(), manager.getDispatcher());
             return new FunctionCommitCompatibility(
-                    FunctionCommitCompatibilityStatus.FUNCTION_COMMIT_DISABLED_UNVERIFIED,
-                    "Function manager access is intentionally unavailable during read-only preparation"
+                    FunctionCommitCompatibilityStatus.FUNCTION_COMMIT_COMPATIBLE,
+                    "Forge 47.4.10 function manager bridge verified"
             );
         } catch (LinkageError | RuntimeException exception) {
             return new FunctionCommitCompatibility(

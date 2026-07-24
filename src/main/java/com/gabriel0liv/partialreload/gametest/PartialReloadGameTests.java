@@ -36,6 +36,7 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.stream.Collectors;
 import java.util.stream.StreamSupport;
+import com.gabriel0liv.partialreload.function.FunctionTransactionStatus;
 
 @GameTestHolder(PartialReloadMod.MOD_ID)
 @PrefixGameTestTemplate(false)
@@ -176,16 +177,30 @@ public final class PartialReloadGameTests {
                     "A load function was executed during preparation"
             );
 
-            int preparedResult = server.getCommands().performPrefixedCommand(
-                    server.createCommandSourceStack(),
-                    "partialreload prepared"
-            );
-            helper.assertTrue(preparedResult == 1, "/partialreload prepared should succeed");
-            int discardResult = server.getCommands().performPrefixedCommand(
-                    server.createCommandSourceStack(),
-                    "partialreload discard"
-            );
-            helper.assertTrue(discardResult == 1, "/partialreload discard should succeed");
+            // The first real commit is queued, then executed by the END tick safe point.
+            if (mod.service().transaction() == null) {
+                helper.assertTrue(server.getCommands().performPrefixedCommand(
+                        server.createCommandSourceStack(), "partialreload apply prepared") == 1,
+                        "apply prepared should queue a function transaction");
+                return;
+            }
+            helper.assertTrue(mod.service().transaction().status() == FunctionTransactionStatus.SUCCESS,
+                    "function transaction did not complete successfully");
+            helper.assertTrue(server.getFunctions().get(
+                    ResourceLocation.parse("partialreload:gametest/valid")).orElseThrow() != activeFixture,
+                    "commit did not publish the candidate library");
+            helper.assertTrue(!com.gabriel0liv.partialreload.function.FunctionLibraryBridge
+                    .loadPending(server.getFunctions()), "commit left load pending");
+            helper.assertTrue(server.getCommands().performPrefixedCommand(
+                    server.createCommandSourceStack(), "partialreload rollback functions") == 1,
+                    "manual rollback should queue");
+            if (mod.service().transaction().status() != FunctionTransactionStatus.ROLLED_BACK) return;
+            helper.assertTrue(server.getFunctions().get(
+                    ResourceLocation.parse("partialreload:gametest/valid")).orElseThrow() == activeFixture,
+                    "rollback did not restore the previous library");
+
+            helper.assertTrue(mod.service().preparedArtifact() == null,
+                    "successful commit must consume the prepared artifact");
         });
     }
 

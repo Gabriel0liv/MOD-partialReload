@@ -74,15 +74,27 @@ public final class PartialReloadCommand {
                         .executes(context -> prepared(context.getSource(), service)))
                 .then(Commands.literal("discard")
                         .executes(context -> discard(context.getSource(), service)))
-                .then(unsupported("apply"))
+                .then(Commands.literal("apply")
+                        .then(Commands.literal("prepared")
+                                .executes(context -> applyPrepared(context.getSource(), service))))
+                .then(Commands.literal("transaction")
+                        .executes(context -> transaction(context.getSource(), service)))
+                .then(Commands.literal("rollback")
+                        .then(Commands.literal("functions")
+                                .executes(context -> rollbackFunctions(context.getSource(), service))))
+                .then(Commands.literal("active")
+                        .then(Commands.literal("functions")
+                                .executes(context -> activeFunctions(context.getSource()))))
                 .then(unsupported("reload"))
-                .then(unsupported("rollback")));
+                );
     }
 
     private static int status(CommandSourceStack source, PartialReloadService service) {
         PartialReloadStatus status = service.status();
         source.sendSuccess(() -> Component.literal("Partial Reload " + PartialReloadMod.VERSION), false);
-        source.sendSuccess(() -> Component.literal("Mode: PREPARE_ONLY"), false);
+        String mode = service.functionCommitCompatibility(source.getServer()).compatible()
+                ? "FUNCTION_COMMIT_SUPPORTED" : "PREPARE_ONLY";
+        source.sendSuccess(() -> Component.literal("Mode: " + mode), false);
         source.sendSuccess(() -> Component.literal("State: " + status.state()), false);
         source.sendSuccess(() -> Component.literal(
                 "Providers: " + status.registeredProviders() + " compatible, "
@@ -92,7 +104,7 @@ public final class PartialReloadCommand {
                 "Last scan: " + (status.lastScanAt() == null ? "never" : status.lastScanAt())
         ), false);
         source.sendSuccess(() -> Component.literal("Changed resources: " + status.changedResources()), false);
-        source.sendSuccess(() -> Component.literal("Apply support: not implemented"), false);
+        source.sendSuccess(() -> Component.literal("Loot data commit: not implemented"), false);
         source.sendSuccess(() -> Component.literal(
                 "Prepared artifact: " + (status.preparedId() == null
                         ? "none"
@@ -421,7 +433,10 @@ public final class PartialReloadCommand {
                 ));
             }
         });
-        source.sendFailure(Component.literal("Commit support: not implemented"));
+        boolean compatible = com.gabriel0liv.partialreload.function.FunctionCommitCompatibility
+                .inspect(source.getServer()).compatible();
+        source.sendSuccess(() -> Component.literal("Commit support: "
+                + (compatible ? "functions supported" : "not compatible")), false);
         source.sendSuccess(() -> Component.literal("Active function manager: unchanged"), false);
         return 1;
     }
@@ -502,6 +517,65 @@ public final class PartialReloadCommand {
             source.sendFailure(Component.literal("Discard rejected: " + exception.getMessage()));
             return 0;
         }
+    }
+
+    private static int applyPrepared(CommandSourceStack source, PartialReloadService service) {
+        try {
+            var tx = service.requestFunctionCommit(source.getServer(), source.getTextName());
+            source.sendSuccess(() -> Component.literal(
+                    "Function transaction " + tx.transactionId() + " queued for the next safe point."), false);
+            return 1;
+        } catch (RuntimeException exception) {
+            source.sendFailure(Component.literal(exception.getMessage()));
+            return 0;
+        }
+    }
+
+    private static int transaction(CommandSourceStack source, PartialReloadService service) {
+        var tx = service.transaction();
+        if (tx == null) {
+            source.sendFailure(Component.literal("No function transaction recorded."));
+            return 0;
+        }
+        source.sendSuccess(() -> Component.literal("Transaction: " + tx.transactionId()), false);
+        source.sendSuccess(() -> Component.literal("Preparation: " + tx.preparationId()), false);
+        source.sendSuccess(() -> Component.literal("Status: " + tx.status()), false);
+        source.sendSuccess(() -> Component.literal("Load policy: " + tx.policy()), false);
+        source.sendSuccess(() -> Component.literal(
+                "Mutation occurred: " + (tx.candidateGeneration() != null)), false);
+        source.sendSuccess(() -> Component.literal("Verification: " +
+                (tx.status() == com.gabriel0liv.partialreload.function.FunctionTransactionStatus.SUCCESS)), false);
+        source.sendSuccess(() -> Component.literal(
+                "Rollback retained: " + (service.retainedGeneration() != null)), false);
+        return 1;
+    }
+
+    private static int rollbackFunctions(CommandSourceStack source, PartialReloadService service) {
+        try {
+            var tx = service.requestManualRollback(source.getTextName());
+            source.sendSuccess(() -> Component.literal(
+                    "Rollback transaction " + tx.transactionId() + " queued for the next safe point."), false);
+            return 1;
+        } catch (RuntimeException exception) {
+            source.sendFailure(Component.literal(exception.getMessage()));
+            return 0;
+        }
+    }
+
+    private static int activeFunctions(CommandSourceStack source) {
+        var manager = source.getServer().getFunctions();
+        long functions = java.util.stream.StreamSupport.stream(
+                manager.getFunctionNames().spliterator(), false).count();
+        long tags = java.util.stream.StreamSupport.stream(
+                manager.getTagNames().spliterator(), false).count();
+        source.sendSuccess(() -> Component.literal("Active functions: " + functions), false);
+        source.sendSuccess(() -> Component.literal("Active tags: " + tags), false);
+        source.sendSuccess(() -> Component.literal(
+                "Tick functions: " + com.gabriel0liv.partialreload.function.FunctionLibraryBridge
+                        .ticking(manager).size()), false);
+        source.sendSuccess(() -> Component.literal("Load pending: " +
+                com.gabriel0liv.partialreload.function.FunctionLibraryBridge.loadPending(manager)), false);
+        return 1;
     }
 
     private static com.mojang.brigadier.builder.LiteralArgumentBuilder<CommandSourceStack> unsupported(String name) {

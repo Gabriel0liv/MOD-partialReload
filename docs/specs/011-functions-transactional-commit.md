@@ -134,3 +134,11 @@ Evolui 001, 004, 006, 007 e 009; preserva 010 PREPARE_ONLY; implementa
 ADR-008–011 e mantém ADR-002/003. Plano:
 `docs/plans/phase-three-a-tasks.md`.
 
+## Implementação verificada nesta revisão
+
+O escopo aprovado foi implementado para functions vanilla: o Access
+Transformer usa os nomes SRG exatos, `FunctionLibraryBridge` constrói e publica
+uma candidata no `ServerTickEvent.END` de prioridade LOWEST, a política efetiva
+é `DO_NOT_RUN`, e uma única geração anterior é retida para rollback. Loot data
+continua sem publisher. GameTests exercitam apply, troca de library e rollback;
+qualquer extensão além desses limites exige nova revisão desta spec.

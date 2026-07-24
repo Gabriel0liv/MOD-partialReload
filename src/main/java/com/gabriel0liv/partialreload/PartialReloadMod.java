@@ -12,6 +12,8 @@ import com.gabriel0liv.partialreload.loot.VanillaLootDataProvider;
 import com.mojang.logging.LogUtils;
 import net.minecraftforge.common.MinecraftForge;
 import net.minecraftforge.event.RegisterCommandsEvent;
+import net.minecraftforge.event.TickEvent;
+import net.minecraftforge.eventbus.api.EventPriority;
 import net.minecraftforge.fml.ModLoadingContext;
 import net.minecraftforge.fml.common.Mod;
 import net.minecraftforge.fml.config.ModConfig;
@@ -50,10 +52,17 @@ public final class PartialReloadMod {
         );
 
         MinecraftForge.EVENT_BUS.addListener(this::registerCommands);
+        MinecraftForge.EVENT_BUS.addListener(EventPriority.LOWEST, this::serverTick);
     }
 
     private void registerCommands(RegisterCommandsEvent event) {
         PartialReloadCommand.register(event.getDispatcher(), service);
+    }
+
+    private void serverTick(TickEvent.ServerTickEvent event) {
+        if (event.phase == TickEvent.Phase.END) {
+            service.processFunctionSafePoint(event.getServer());
+        }
     }
 
     public PartialReloadService service() {

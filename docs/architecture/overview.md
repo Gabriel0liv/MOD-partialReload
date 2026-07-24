@@ -49,7 +49,8 @@ capturado e os IDs ativos de tick/load; nenhum manager é retido ou substituído
 4. primeiro resultado estabelece `activeReference`; todo resultado atualiza `latestScan`;
 5. diff é sempre `activeReference` versus `latestScan`;
 6. planning agrega contribuições conservadoras e entra READY;
-7. nenhuma API de commit é exposta.
+7. functions aplicáveis podem ser enfileiradas para commit no END do tick;
+   loot data nunca é publicada.
 
 ## Extensão futura
 
@@ -84,3 +85,14 @@ O baseline do delta é `activeReference`, estabelecido pela primeira captura
 read-only conhecida enquanto nenhum commit existe. Sem baseline anterior, a
 captura corrente é tratada como referência ativa e o delta inicial é zero; ela
 não é promovida por uma preparação.
+
+## Commit transacional de functions
+
+`apply prepared` valida a compatibilidade, cria uma transação e entra em
+QUIESCING. O listener `ServerTickEvent.END` em prioridade LOWEST confirma que
+não há `ExecutionContext`, captura a geração anterior, constrói maps
+independentes de `ServerFunctionLibrary`, chama `replaceLibrary`, desativa
+`postReload` imediatamente e verifica library/tick/load. O sucesso promove
+somente os descritores de functions e consome o artefato. Falhas após a troca
+publicam a geração retida e restauram o baseline; uma falha nessa restauração
+entra em DEGRADED. A política de load implementada é sempre `DO_NOT_RUN`.

@@ -29,11 +29,15 @@ scan/plan concorrente com prepare. A implementação usa sincronização curta a
 nunca mantém lock durante IO ou compilação. Completion sempre sai de PREPARING
 para VALIDATING/READY ou FAILED_SAFE.
 
-## Futuro
+## Commit de functions
 
-Quiesce/commit/sync e eventual troca de referências ocorrerão na server thread.
-Essa divisão ainda precisa de operation ID/cancellation e barreira contra
-`ExecutionContext` ativo antes de qualquer commit.
+O comando apenas cria a transação. `ServerTickEvent.END`, prioridade LOWEST,
+executa quiesce, troca da library, supressão de load, atualização de tick e
+verificação na server thread, sem espera ativa. O bridge recusa a operação se
+`ExecutionContext` estiver ativo. A geração anterior é retida em memória para
+rollback no mesmo safe point.
+
+Sincronização e commit de outras categorias permanecem futuros.
 
 Para loot, commit futuro também precisa de barreira contra criação/uso de
 `LootContext`, consultas de containers/entidades e interação atômica com o

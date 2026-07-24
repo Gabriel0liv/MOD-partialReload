@@ -3,7 +3,8 @@
 Framework estritamente server-side para reloads parciais seguros, categorizados
 e transacionais em servidores Forge 1.20.1.
 
-Versão atual: `0.1.0-SNAPSHOT` — modo `PREPARE_ONLY`.
+Versão atual: `0.1.0-SNAPSHOT` — commit de functions vanilla suportado no alvo
+exato Forge 47.4.10.
 
 ## Implementado
 
@@ -18,14 +19,14 @@ Versão atual: `0.1.0-SNAPSHOT` — modo `PREPARE_ONLY`.
 - preparação conjunta de predicates, item modifiers e loot tables;
 - parsers/registries reais, resolver candidato e validator do `LootDataManager`;
 - stack de datapacks, grafo de loot, deltas e restauração de pack inferior.
+- commit transacional de functions vanilla em safe point da server thread;
+- supressão `DO_NOT_RUN` de load functions, verificação e rollback em memória.
 
 ## Não implementado
 
-- commit ou troca do manager/library ativo;
-- execução de functions preparadas ou de load;
-- alteração da lista ativa de tick;
-- sincronização;
-- rollback;
+- commit de loot/predicates/item modifiers;
+- políticas de load diferentes de `DO_NOT_RUN`;
+- rollback após restart ou histórico de gerações;
 - Global Loot Modifiers (provider separado, planejado);
 - integrações KubeJS, Origins e Silent Gear.
 
@@ -52,9 +53,14 @@ Requerem nível de operador configurável (padrão 4):
 /partialreload prepare loot
 /partialreload prepared
 /partialreload discard
+/partialreload apply prepared
+/partialreload transaction
+/partialreload rollback functions
+/partialreload active functions
 ```
 
-`apply`, `reload` e `rollback` recusam a operação sem executar fallback.
+`reload` continua bloqueado. `apply prepared` aceita somente
+`PreparedFunctions`; candidatos de loot continuam rejeitados.
 
 ## Desenvolvimento
 

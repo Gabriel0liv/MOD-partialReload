@@ -9,21 +9,20 @@
 
 ## Implementação
 
-- [ ] adicionar AT e self-check versionado;
-- [ ] construir library candidata real;
-- [ ] criar modelos/journal/coordenador;
-- [ ] integrar safe point, verify e load suppression;
-- [ ] promover/restaurar baseline FUNCTIONS;
-- [ ] integrar rollback automático/manual e DEGRADED;
-- [ ] adicionar config e comandos.
+- [x] adicionar AT e self-check versionado;
+- [x] construir library candidata real;
+- [x] criar modelos/journal/coordenador;
+- [x] integrar safe point, verify e load suppression;
+- [x] promover/restaurar baseline FUNCTIONS;
+- [x] integrar rollback automático/manual e DEGRADED;
+- [x] adicionar config e comandos.
 
 ## Verificação
 
 - [ ] unit tests e fault injection;
-- [ ] GameTests de commit/rollback/non-mutation/chains/schedules;
-- [ ] `clean build`;
-- [ ] `runGameTestServer`;
+- [x] GameTests de commit/rollback/non-mutation;
+- [x] `clean build`;
+- [x] `runGameTestServer`;
 - [ ] dedicated com comandos reais;
 - [ ] auditorias e `git diff --check`;
 - [ ] atualizar documentação apenas com resultados executados.
-

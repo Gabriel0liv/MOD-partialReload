@@ -41,7 +41,20 @@ public final class PartialReloadStateMachine {
                 PartialReloadState.READY,
                 PartialReloadState.FAILED_SAFE
         ));
-        map.put(PartialReloadState.READY, EnumSet.of(PartialReloadState.IDLE));
+        map.put(PartialReloadState.READY, EnumSet.of(
+                PartialReloadState.IDLE, PartialReloadState.QUIESCING));
+        map.put(PartialReloadState.QUIESCING, EnumSet.of(
+                PartialReloadState.COMMITTING, PartialReloadState.FAILED_SAFE));
+        map.put(PartialReloadState.COMMITTING, EnumSet.of(
+                PartialReloadState.VERIFYING, PartialReloadState.ROLLED_BACK,
+                PartialReloadState.DEGRADED, PartialReloadState.FAILED_SAFE));
+        map.put(PartialReloadState.VERIFYING, EnumSet.of(
+                PartialReloadState.SUCCESS, PartialReloadState.ROLLED_BACK,
+                PartialReloadState.DEGRADED));
+        map.put(PartialReloadState.SUCCESS, EnumSet.of(PartialReloadState.IDLE,
+                PartialReloadState.QUIESCING));
+        map.put(PartialReloadState.ROLLED_BACK, EnumSet.of(PartialReloadState.IDLE));
+        map.put(PartialReloadState.DEGRADED, EnumSet.of(PartialReloadState.IDLE));
         map.put(PartialReloadState.FAILED_SAFE, EnumSet.of(PartialReloadState.IDLE));
         return Map.copyOf(map);
     }

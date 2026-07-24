@@ -24,12 +24,11 @@ IDLE SCANNING PLANNING PREPARING VALIDATING READY QUIESCING COMMITTING
 SYNCHRONIZING VERIFYING SUCCESS ROLLED_BACK FAILED_SAFE DEGRADED
 ```
 
-Na fase 3B, PREPARING e VALIDATING são compartilhados globalmente pelas
-preparações de functions e loot data. QUIESCING,
-COMMITTING, SYNCHRONIZING, VERIFYING, SUCCESS, ROLLED_BACK e DEGRADED continuam
-apenas documentados.
+Na fase 3A, functions podem percorrer QUIESCING → COMMITTING → VERIFYING →
+SUCCESS, ou ROLLED_BACK/DEGRADED em falha. Loot data continua limitado a
+PREPARING/VALIDATING/READY.
 
-Transições permitidas da fase 1:
+Transições permitidas:
 
 - IDLE → SCANNING;
 - SCANNING → IDLE ou FAILED_SAFE;
@@ -38,12 +37,18 @@ Transições permitidas da fase 1:
 - IDLE → PREPARING;
 - PREPARING → VALIDATING ou FAILED_SAFE;
 - VALIDATING → READY ou FAILED_SAFE;
-- READY → IDLE;
+- READY → IDLE ou QUIESCING;
+- QUIESCING → COMMITTING ou FAILED_SAFE;
+- COMMITTING → VERIFYING, ROLLED_BACK ou DEGRADED;
+- VERIFYING → SUCCESS, ROLLED_BACK ou DEGRADED;
+- SUCCESS → IDLE ou QUIESCING;
+- ROLLED_BACK → IDLE;
+- DEGRADED → IDLE somente após reinício;
 - FAILED_SAFE → IDLE.
 
 Qualquer outra transição lança erro. Conteúdo inválido produz artefato não
-aplicável em READY; falha de infraestrutura/timeout produz FAILED_SAFE. Como
-nenhum estado de gameplay é alterado, DEGRADED não é usado.
+aplicável em READY; falha de infraestrutura/timeout produz FAILED_SAFE.
+DEGRADED bloqueia operações mutáveis e exige reinício.
 
 Um novo prepare descarta explicitamente o artefato anterior antes de entrar em
 PREPARING. Uma tentativa concorrente, inclusive functions contra loot, é

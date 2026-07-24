@@ -1,7 +1,51 @@
 # Investigação — commit transacional de functions
 
+## Auditoria de implementação (HEAD 89aa7b0)
+
+Esta investigação descreve o alvo técnico aprovado; ela não deve ser lida como
+evidência de que o commit já está habilitado. A auditoria do worktree no HEAD
+`89aa7b0` encontrou o projeto ainda em `PREPARE_ONLY`:
+
+- `FunctionLibraryBridge` mantém todos os seis pontos de acesso como stubs que
+  lançam `UnsupportedOperationException`;
+- `FunctionCommitCompatibility.inspect` retorna sempre
+  `FUNCTION_COMMIT_DISABLED_UNVERIFIED` para o alvo correto;
+- `PartialReloadService` não possui coordenador/janela de safe point, captura
+  de geração ou promoção de baseline;
+- `PartialReloadStateMachine` ainda não autoriza `QUIESCING`, `COMMITTING`,
+  `VERIFYING`, `SUCCESS`, `ROLLED_BACK` ou `DEGRADED`;
+- `PartialReloadCommand` registra `apply`, `reload` e `rollback` como recusas
+  genéricas; não há comandos `transaction`, `active functions` ou rollback de
+  functions;
+- o Access Transformer está presente em `src/main/resources` e o `minecraft`
+  block declara `accessTransformer = file('src/main/resources/META-INF/accesstransformer.cfg')`;
+  a verificação do artefato `build/libs/partialreload-0.1.0-SNAPSHOT.jar`
+  encontrou `META-INF/accesstransformer.cfg`.
+
+Consequentemente, as seções abaixo são contrato e evidência de pesquisa para a
+Fase 3A, não critérios de conclusão. A implementação só poderá declarar
+`FUNCTION_TRANSACTIONAL_COMMIT_IMPLEMENTED` depois que bridge, safe point,
+verificação, rollback e testes de mutação real forem executados no alvo exato.
+
 Alvo comprovado: Minecraft 1.20.1, mappings oficiais e Forge 47.4.10. Fonte
 primária: `forge-1.20.1-47.4.10_mapped_official_1.20.1-sources.jar`.
+
+## Verificação dos nomes e descritores
+
+O arquivo gerado `build/createSrgToMcp/output.srg` foi consultado para evitar
+confundir nomes oficiais com nomes SRG. Ele confirma os campos usados pelo
+bridge: `ServerFunctionManager.library`, `context`, `ticking` e `postReload`,
+além da classe aninhada `ServerFunctionManager$ExecutionContext`; e
+`ServerFunctionLibrary.functions` e `tags`. Os descritores públicos relevantes
+são `ServerFunctionManager.replaceLibrary(ServerFunctionLibrary)V`, o construtor
+`ServerFunctionLibrary(int, CommandDispatcher)` e
+`ServerFunctionLibrary.getFunctions()Ljava/util/Map;`.
+
+O AT deliberadamente não transforma `tagsLoader`, `dispatcher` ou constantes:
+eles não são escritos/observados pelo bridge. Não há wildcard nem descriptor de
+cliente. A propriedade ForgeGradle 6 `accessTransformer` é necessária para o
+ambiente de desenvolvimento; em produção o loader procura o caminho exato
+`META-INF/accesstransformer.cfg`, que é preservado pelo `processResources`/JAR.
 
 ## Estado ativo e publicação
 
@@ -99,4 +143,3 @@ por `replaceLibrary`, suprime load novamente e verifica. Falha nessa restauraç�
 Atomicidade é garantida em relação ao manager vanilla e à server thread, não a
 referências privadas que mods terceiros tenham armazenado para `CommandFunction`.
 Essas integrações exigem contrato próprio.
-
