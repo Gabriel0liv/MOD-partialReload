@@ -5,6 +5,9 @@
 Análise do source mapeado oficial Forge/Minecraft
 `1.20.1-47.4.10`.
 
+As assinaturas públicas foram conferidas também no índice [mappings.dev 1.20.1
+— LootDataManager](https://mappings.dev/1.20.1/net/minecraft/world/level/storage/loot/LootDataManager.html).
+
 ## Loader e armazenamento
 
 Predicates não possuem manager independente. `LootDataManager` prepara em uma
@@ -21,6 +24,18 @@ Todos são publicados no único map privado `elements`, indexado por
 `Deserializers.createConditionSerializer()` e aceita objeto único ou array
 composto. Serializers adicionais registrados por Forge/mods fazem parte desse
 Gson.
+
+### Fluxo de métodos observado
+
+No source mapeado, `LootDataManager` implementa o listener de reload e o método
+`reload(PreparationBarrier, ResourceManager, ProfilerFiller, ProfilerFiller,
+Executor, Executor)` constrói mapas temporários por `LootDataType`. A fase de
+aplicação chama `apply(Map<LootDataId<?>, ?>, ...)`, cria `LootDataResolver` e
+`ValidationContext`, valida cada elemento e somente então atribui os campos
+`elements` e `typeKeys` da instância ativa. `LootDataType.PREDICATE` fornece o
+parser/validador de `LootItemCondition`; `LootDataType.MODIFIER` e `TABLE`
+usam os serializers correspondentes no mesmo ciclo. Assim, não existe método
+vanilla que carregue predicates em um manager independente.
 
 ## Validação e referências
 
@@ -48,9 +63,14 @@ equivalente ao grafo validado pelo reload normal. Uma preparação confiável de
 reconstruir conjuntamente predicates, item modifiers e loot tables, incluindo
 serializers Forge/modded e validação cruzada.
 
-Na fase 2:
+Na fase 3B (Spec 010):
 
 - predicates continuam detectados e planejados;
-- preparação retorna blocker `PREDICATES_COUPLED_TO_LOOT`;
-- não existe `PreparedPredicates`;
-- o roadmap move a preparação para a futura fase conjunta de loot.
+- a preparação conjunta reconstrói predicates, item modifiers e loot tables no
+  candidato, usando o resolver e serializers reais;
+- não existe `PreparedPredicates` independente: predicates aparecem como parte
+  de `PreparedLootData`;
+- nenhum elemento do `LootDataManager` ativo é substituído.
+
+Essa decisão não aprova commit. A publicação do candidato exige uma spec futura
+que trate barreiras de thread, sincronização e rollback do manager ativo.

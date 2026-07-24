@@ -15,6 +15,12 @@ ProviderRegistry
             |---- FunctionCompiler (dispatcher real)
             |---- FunctionTagResolver
             +---- FunctionDependencyGraph -> PreparedFunctions
+   |
+   +---- VanillaLootDataProvider (predicates + item_modifiers + loot)
+            |---- LootResourceLoader (winners + stacks + SHA-256)
+            |---- parsers Forge/vanilla + candidate LootDataResolver
+            |---- ValidationContext / LootDataType validators
+            +---- LootDependencyGraph + LootDataDelta -> PreparedLootData
 ```
 
 ## Fronteiras
@@ -24,6 +30,8 @@ ProviderRegistry
 - `change`: diff puro;
 - `plan`: agregação read-only e blockers;
 - `function`: captura, compilação, tags, grafo e candidato passivo;
+- `loot`: captura conjunta, parsers, resolver, validator, grafo, delta e
+  candidato passivo;
 - `validation`: issues/reports estruturados;
 - `core`: registry, estado e orquestração;
 - `command`: adaptação Brigadier;
@@ -59,3 +67,20 @@ Providers futuros poderão adicionar contratos `PreparedReload`, quiesce, commit
 6. na server thread o serviço entra VALIDATING e publica somente o artefato
    imutável em READY;
 7. o `ServerFunctionManager` ativo nunca recebe o candidato.
+
+## Fluxo de preparação de loot data
+
+1. a categoria solicitada é preservada e o provider expande internamente para
+   predicates, item modifiers e loot;
+2. o worker captura vencedores e stacks completas, bytes, pack e fingerprints;
+3. parsers reais constroem maps temporários dos três tipos;
+4. um `LootDataResolver` candidato e `ValidationContext` validam o grafo inteiro;
+5. grafo, delta e diagnósticos de GLM/loaders externos são agregados;
+6. uma segunda captura bloqueia TOCTOU;
+7. a server thread publica apenas `PreparedLootData` em READY;
+8. o `LootDataManager` ativo e seus elementos nunca recebem o candidato.
+
+O baseline do delta é `activeReference`, estabelecido pela primeira captura
+read-only conhecida enquanto nenhum commit existe. Sem baseline anterior, a
+captura corrente é tratada como referência ativa e o delta inicial é zero; ela
+não é promovida por uma preparação.

@@ -10,23 +10,58 @@
 
 ## Implementação
 
-- [ ] criar modelo imutável `PreparedLootData` e wrappers opacos;
-- [ ] implementar tipos, snapshot/delta e stack de packs;
-- [ ] implementar grafo de dependências;
-- [ ] implementar parser/resolver/validator conjunto;
-- [ ] implementar `VanillaLootDataProvider`;
-- [ ] integrar lifecycle, exclusão, TOCTOU, timeout e limites;
-- [ ] integrar planner e comandos;
-- [ ] reportar GLM e loaders externos.
+- [x] criar modelo imutável `PreparedLootData` e wrappers opacos;
+- [x] implementar tipos, snapshot/delta e stack de packs;
+- [x] implementar grafo de dependências;
+- [x] implementar parser/resolver/validator conjunto;
+- [x] implementar `VanillaLootDataProvider`;
+- [x] integrar lifecycle, exclusão, TOCTOU, timeout e limites;
+- [x] integrar planner e comandos;
+- [x] reportar GLM e loaders externos.
 
 ## Verificação
 
-- [ ] testes unitários do domínio/provider;
-- [ ] fixtures dos três tipos e cenários inválidos;
-- [ ] GameTests de preparação e não mutação;
-- [ ] `.\gradlew.bat clean build`;
-- [ ] `.\gradlew.bat runGameTestServer`;
-- [ ] `.\gradlew.bat runServer` e comandos dedicados;
-- [ ] auditoria por `reloadResources`, `/reload`, cliente, Mixin, AT e reflection;
-- [ ] atualizar README, AGENTS, arquitetura e matriz com resultados reais.
+- [x] testes unitários do domínio/provider;
+- [x] fixtures dos três tipos e cenários inválidos;
+- [x] GameTests de preparação e não mutação;
+- [x] `.\gradlew.bat clean build`;
+- [x] `.\gradlew.bat runGameTestServer`;
+- [x] `.\gradlew.bat runServer` e comandos dedicados;
+- [x] auditoria por `reloadResources`, `/reload`, cliente, Mixin, AT e reflection;
+- [x] atualizar README, AGENTS, arquitetura e matriz com resultados reais.
 
+## Próxima fase recomendada
+
+Recomenda-se **Fase 3A — commit transacional de functions**, sem implementá-la
+neste plano.
+
+Evidência:
+
+- `ServerFunctionManager.replaceLibrary(ServerFunctionLibrary)` já delimita o
+  ponto de troca, enquanto loot data não possui swap público;
+- schedules persistem IDs e resolvem a function no momento da execução;
+- execuções já iniciadas carregam entries/`CommandFunction` da geração antiga e
+  precisam terminar sob uma barreira explícita;
+- tick/load exigem delta atômico e política de load default `DO_NOT_RUN`;
+- rollback de functions pode reter a library anterior, desde que nenhum estado
+  de gameplay seja executado implicitamente;
+- commit de loot exigiria acessar o campo privado final de
+  `ReloadableServerResources` ou os maps privados do manager, coordenar
+  `LootContext` já criado, GLM e mods que guardam instâncias.
+
+Antes da Fase 3A, a spec deve provar a barreira contra `ExecutionContext`,
+comportamento de chains em andamento, schedules, troca/reversão da library,
+tick/load, falha entre swap e verificação e necessidade exata de AT/Mixin.
+
+Para um commit futuro de loot:
+
+- o manager ativo está no campo privado final `lootData` de
+  `ReloadableServerResources`;
+- `LootDataManager` guarda `elements` e `typeKeys` privados e não expõe replace;
+- `LootContext` captura um `LootDataResolver`, portanto contexts em andamento
+  continuam ligados à geração que receberam;
+- containers/entidades vanilla não abertos normalmente preservam IDs e consultam
+  o manager ao gerar, mas mods podem reter instâncias e precisam de pesquisa;
+- a troca precisa coordenar GLM separado, rollback da referência/maps anteriores
+  e eventuais extensões versionadas; não há sincronização cliente vanilla de
+  loot data a reutilizar nesta fase.

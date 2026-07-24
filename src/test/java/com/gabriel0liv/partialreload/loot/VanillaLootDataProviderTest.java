@@ -86,10 +86,26 @@ class VanillaLootDataProviderTest {
                 context, System.nanoTime(), new ArrayList<>()
         ).snapshot();
 
-        LootDataDelta delta = new LootDeltaCalculator().between(upper, lower);
+        LootResourceView lowerView = loader.load(
+                context, System.nanoTime(), new ArrayList<>()
+        );
+        LootDataDelta delta = new LootDeltaCalculator().between(
+                upper, lower, lowerView.packStacks()
+        );
         assertEquals(
                 LootDataChangeKind.RESTORED_FROM_LOWER_PACK,
                 delta.lootTables().changes().get(ResourceLocation.parse("test:table"))
+        );
+
+        manager.put("new-upper", "test:loot_tables/table.json",
+                "{\"pools\":[{\"rolls\":0,\"entries\":[]}]}");
+        LootResourceView newUpper = loader.load(context, System.nanoTime(), new ArrayList<>());
+        LootDataDelta override = new LootDeltaCalculator().between(
+                lower, newUpper.snapshot(), newUpper.packStacks()
+        );
+        assertEquals(
+                LootDataChangeKind.MODIFIED,
+                override.lootTables().changes().get(ResourceLocation.parse("test:table"))
         );
     }
 

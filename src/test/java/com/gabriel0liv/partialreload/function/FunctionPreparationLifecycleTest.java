@@ -1,7 +1,6 @@
 package com.gabriel0liv.partialreload.function;
 
 import com.mojang.brigadier.CommandDispatcher;
-import com.gabriel0liv.partialreload.core.InvalidStateTransitionException;
 import com.gabriel0liv.partialreload.core.PartialReloadService;
 import com.gabriel0liv.partialreload.core.PartialReloadState;
 import com.gabriel0liv.partialreload.core.ProviderRegistry;
@@ -44,13 +43,14 @@ class FunctionPreparationLifecycleTest {
                 Runnable::run
         );
         assertEquals(PartialReloadState.PREPARING, service.status().state());
-        assertThrows(InvalidStateTransitionException.class, () ->
+        IllegalStateException sameProvider = assertThrows(IllegalStateException.class, () ->
                 service.prepareFunctionsAsync(
                         context(resources, dispatcher(), Duration.ofSeconds(10), System::nanoTime),
                         worker,
                         Runnable::run
                 ));
-        assertThrows(InvalidStateTransitionException.class, () ->
+        assertTrue(sameProvider.getMessage().contains("PREPARATION_ALREADY_RUNNING"));
+        IllegalStateException otherProvider = assertThrows(IllegalStateException.class, () ->
                 service.prepareLootDataAsync(
                         new LootPreparationContext(
                                 resources,
@@ -63,6 +63,7 @@ class FunctionPreparationLifecycleTest {
                         worker,
                         Runnable::run
                 ));
+        assertTrue(otherProvider.getMessage().contains("PREPARATION_ALREADY_RUNNING"));
 
         worker.runNext();
         assertTrue(future.isDone());

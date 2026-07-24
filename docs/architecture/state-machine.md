@@ -24,7 +24,8 @@ IDLE SCANNING PLANNING PREPARING VALIDATING READY QUIESCING COMMITTING
 SYNCHRONIZING VERIFYING SUCCESS ROLLED_BACK FAILED_SAFE DEGRADED
 ```
 
-Na fase 2, PREPARING e VALIDATING também são alcançáveis. QUIESCING,
+Na fase 3B, PREPARING e VALIDATING são compartilhados globalmente pelas
+preparações de functions e loot data. QUIESCING,
 COMMITTING, SYNCHRONIZING, VERIFYING, SUCCESS, ROLLED_BACK e DEGRADED continuam
 apenas documentados.
 
@@ -43,3 +44,8 @@ Transições permitidas da fase 1:
 Qualquer outra transição lança erro. Conteúdo inválido produz artefato não
 aplicável em READY; falha de infraestrutura/timeout produz FAILED_SAFE. Como
 nenhum estado de gameplay é alterado, DEGRADED não é usado.
+
+Um novo prepare descarta explicitamente o artefato anterior antes de entrar em
+PREPARING. Uma tentativa concorrente, inclusive functions contra loot, é
+rejeitada; nenhum lock é mantido durante IO/parsing. `discard` só é permitido
+fora de PREPARING e VALIDATING.

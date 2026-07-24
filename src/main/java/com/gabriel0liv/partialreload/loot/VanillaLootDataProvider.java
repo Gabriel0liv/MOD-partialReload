@@ -177,7 +177,12 @@ public final class VanillaLootDataProvider implements ReloadProvider {
                 modifiers,
                 tables,
                 graph,
-                deltaCalculator.between(context.activeReference(), initial.snapshot()),
+                deltaCalculator.between(
+                        context.activeReference() == null
+                                ? initial.snapshot() : context.activeReference(),
+                        initial.snapshot(),
+                        initial.packStacks()
+                ),
                 new ValidationReport(issues)
         );
     }

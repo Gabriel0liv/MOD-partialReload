@@ -4,10 +4,11 @@
 |---|---|---|---|---|
 | functions | Sim | Sim, sem publicação | `PREPARE_SUPPORTED` | geração candidata compilada com dispatcher real; commit/tick/load permanecem bloqueados |
 | advancements | Sim | Não | `SUPPORTED_READ_ONLY` | estado por jogador e packets |
-| predicates | Sim | Não | `PREDICATES_COUPLED_TO_LOOT` | `LootDataManager` compartilhado; requer candidato conjunto com tables/modifiers |
+| predicates | Sim | Sim, no candidato conjunto | `PREPARE_SUPPORTED` | resolver/validator compartilhado; commit bloqueado |
 | recipes | Sim | Não | `SUPPORTED_READ_ONLY` | tags/conditions/sync/addons |
-| loot tables | Sim | Não | `SUPPORTED_READ_ONLY` | tipos de loot, validação, GLM/hooks |
-| item modifiers | Sim | Não | `SUPPORTED_READ_ONLY` | LootDataManager compartilhado |
+| loot tables | Sim | Sim, no candidato conjunto | `PREPARE_SUPPORTED` | GLM separado; hooks externos reportados |
+| item modifiers | Sim | Sim, no candidato conjunto | `PREPARE_SUPPORTED` | resolver/validator compartilhado |
+| Forge GLM | Detecção própria | Não | `PLANNED` | ADR-007: listener/codec/estado ativo separados |
 | tags | Sim | Não | `SUPPORTED_READ_ONLY` | bind de registries, caches, packets/events |
 | Origins/Apoli | Sim | Não | `PLANNED` | Calio registries + migração/sync |
 | KubeJS | Scripts fora de ResourceManager não entram no scanner vanilla; recursos data entram como `UNKNOWN`/categoria estrutural | Não | `PLANNED` | lifecycle completo, Mixins, addons |
@@ -27,15 +28,18 @@ Não haverá reflection genérica. A ausência de provider é válida e deve apa
 ## Roadmap preliminar
 
 1. core read-only, scanner, diff e planos;
-2. preparação de functions; predicates adiados por ADR-006;
-3. commit transacional de functions ou preparação conjunta de loot/predicates/item modifiers;
+2. preparação passiva de functions (Spec 009);
+3. preparação conjunta passiva de loot/predicates/item modifiers (Spec 010);
 4. recipes vanilla e sincronização;
 5. KubeJS recipes/server scripts;
-6. loot/predicates/item modifiers, caso não antecipados para a fase 3;
+6. commit transacional de functions, loot data ou preparação de recipes, conforme nova spec;
 7. Origins powers e migração de estado;
 8. origins, layers e global power sets;
 9. tags;
 10. Silent Gear;
 11. advancements completos.
 
-Functions foram aprovadas para preparação passiva. Predicates foram movidos para o grafo conjunto de loot porque validação isolada não prova compatibilidade com os contextos das tabelas/modifiers consumidores.
+Functions e o grafo conjunto de loot foram aprovados somente para preparação
+passiva. GLM permanece separado. Nenhum manager ativo é substituído. A coluna
+“preparação” descreve elegibilidade técnica do candidato, não suporte a
+`apply`/commit.

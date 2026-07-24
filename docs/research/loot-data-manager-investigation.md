@@ -127,8 +127,9 @@ mods. Contrato adotado:
   baseline e identidade da geração; iniciar/finalizar a operação;
 - worker: ler bytes, hash, parse JSON preliminar, construir snapshot, grafo,
   deltas e coleções imutáveis;
-- contexto controlado/server thread: desserialização real Forge/modded e
-  validação quando callbacks ou registries não têm contrato de thread safety;
+- worker: desserialização real Forge/modded e validação, reproduzindo a execução
+  no preparation executor do loader normal; callbacks que violem esse contrato
+  são externos/não suportados;
 - server thread: recapturar fingerprints, validar TOCTOU e publicar somente o
   artefato passivo.
 
@@ -166,4 +167,3 @@ O branch 1.20.x do Silent Gear foi consultado no commit
 `silentgear:inject/<namespace>/<path>` e injeta uma referência durante
 `LootTableLoadEvent`. A Spec 010 reporta esse padrão como externo e não declara
 suporte completo ao Silent Gear.
-

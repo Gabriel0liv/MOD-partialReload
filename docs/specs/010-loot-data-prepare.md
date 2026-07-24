@@ -91,9 +91,10 @@ sem error/blocker para um commit futuro que ainda não existe.
 ## 7. Requisitos não funcionais
 
 Java 17; API experimental 0.x; coleções defensivas; UUID/Clock/deadline
-injetáveis quando útil; sem server retido em artefato; IO/hashing/JSON preliminar
-no worker; desserialização Forge/modded em contexto controlado porque callbacks
-não têm contrato geral de thread safety; conclusão na server thread; timeout
+injetáveis quando útil; sem server retido em artefato; IO, hashing,
+desserialização e validação no worker conforme o contrato executado por
+`LootDataManager.reload`; serializers/callbacks modded que não respeitem esse
+contrato são externos/não suportados; conclusão na server thread; timeout
 cooperativo; logs contextualizados; mensagens administrativas paginadas/resumidas.
 
 Configuração:
@@ -195,4 +196,3 @@ Integrações Silent Gear, Starcatcher, KubeJS/LootJS permanecem não comprovada
 Implementa a consequência da ADR-006, segue ADR-002/003/004/005 e ADR-007,
 evolui Specs 001/002/005/006/007/008 e preserva Spec 009. O plano executável está
 em `docs/plans/phase-three-b-tasks.md`.
-

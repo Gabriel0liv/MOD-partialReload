@@ -12,15 +12,15 @@ restritos que `ALL_PARAMS`.
 ## Decisão
 
 Classificar a capacidade como `PREDICATES_COUPLED_TO_LOOT`. A Spec 009 não cria
-`PreparedPredicates`. Predicates permanecem visíveis em scan/diff/plan, com
-blocker explícito, e serão preparados somente junto de loot tables e item
-modifiers.
+`PreparedPredicates` independente. Predicates permanecem visíveis em
+scan/diff/plan e, na fase 3B (Spec 010), são preparados somente no candidato
+conjunto de loot tables e item modifiers (`PreparedLootData`).
 
 ## Consequências
 
-A fase 2 concentra implementação em functions. A futura fase de loot precisa
-criar um resolver candidato completo, usar serializers Forge/modded, validar
-todos os três tipos e preservar o manager ativo.
+A preparação de functions continua isolada. A fase 3B cria um resolver
+candidato completo, usa serializers Forge/modded, valida os três tipos e
+preserva o manager ativo. O ADR não autoriza commit ou mutação de maps privados.
 
 ## Alternativas rejeitadas
 

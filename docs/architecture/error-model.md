@@ -8,8 +8,9 @@
 - `InvalidStateTransitionException`: violação do lifecycle;
 - `FunctionPreparationException`: falha tipada de infraestrutura, limite ou
   timeout;
+- `LootPreparationException`: IO, limite ou timeout da reconstrução conjunta;
 - `ValidationIssue`: problema agregado com severity, code, category, provider,
-  resource, pack, message, source location e causa;
+  resource, pack, message, source location, causa e detalhes de tipo/path/serializer;
 - blockers de plano: incompatibilidade operacional, não exceções.
 
 ## Política
@@ -20,8 +21,10 @@
 4. Falha de scan/planning/preparation leva a `FAILED_SAFE`.
 5. Erro esperado no conteúdo de function produz artefato READY não aplicável;
    não é exception de infraestrutura.
-6. `FAILED_SAFE` confirma ausência de mutação.
-7. Unsupported/restart/unknown são resultados de plano, não tentativa seguida de exception.
+6. A mesma política vale para conteúdo de loot; erro preserva issues e não
+   publica candidato parcial.
+7. `FAILED_SAFE` confirma ausência de mutação.
+8. Unsupported/restart/unknown são resultados de plano, não tentativa seguida de exception.
 
 ## Códigos iniciais
 
@@ -35,6 +38,19 @@
 `LOAD_FUNCTION_SET_CHANGED`, `TICK_FUNCTION_SET_CHANGED`,
 `RESOURCE_CHANGED_DURING_PREPARATION`, `PREPARATION_TIMEOUT`,
 `PREPARATION_LIMIT`, `PREDICATES_COUPLED_TO_LOOT`.
+
+## Códigos da preparação de loot
+
+`LOOT_CATEGORY_SCOPE_EXPANDED`, `LOOT_JSON_SYNTAX_ERROR`,
+`LOOT_DESERIALIZATION_ERROR`, `LOOT_UNKNOWN_ENTRY_TYPE`,
+`LOOT_UNKNOWN_CONDITION_TYPE`, `LOOT_UNKNOWN_FUNCTION_TYPE`,
+`LOOT_REGISTRY_REFERENCE_MISSING`, `LOOT_TABLE_REFERENCE_MISSING`,
+`PREDICATE_REFERENCE_MISSING`, `ITEM_MODIFIER_REFERENCE_MISSING`,
+`LOOT_RECURSIVE_REFERENCE`, `LOOT_CONTEXT_INCOMPATIBLE`,
+`LOOT_RANDOM_SEQUENCE_INVALID`, `LOOT_VALIDATION_ERROR`,
+`LOOT_EXTERNAL_PROVIDER_UNSUPPORTED`,
+`LOOT_RESOURCE_CHANGED_DURING_PREPARATION`, `LOOT_PREPARATION_TIMEOUT`,
+`LOOT_LIMIT_EXCEEDED`, `GLM_NOT_INCLUDED`, `PREPARATION_ALREADY_RUNNING`.
 
 WARNING não invalida candidato. ERROR e BLOCKER tornam
 `PreparedReloadArtifact.isApplicable()` falso.

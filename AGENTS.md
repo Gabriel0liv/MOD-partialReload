@@ -32,12 +32,14 @@ Este repositório usa Spec-Driven Development (SDD). Leia `docs/specs/` e os ADR
 
 ## Fase atual
 
-A fase 2 implementa preparação passiva de functions conforme
-`docs/specs/009-functions-and-predicates-prepare.md`. A preparação compila a
-geração completa contra o dispatcher ativo, resolve tags e produz um artefato
-imutável, mas nunca o publica no `ServerFunctionManager`. Predicates estão
-bloqueados como `PREDICATES_COUPLED_TO_LOOT` pela ADR-006.
+A fase 3B implementa preparação conjunta e passiva de predicates, item
+modifiers e loot tables conforme `docs/specs/010-loot-data-prepare.md`.
+`VanillaLootDataProvider` reconstrói o grafo completo com parsers/registries
+reais, mas nunca publica o candidato no `LootDataManager`. GLM permanece num
+provider separado planejado conforme ADR-007. A preparação de functions da
+Spec 009 continua disponível.
 
 `apply`, `reload` e `rollback` devem continuar falhando de modo explícito e
-seguro. Não exponha `CommandFunction` compilada por API executável e não chame
-`ServerFunctionManager.replaceLibrary` antes de uma spec de commit.
+seguro. Não exponha candidatos por API executável, não chame
+`ServerFunctionManager.replaceLibrary` e não escreva os maps privados do
+`LootDataManager` antes de specs de commit.

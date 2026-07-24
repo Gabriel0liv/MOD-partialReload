@@ -9,18 +9,23 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 
 final class LootDeltaCalculator {
-    LootDataDelta between(@Nullable ResourceSnapshot before, ResourceSnapshot after) {
+    LootDataDelta between(
+            @Nullable ResourceSnapshot before,
+            ResourceSnapshot after,
+            Map<ResourceLocation, java.util.List<String>> currentPackStacks
+    ) {
         return new LootDataDelta(
-                forKind(LootDataKind.PREDICATE, before, after),
-                forKind(LootDataKind.ITEM_MODIFIER, before, after),
-                forKind(LootDataKind.LOOT_TABLE, before, after)
+                forKind(LootDataKind.PREDICATE, before, after, currentPackStacks),
+                forKind(LootDataKind.ITEM_MODIFIER, before, after, currentPackStacks),
+                forKind(LootDataKind.LOOT_TABLE, before, after, currentPackStacks)
         );
     }
 
     private LootTypeDelta forKind(
             LootDataKind kind,
             @Nullable ResourceSnapshot before,
-            ResourceSnapshot after
+            ResourceSnapshot after,
+            Map<ResourceLocation, java.util.List<String>> currentPackStacks
     ) {
         Map<ResourceLocation, ResourceDescriptor> oldById = byId(kind, before);
         Map<ResourceLocation, ResourceDescriptor> newById = byId(kind, after);
@@ -36,7 +41,10 @@ final class LootDeltaCalculator {
             else if (oldValue.fingerprint().equals(newValue.fingerprint())
                     && oldValue.sourcePack().equals(newValue.sourcePack())) {
                 change = LootDataChangeKind.UNCHANGED;
-            } else if (!oldValue.sourcePack().equals(newValue.sourcePack())) {
+            } else if (!oldValue.sourcePack().equals(newValue.sourcePack())
+                    && !currentPackStacks.getOrDefault(
+                            newValue.location(), java.util.List.of()
+                    ).contains(oldValue.sourcePack())) {
                 change = LootDataChangeKind.RESTORED_FROM_LOWER_PACK;
             } else {
                 change = LootDataChangeKind.MODIFIED;
@@ -58,4 +66,3 @@ final class LootDeltaCalculator {
         return result;
     }
 }
-

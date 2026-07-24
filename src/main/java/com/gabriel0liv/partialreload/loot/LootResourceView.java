@@ -11,11 +11,18 @@ import java.util.Map;
 record LootResourceView(
         ResourceSnapshot snapshot,
         Map<ResourceLocation, String> stackFingerprints,
+        Map<ResourceLocation, java.util.List<String>> packStacks,
         Map<LootDataKind, Map<ResourceLocation, Source>> sources,
         boolean hasGlobalLootModifiers
 ) {
     LootResourceView {
         stackFingerprints = Map.copyOf(stackFingerprints);
+        packStacks = packStacks.entrySet().stream().collect(
+                java.util.stream.Collectors.toUnmodifiableMap(
+                        Map.Entry::getKey,
+                        entry -> java.util.List.copyOf(entry.getValue())
+                )
+        );
         sources = Map.copyOf(sources);
     }
 
@@ -29,4 +36,3 @@ record LootResourceView(
     ) {
     }
 }
-

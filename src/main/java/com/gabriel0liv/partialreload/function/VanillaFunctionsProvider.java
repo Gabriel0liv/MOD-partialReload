@@ -178,8 +178,17 @@ public final class VanillaFunctionsProvider implements ReloadProvider {
                 tickDelta,
                 loadDelta,
                 graph,
-                new ValidationReport(issues)
+                new ValidationReport(issues),
+                context.dispatcher(),
+                context.compilationPermissionLevel()
         );
+    }
+
+    public com.gabriel0liv.partialreload.resource.ResourceSnapshot captureSnapshot(
+            FunctionPreparationContext context
+    ) throws FunctionPreparationException {
+        long startedAt = context.nanoTime().getAsLong();
+        return loader.load(context, startedAt).snapshot();
     }
 
     private static void validateDependencies(

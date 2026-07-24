@@ -5,6 +5,8 @@ import com.gabriel0liv.partialreload.api.ReloadCategory;
 import com.gabriel0liv.partialreload.resource.ResourceSnapshot;
 import com.gabriel0liv.partialreload.validation.ValidationReport;
 import net.minecraft.resources.ResourceLocation;
+import com.mojang.brigadier.CommandDispatcher;
+import net.minecraft.commands.CommandSourceStack;
 
 import java.time.Instant;
 import java.util.Collections;
@@ -27,6 +29,8 @@ public final class PreparedFunctions implements PreparedReloadArtifact {
     private final FunctionSetDelta loadDelta;
     private final FunctionDependencyGraph dependencyGraph;
     private final ValidationReport validation;
+    private final CommandDispatcher<CommandSourceStack> dispatcher;
+    private final int compilationPermissionLevel;
 
     public PreparedFunctions(
             UUID preparationId,
@@ -40,6 +44,26 @@ public final class PreparedFunctions implements PreparedReloadArtifact {
             FunctionSetDelta loadDelta,
             FunctionDependencyGraph dependencyGraph,
             ValidationReport validation
+    ) {
+        this(preparationId, createdAt, sourceSnapshot, functions, functionTags,
+                tickFunctions, loadFunctions, tickDelta, loadDelta,
+                dependencyGraph, validation, null, -1);
+    }
+
+    PreparedFunctions(
+            UUID preparationId,
+            Instant createdAt,
+            ResourceSnapshot sourceSnapshot,
+            Map<ResourceLocation, PreparedFunction> functions,
+            Map<ResourceLocation, Set<ResourceLocation>> functionTags,
+            Set<ResourceLocation> tickFunctions,
+            Set<ResourceLocation> loadFunctions,
+            FunctionSetDelta tickDelta,
+            FunctionSetDelta loadDelta,
+            FunctionDependencyGraph dependencyGraph,
+            ValidationReport validation,
+            CommandDispatcher<CommandSourceStack> dispatcher,
+            int compilationPermissionLevel
     ) {
         this.preparationId = Objects.requireNonNull(preparationId, "preparationId");
         this.createdAt = Objects.requireNonNull(createdAt, "createdAt");
@@ -55,6 +79,8 @@ public final class PreparedFunctions implements PreparedReloadArtifact {
         this.loadDelta = Objects.requireNonNull(loadDelta, "loadDelta");
         this.dependencyGraph = Objects.requireNonNull(dependencyGraph, "dependencyGraph");
         this.validation = Objects.requireNonNull(validation, "validation");
+        this.dispatcher = dispatcher;
+        this.compilationPermissionLevel = compilationPermissionLevel;
     }
 
     @Override
@@ -108,5 +134,13 @@ public final class PreparedFunctions implements PreparedReloadArtifact {
     @Override
     public ValidationReport validation() {
         return validation;
+    }
+
+    CommandDispatcher<CommandSourceStack> dispatcher() {
+        return dispatcher;
+    }
+
+    int compilationPermissionLevel() {
+        return compilationPermissionLevel;
     }
 }

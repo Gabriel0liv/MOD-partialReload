@@ -251,6 +251,11 @@ public final class PartialReloadService {
         PartialReloadState state = stateMachine.state();
         if (state == PartialReloadState.READY || state == PartialReloadState.FAILED_SAFE) {
             stateMachine.transitionTo(PartialReloadState.IDLE);
+        } else if (state == PartialReloadState.PREPARING
+                || state == PartialReloadState.VALIDATING) {
+            throw new IllegalStateException(
+                    "PREPARATION_ALREADY_RUNNING: a global preparation is already in progress"
+            );
         } else if (state != PartialReloadState.IDLE) {
             throw new InvalidStateTransitionException(state, PartialReloadState.IDLE);
         }

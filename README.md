@@ -15,6 +15,9 @@ Versão atual: `0.1.0-SNAPSHOT` — modo `PREPARE_ONLY`.
   `minecraft:load`;
 - grafo de dependências e artefato preparado imutável;
 - detecção de timeout, limites, concorrência e mudança durante preparação.
+- preparação conjunta de predicates, item modifiers e loot tables;
+- parsers/registries reais, resolver candidato e validator do `LootDataManager`;
+- stack de datapacks, grafo de loot, deltas e restauração de pack inferior.
 
 ## Não implementado
 
@@ -23,7 +26,7 @@ Versão atual: `0.1.0-SNAPSHOT` — modo `PREPARE_ONLY`.
 - alteração da lista ativa de tick;
 - sincronização;
 - rollback;
-- preparação isolada de predicates (acoplados a loot);
+- Global Loot Modifiers (provider separado, planejado);
 - integrações KubeJS, Origins e Silent Gear.
 
 Isso ainda não é hot reload funcional. Uma preparação válida apenas demonstra
@@ -44,6 +47,9 @@ Requerem nível de operador configurável (padrão 4):
 /partialreload plan functions
 /partialreload prepare changed
 /partialreload prepare functions
+/partialreload prepare predicates
+/partialreload prepare item_modifiers
+/partialreload prepare loot
 /partialreload prepared
 /partialreload discard
 ```
@@ -61,5 +67,5 @@ Requisitos: Java 17 e PowerShell/Gradle Wrapper.
 ```
 
 O projeto segue Spec-Driven Development. Leia `AGENTS.md`,
-`docs/specs/009-functions-and-predicates-prepare.md` e as ADRs antes de alterar
+`docs/specs/010-loot-data-prepare.md` e as ADRs antes de alterar
 comportamento.

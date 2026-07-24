@@ -31,6 +31,7 @@ final class LootResourceLoader {
     ) throws LootPreparationException {
         Map<ResourceLocation, ResourceDescriptor> descriptors = new LinkedHashMap<>();
         Map<ResourceLocation, String> stackFingerprints = new LinkedHashMap<>();
+        Map<ResourceLocation, List<String>> packStacks = new LinkedHashMap<>();
         Map<LootDataKind, Map<ResourceLocation, LootResourceView.Source>> sources =
                 new EnumMap<>(LootDataKind.class);
         long totalBytes = 0;
@@ -86,6 +87,8 @@ final class LootResourceLoader {
                 }
                 descriptors.put(file, descriptor);
                 stackFingerprints.put(file, fingerprintStack(layers));
+                packStacks.put(file, layers.stream()
+                        .map(layer -> layer.resource().sourcePackId()).toList());
                 if (json != null) {
                     typed.put(id, new LootResourceView.Source(
                             kind, id, file, winner.resource(), descriptor, json
@@ -102,6 +105,7 @@ final class LootResourceLoader {
         return new LootResourceView(
                 new ResourceSnapshot(Instant.now(context.clock()), descriptors),
                 stackFingerprints,
+                packStacks,
                 sources,
                 glm
         );
@@ -176,4 +180,3 @@ final class LootResourceLoader {
     private record Layer(Resource resource, byte[] bytes) {
     }
 }
-

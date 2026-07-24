@@ -46,4 +46,8 @@ public final class PreparedFunction {
     public List<String> commands() {
         return commands;
     }
+
+    CommandFunction compiled() {
+        return compiled;
+    }
 }

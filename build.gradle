@@ -16,7 +16,6 @@ java.toolchain.languageVersion = JavaLanguageVersion.of(17)
 minecraft {
     mappings channel: mapping_channel, version: mapping_version
     copyIdeResources = true
-
     runs {
         configureEach {
             workingDirectory project.file('run')

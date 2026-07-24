@@ -31,13 +31,15 @@ public final class ReloadPlanner {
         List<ResourceChange> changes = input.changedResources();
         Set<ReloadCategory> categories = EnumSet.noneOf(ReloadCategory.class);
         changes.forEach(change -> categories.add(change.category()));
+        Set<ResourceLocation> providers = new HashSet<>();
+        providers.add(VANILLA_PROVIDER_ID);
 
         ReloadRisk risk = ReloadRisk.LOW;
         SupportStatus support = SupportStatus.SUPPORTED_READ_ONLY;
         Set<String> dependencies = new HashSet<>();
         List<String> warnings = new ArrayList<>();
         List<String> blockers = new ArrayList<>();
-        blockers.add("APPLY_NOT_IMPLEMENTED: phase 1 plans are read-only");
+        blockers.add("APPLY_NOT_IMPLEMENTED: commit is not implemented");
 
         for (ReloadCategory category : categories) {
             switch (category) {
@@ -60,6 +62,9 @@ public final class ReloadPlanner {
                     risk = ReloadRisk.max(risk, ReloadRisk.MODERATE);
                     dependencies.add("function tags and command dispatcher");
                     support = SupportStatus.PREPARE_SUPPORTED;
+                    providers.add(ResourceLocation.fromNamespaceAndPath(
+                            "partialreload", "vanilla_functions"
+                    ));
                 }
                 case RECIPES -> {
                     risk = ReloadRisk.max(risk, ReloadRisk.MODERATE);
@@ -73,6 +78,9 @@ public final class ReloadPlanner {
                     dependencies.add("shared LootDataManager validation graph");
                     risk = ReloadRisk.max(risk, ReloadRisk.MODERATE);
                     support = SupportStatus.PREPARE_SUPPORTED;
+                    providers.add(ResourceLocation.fromNamespaceAndPath(
+                            "partialreload", "vanilla_loot_data"
+                    ));
                     warnings.add("LOOT_CATEGORY_SCOPE_EXPANDED: prepare predicates, item modifiers and loot together");
                 }
                 case TAGS -> dependencies.add("registry tag binding, Forge events and client synchronization");
@@ -87,7 +95,7 @@ public final class ReloadPlanner {
                 idSupplier.get(),
                 Instant.now(clock),
                 categories,
-                Set.of(VANILLA_PROVIDER_ID),
+                providers,
                 changes,
                 risk,
                 dependencies,

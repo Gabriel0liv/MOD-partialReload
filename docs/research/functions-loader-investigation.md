@@ -7,6 +7,10 @@ Análise realizada sobre o source JAR mapeado oficial
 Os nomes abaixo são os nomes efetivos usados pelo projeto, não nomes inferidos de
 outra versão.
 
+Consulta auxiliar de assinaturas: [mappings.dev 1.20.1 —
+ServerFunctionLibrary](https://mappings.dev/1.20.1/net/minecraft/server/ServerFunctionLibrary.html)
+e [ServerFunctionManager](https://mappings.dev/1.20.1/net/minecraft/server/ServerFunctionManager.html).
+
 ## Classes e contratos confirmados
 
 | Classe | Membros relevantes observados | Papel |
@@ -172,4 +176,13 @@ necessário Mixin/AT para chamar o método, mas um commit transacional precisari
 
 Como a library antiga não possui getter público, rollback por referência exigiria
 nova evidência e possivelmente acesso versionado. Nada disso é implementado na
-fase 2.
+preparação passiva (Spec 009); a fase 3B não altera essa fronteira.
+
+## Evidência de versão e limites
+
+Os nomes e contratos acima foram conferidos contra o artefato decompilado
+`forge-1.20.1-47.4.10-decomp.jar` disponível no cache do ForgeGradle e contra os
+stubs compilados usados pelo projeto. Eles não devem ser extrapolados para
+outras versões. Embora `replaceLibrary` seja acessível, chamá-lo publica a
+biblioteca, reconstrói a lista de tick e agenda `minecraft:load`; portanto ele
+permanece proibido durante preparação.
