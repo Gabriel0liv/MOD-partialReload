@@ -9,6 +9,9 @@ import com.gabriel0liv.partialreload.config.PartialReloadConfig;
 import com.gabriel0liv.partialreload.core.PartialReloadService;
 import com.gabriel0liv.partialreload.core.PartialReloadStatus;
 import com.gabriel0liv.partialreload.plan.ReloadPlan;
+import com.gabriel0liv.partialreload.function.FunctionPreparationContext;
+import com.gabriel0liv.partialreload.function.PreparedFunctions;
+import com.gabriel0liv.partialreload.function.VanillaFunctionsProvider;
 import com.mojang.brigadier.CommandDispatcher;
 import com.mojang.brigadier.arguments.StringArgumentType;
 import com.mojang.brigadier.suggestion.SuggestionsBuilder;
@@ -18,11 +21,14 @@ import net.minecraft.commands.Commands;
 import net.minecraft.network.chat.Component;
 
 import java.time.Duration;
+import java.time.Clock;
 import java.util.Arrays;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.CompletionException;
+import java.util.UUID;
+import java.util.stream.Collectors;
 
 public final class PartialReloadCommand {
     private PartialReloadCommand() {
@@ -46,6 +52,15 @@ public final class PartialReloadCommand {
                                         service,
                                         StringArgumentType.getString(context, "category")
                                 ))))
+                .then(Commands.literal("prepare")
+                        .then(Commands.literal("changed")
+                                .executes(context -> prepareFunctions(context.getSource(), service, true)))
+                        .then(Commands.literal("functions")
+                                .executes(context -> prepareFunctions(context.getSource(), service, false))))
+                .then(Commands.literal("prepared")
+                        .executes(context -> prepared(context.getSource(), service)))
+                .then(Commands.literal("discard")
+                        .executes(context -> discard(context.getSource(), service)))
                 .then(unsupported("apply"))
                 .then(unsupported("reload"))
                 .then(unsupported("rollback")));
@@ -54,7 +69,7 @@ public final class PartialReloadCommand {
     private static int status(CommandSourceStack source, PartialReloadService service) {
         PartialReloadStatus status = service.status();
         source.sendSuccess(() -> Component.literal("Partial Reload " + PartialReloadMod.VERSION), false);
-        source.sendSuccess(() -> Component.literal("Mode: READ_ONLY"), false);
+        source.sendSuccess(() -> Component.literal("Mode: PREPARE_ONLY"), false);
         source.sendSuccess(() -> Component.literal("State: " + status.state()), false);
         source.sendSuccess(() -> Component.literal(
                 "Providers: " + status.registeredProviders() + " compatible, "
@@ -65,6 +80,11 @@ public final class PartialReloadCommand {
         ), false);
         source.sendSuccess(() -> Component.literal("Changed resources: " + status.changedResources()), false);
         source.sendSuccess(() -> Component.literal("Apply support: not implemented"), false);
+        source.sendSuccess(() -> Component.literal(
+                "Prepared artifact: " + (status.preparedId() == null
+                        ? "none"
+                        : status.preparedId() + " (technically applicable: " + status.preparedApplicable() + ")")
+        ), false);
         if (status.lastError() != null) {
             source.sendFailure(Component.literal("Last error: " + status.lastError()));
         }
@@ -76,6 +96,8 @@ public final class PartialReloadCommand {
             String support = switch (category) {
                 case DYNAMIC_REGISTRIES -> "RESTART_REQUIRED";
                 case UNKNOWN -> "UNKNOWN";
+                case FUNCTIONS -> "PREPARE_SUPPORTED";
+                case PREDICATES -> "PREDICATES_COUPLED_TO_LOOT";
                 case ORIGINS, KUBEJS, SILENTGEAR -> "PLANNED";
                 default -> "SUPPORTED_READ_ONLY";
             };
@@ -92,7 +114,7 @@ public final class PartialReloadCommand {
                 false
         ));
         source.sendSuccess(() -> Component.literal(
-                "Optional integrations absent in phase 1: kubejs, origins, silentgear"
+                "Optional integrations absent: kubejs, origins, silentgear"
         ), false);
         return service.providerRegistry().all().size();
     }
@@ -174,6 +196,157 @@ public final class PartialReloadCommand {
         return 1;
     }
 
+    private static int prepareFunctions(
+            CommandSourceStack source,
+            PartialReloadService service,
+            boolean changedOnly
+    ) {
+        if (changedOnly && !service.hasFunctionChanges()) {
+            source.sendFailure(Component.literal(
+                    "No changed function sources or function tags are present in the current ChangeSet."
+            ));
+            return 0;
+        }
+        var manager = source.getServer().getFunctions();
+        Set<net.minecraft.resources.ResourceLocation> activeTick = manager
+                .getTag(VanillaFunctionsProvider.TICK_TAG)
+                .stream()
+                .map(net.minecraft.commands.CommandFunction::getId)
+                .collect(Collectors.toUnmodifiableSet());
+        Set<net.minecraft.resources.ResourceLocation> activeLoad = manager
+                .getTag(VanillaFunctionsProvider.LOAD_TAG)
+                .stream()
+                .map(net.minecraft.commands.CommandFunction::getId)
+                .collect(Collectors.toUnmodifiableSet());
+        FunctionPreparationContext preparationContext = new FunctionPreparationContext(
+                source.getServer().getResourceManager(),
+                source.getServer().getCommands().getDispatcher(),
+                source.getServer().getFunctionCompilationLevel(),
+                activeTick,
+                activeLoad,
+                Duration.ofSeconds(PartialReloadConfig.prepareTimeoutSeconds()),
+                PartialReloadConfig.maxScannedResources(),
+                PartialReloadConfig.maxFunctionCount(),
+                PartialReloadConfig.maxFunctionLines(),
+                Clock.systemUTC(),
+                UUID::randomUUID,
+                System::nanoTime
+        );
+        try {
+            service.prepareFunctionsAsync(
+                    preparationContext,
+                    Util.backgroundExecutor(),
+                    source.getServer()
+            ).whenComplete((artifact, throwable) -> {
+                if (throwable != null) {
+                    PartialReloadMod.LOGGER.error(
+                            "Function preparation failed safely [provider={}]",
+                            VanillaFunctionsProvider.ID,
+                            unwrap(throwable)
+                    );
+                    source.sendFailure(Component.literal(
+                            "Function preparation failed safely: " + rootMessage(throwable)
+                    ));
+                    return;
+                }
+                showPrepared(source, artifact);
+            });
+        } catch (RuntimeException exception) {
+            source.sendFailure(Component.literal("Preparation rejected: " + exception.getMessage()));
+            return 0;
+        }
+        source.sendSuccess(() -> Component.literal(
+                "Function preparation started. Active function manager remains unchanged."
+        ), false);
+        return 1;
+    }
+
+    private static int prepared(CommandSourceStack source, PartialReloadService service) {
+        PreparedFunctions artifact = service.preparedFunctions();
+        if (artifact == null) {
+            source.sendFailure(Component.literal("No prepared function artifact is available."));
+            return 0;
+        }
+        return showPrepared(source, artifact);
+    }
+
+    private static int showPrepared(CommandSourceStack source, PreparedFunctions artifact) {
+        source.sendSuccess(() -> Component.literal("Preparation #" + artifact.preparationId()), false);
+        source.sendSuccess(() -> Component.literal("Category: functions"), false);
+        source.sendSuccess(() -> Component.literal(
+                "Functions compiled: " + artifact.functions().size()
+        ), false);
+        source.sendSuccess(() -> Component.literal(
+                "Function tags resolved: " + artifact.functionTags().size()
+        ), false);
+        source.sendSuccess(() -> Component.literal(
+                "Tick functions: " + artifact.tickFunctions().size()
+                        + " (+" + artifact.tickDelta().added().size()
+                        + " -" + artifact.tickDelta().removed().size() + ")"
+        ), false);
+        source.sendSuccess(() -> Component.literal(
+                "Load functions: " + artifact.loadFunctions().size()
+                        + " (+" + artifact.loadDelta().added().size()
+                        + " -" + artifact.loadDelta().removed().size() + ")"
+        ), false);
+        source.sendSuccess(() -> Component.literal(
+                "Dependencies: " + artifact.dependencyGraph().dependencies().size()
+        ), false);
+        long warnings = artifact.validation().count(
+                com.gabriel0liv.partialreload.validation.ValidationSeverity.WARNING
+        );
+        long errors = artifact.validation().issues().stream()
+                .filter(issue -> issue.severity()
+                        == com.gabriel0liv.partialreload.validation.ValidationSeverity.ERROR
+                        || issue.severity()
+                        == com.gabriel0liv.partialreload.validation.ValidationSeverity.BLOCKER)
+                .count();
+        source.sendSuccess(() -> Component.literal(
+                "Warnings: " + warnings + ", errors/blockers: " + errors
+        ), false);
+        source.sendSuccess(() -> Component.literal(
+                "Technically applicable: " + artifact.isApplicable()
+        ), false);
+        artifact.validation().issues().stream().limit(20).forEach(issue -> {
+            String location = issue.sourceLocation() == null
+                    ? ""
+                    : " line " + issue.sourceLocation().line()
+                    + ": " + issue.sourceLocation().command();
+            if (issue.severity()
+                    == com.gabriel0liv.partialreload.validation.ValidationSeverity.INFO
+                    || issue.severity()
+                    == com.gabriel0liv.partialreload.validation.ValidationSeverity.WARNING) {
+                source.sendSuccess(() -> Component.literal(
+                        issue.severity() + " " + issue.code() + " "
+                                + (issue.resource() == null ? "" : issue.resource())
+                                + location + " — " + issue.message()
+                ), false);
+            } else {
+                source.sendFailure(Component.literal(
+                        issue.severity() + " " + issue.code() + " "
+                                + (issue.resource() == null ? "" : issue.resource())
+                                + location + " — " + issue.message()
+                ));
+            }
+        });
+        source.sendFailure(Component.literal("Commit support: not implemented"));
+        source.sendSuccess(() -> Component.literal("Active function manager: unchanged"), false);
+        return 1;
+    }
+
+    private static int discard(CommandSourceStack source, PartialReloadService service) {
+        try {
+            boolean discarded = service.discardPrepared();
+            source.sendSuccess(() -> Component.literal(
+                    discarded ? "Prepared function artifact discarded." : "No prepared artifact existed."
+            ), false);
+            return discarded ? 1 : 0;
+        } catch (RuntimeException exception) {
+            source.sendFailure(Component.literal("Discard rejected: " + exception.getMessage()));
+            return 0;
+        }
+    }
+
     private static com.mojang.brigadier.builder.LiteralArgumentBuilder<CommandSourceStack> unsupported(String name) {
         return Commands.literal(name)
                 .executes(context -> unsupportedResponse(context.getSource()))
@@ -183,7 +356,7 @@ public final class PartialReloadCommand {
 
     private static int unsupportedResponse(CommandSourceStack source) {
         source.sendFailure(Component.literal(
-                "Commit is not implemented in phase 1. No reload or fallback was executed."
+                "Commit is not implemented. No reload or fallback was executed."
         ));
         return 0;
     }

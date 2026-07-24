@@ -5,13 +5,16 @@ commands
    |
 PartialReloadService ---- PartialReloadStateMachine
    |          |
-   |          +---- activeReference / latestScan / lastChangeSet / lastPlan
+   |          +---- activeReference / latestScan / changes / plan / prepared
    |
 ProviderRegistry
+   +---- VanillaDatapackProvider -> ResourceScanner
    |
-ReloadProvider (fase 1: VanillaDatapackProvider)
-   |
-ResourceScanner -> ResourceSnapshot -> ChangeDetector -> ReloadPlanner
+   +---- VanillaFunctionsProvider
+            |---- FunctionResourceLoader
+            |---- FunctionCompiler (dispatcher real)
+            |---- FunctionTagResolver
+            +---- FunctionDependencyGraph -> PreparedFunctions
 ```
 
 ## Fronteiras
@@ -20,12 +23,15 @@ ResourceScanner -> ResourceSnapshot -> ChangeDetector -> ReloadPlanner
 - `resource`: descriptors, fingerprints, snapshots e leitura;
 - `change`: diff puro;
 - `plan`: agregação read-only e blockers;
-- `validation`: issues/reports compartilháveis;
+- `function`: captura, compilação, tags, grafo e candidato passivo;
+- `validation`: issues/reports estruturados;
 - `core`: registry, estado e orquestração;
 - `command`: adaptação Brigadier;
 - `config`: validação ForgeConfigSpec.
 
-Categoria, provider, recurso e transação/plano não são intercambiáveis. O único boundary Minecraft da fase 1 é o `ResourceManager` entregue no `ScanContext`.
+Categoria, provider, recurso e transação/plano não são intercambiáveis. Os
+boundaries Minecraft da fase 2 são o `ResourceManager`, o dispatcher ativo
+capturado e os IDs ativos de tick/load; nenhum manager é retido ou substituído.
 
 ## Fluxo fase 1
 
@@ -40,3 +46,16 @@ Categoria, provider, recurso e transação/plano não são intercambiáveis. O �
 ## Extensão futura
 
 Providers futuros poderão adicionar contratos `PreparedReload`, quiesce, commit, sync, verify e rollback apenas quando as respectivas specs existirem. Esses métodos não pertencem à SPI inicial para não prometer capacidade inexistente.
+
+## Fluxo de preparação de functions
+
+1. command captura dispatcher, permission level e tick/load ativos na server
+   thread;
+2. serviço entra PREPARING e executa no worker uma captura consistente de todas
+   as functions e stacks de tags;
+3. cada linha é validada pelo Brigadier e encapsulada sem API de execução;
+4. tags, tick/load, dependências, ciclos e deltas são calculados;
+5. uma segunda captura compara fingerprints e bloqueia TOCTOU;
+6. na server thread o serviço entra VALIDATING e publica somente o artefato
+   imutável em READY;
+7. o `ServerFunctionManager` ativo nunca recebe o candidato.

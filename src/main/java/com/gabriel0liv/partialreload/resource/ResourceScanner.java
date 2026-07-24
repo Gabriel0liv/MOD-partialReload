@@ -98,6 +98,7 @@ public final class ResourceScanner {
         if (matchesJsonDirectory(path, "recipes")) return ReloadCategory.RECIPES;
         if (matchesJsonDirectory(path, "loot_tables")) return ReloadCategory.LOOT;
         if (matchesJsonDirectory(path, "item_modifiers")) return ReloadCategory.ITEM_MODIFIERS;
+        if (matchesJsonDirectory(path, "tags/functions")) return ReloadCategory.FUNCTIONS;
         if (matchesJsonDirectory(path, "tags")) return ReloadCategory.TAGS;
         if (matchesJsonDirectory(path, "powers")
                 || matchesJsonDirectory(path, "origins")

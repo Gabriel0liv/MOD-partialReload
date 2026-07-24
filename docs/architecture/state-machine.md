@@ -1,14 +1,21 @@
 # Máquina de estados
 
 ```text
-                  +--> SCANNING --success--> IDLE
+                  +--> SCANNING --success--> IDLE/READY*
                   |       |
                   |       +--failure--> FAILED_SAFE --ack--> IDLE
 IDLE -------------+
                   |--> PLANNING --success--> READY --new operation--> IDLE
-                          |
-                          +--failure--> FAILED_SAFE
+                  |       |
+                  |       +--failure--> FAILED_SAFE
+                  |
+                  +--> PREPARING --> VALIDATING --> READY
+                          |              |
+                          +--------------+--failure--> FAILED_SAFE
 ```
+
+`*` Um scan retorna a READY quando um artefato preparado anterior permanece
+armazenado; o scan nunca promove snapshot nem altera o artefato.
 
 Estados especificados para o lifecycle completo:
 
@@ -17,7 +24,9 @@ IDLE SCANNING PLANNING PREPARING VALIDATING READY QUIESCING COMMITTING
 SYNCHRONIZING VERIFYING SUCCESS ROLLED_BACK FAILED_SAFE DEGRADED
 ```
 
-Na fase 1 apenas IDLE, SCANNING, PLANNING, READY e FAILED_SAFE são alcançáveis por operações. Enums dos demais estados documentam o protocolo futuro; não existem comandos ou métodos que os executem.
+Na fase 2, PREPARING e VALIDATING também são alcançáveis. QUIESCING,
+COMMITTING, SYNCHRONIZING, VERIFYING, SUCCESS, ROLLED_BACK e DEGRADED continuam
+apenas documentados.
 
 Transições permitidas da fase 1:
 
@@ -25,7 +34,12 @@ Transições permitidas da fase 1:
 - SCANNING → IDLE ou FAILED_SAFE;
 - IDLE → PLANNING;
 - PLANNING → READY ou FAILED_SAFE;
+- IDLE → PREPARING;
+- PREPARING → VALIDATING ou FAILED_SAFE;
+- VALIDATING → READY ou FAILED_SAFE;
 - READY → IDLE;
 - FAILED_SAFE → IDLE.
 
-Qualquer outra transição lança erro. Uma falha read-only é sempre `FAILED_SAFE`, nunca `DEGRADED`, pois nenhum estado de gameplay foi alterado.
+Qualquer outra transição lança erro. Conteúdo inválido produz artefato não
+aplicável em READY; falha de infraestrutura/timeout produz FAILED_SAFE. Como
+nenhum estado de gameplay é alterado, DEGRADED não é usado.

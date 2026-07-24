@@ -3,20 +3,31 @@
 ## Ownership
 
 - command registration e execução inicial: server thread;
-- transições, publicação de snapshots/diffs/planos e mensagens de conclusão: server thread;
+- transições, publicação de snapshots/diffs/planos/artefatos e mensagens de conclusão: server thread;
 - enumeração/leitura/hash de recursos: executor de background fornecido pelo `MinecraftServer`;
+- parsing Brigadier de functions: mesmo executor de preparação; esta é a
+  divisão usada por `ServerFunctionLibrary.reload` 1.20.1;
+- captura do dispatcher, permission level e sets ativos de tick/load: server
+  thread antes de iniciar o worker;
 - modelos imutáveis podem atravessar a fronteira.
 
 O serviço não cria pool próprio e não guarda `MinecraftServer` permanentemente. Cada scan recebe `ResourceManager`, executor e callback no contexto da operação.
 
 ## Timeout
 
-O timeout da fase 1 é cooperativo: o scanner verifica deadline antes e durante a enumeração/leitura. Ele não interrompe uma chamada de IO bloqueada no meio. Resultado após falha não deve ser publicado.
+Timeouts de scan e prepare são cooperativos: os loaders verificam deadline
+antes/durante enumeração, leitura e compilação. Não interrompem uma chamada de
+IO bloqueada no meio. Resultado após timeout não é publicado.
 
 ## Exclusão
 
-A máquina de estados impede duas operações simultâneas. A implementação usa sincronização curta apenas para state/snapshots; nunca mantém lock durante IO.
+A máquina de estados impede duas preparações e também scan/plan concorrente com
+prepare. A implementação usa sincronização curta apenas para estado/modelos;
+nunca mantém lock durante IO ou compilação. Completion sempre sai de PREPARING
+para VALIDATING/READY ou FAILED_SAFE.
 
 ## Futuro
 
-Prepare continuará em background; quiesce/commit/sync e troca de referências ocorrerão na server thread. Essa divisão precisará de operation ID/cancellation antes de qualquer commit.
+Quiesce/commit/sync e eventual troca de referências ocorrerão na server thread.
+Essa divisão ainda precisa de operation ID/cancellation e barreira contra
+`ExecutionContext` ativo antes de qualquer commit.

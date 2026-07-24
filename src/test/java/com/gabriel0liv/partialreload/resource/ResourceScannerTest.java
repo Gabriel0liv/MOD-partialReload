@@ -18,6 +18,7 @@ class ResourceScannerTest {
         assertEquals(ReloadCategory.RECIPES, ResourceScanner.classifyPath("recipes/a.json"));
         assertEquals(ReloadCategory.LOOT, ResourceScanner.classifyPath("loot_tables/chests/a.json"));
         assertEquals(ReloadCategory.ITEM_MODIFIERS, ResourceScanner.classifyPath("item_modifiers/a.json"));
+        assertEquals(ReloadCategory.FUNCTIONS, ResourceScanner.classifyPath("tags/functions/tick.json"));
         assertEquals(ReloadCategory.TAGS, ResourceScanner.classifyPath("tags/items/a.json"));
         assertEquals(ReloadCategory.ORIGINS, ResourceScanner.classifyPath("powers/a.json"));
         assertEquals(ReloadCategory.ORIGINS, ResourceScanner.classifyPath("origins/a.json"));

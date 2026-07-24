@@ -10,6 +10,9 @@ public final class PartialReloadConfig {
     private static final ForgeConfigSpec.IntValue MAX_SCANNED_RESOURCES;
     private static final ForgeConfigSpec.IntValue SCAN_TIMEOUT_SECONDS;
     private static final ForgeConfigSpec.BooleanValue ENABLE_UNKNOWN_RESOURCE_REPORTING;
+    private static final ForgeConfigSpec.IntValue PREPARE_TIMEOUT_SECONDS;
+    private static final ForgeConfigSpec.IntValue MAX_FUNCTION_COUNT;
+    private static final ForgeConfigSpec.IntValue MAX_FUNCTION_LINES;
 
     static {
         ForgeConfigSpec.Builder builder = new ForgeConfigSpec.Builder();
@@ -27,6 +30,18 @@ public final class PartialReloadConfig {
         SCAN_TIMEOUT_SECONDS = builder
                 .comment("Cooperative timeout for one scan.")
                 .defineInRange("scan_timeout_seconds", 60, 1, 3_600);
+        builder.pop();
+
+        builder.push("preparation");
+        PREPARE_TIMEOUT_SECONDS = builder
+                .comment("Cooperative timeout for function preparation.")
+                .defineInRange("prepare_timeout_seconds", 60, 1, 3_600);
+        MAX_FUNCTION_COUNT = builder
+                .comment("Hard limit for functions in one prepared generation.")
+                .defineInRange("max_function_count", 100_000, 1, 1_000_000);
+        MAX_FUNCTION_LINES = builder
+                .comment("Hard limit for total function source lines in one preparation.")
+                .defineInRange("max_function_lines", 1_000_000, 1, 10_000_000);
         builder.pop();
 
         builder.push("experimental");
@@ -59,5 +74,17 @@ public final class PartialReloadConfig {
 
     public static boolean enableUnknownResourceReporting() {
         return ENABLE_UNKNOWN_RESOURCE_REPORTING.get();
+    }
+
+    public static int prepareTimeoutSeconds() {
+        return PREPARE_TIMEOUT_SECONDS.get();
+    }
+
+    public static int maxFunctionCount() {
+        return MAX_FUNCTION_COUNT.get();
+    }
+
+    public static int maxFunctionLines() {
+        return MAX_FUNCTION_LINES.get();
     }
 }

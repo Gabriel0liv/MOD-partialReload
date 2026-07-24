@@ -30,7 +30,7 @@ class ReloadPlannerTest {
 
         assertEquals(PLAN_ID, plan.id());
         assertEquals(ApplySupport.APPLY_NOT_IMPLEMENTED, plan.applySupport());
-        assertEquals(SupportStatus.SUPPORTED_READ_ONLY, plan.supportStatus());
+        assertEquals(SupportStatus.PREPARE_SUPPORTED, plan.supportStatus());
         assertTrue(plan.blockers().stream().anyMatch(value -> value.contains("APPLY_NOT_IMPLEMENTED")));
         assertThrows(UnsupportedOperationException.class, () -> plan.blockers().add("mutate"));
     }
@@ -53,6 +53,17 @@ class ReloadPlannerTest {
         assertTrue(unknown.blockers().stream().anyMatch(value -> value.contains("UNKNOWN_RESOURCE")));
         assertEquals(SupportStatus.PLANNED, origins.supportStatus());
         assertTrue(origins.blockers().stream().anyMatch(value -> value.contains("PROVIDER_PLANNED")));
+    }
+
+    @Test
+    void blocksPredicatesUntilPreparedWithLootGraph() {
+        ReloadPlan predicates = planner.createPlan(
+                new ChangeSet(List.of(change(ReloadCategory.PREDICATES)))
+        );
+
+        assertEquals(SupportStatus.PLANNED, predicates.supportStatus());
+        assertTrue(predicates.blockers().stream()
+                .anyMatch(value -> value.contains("PREDICATES_COUPLED_TO_LOOT")));
     }
 
     private static ResourceChange change(ReloadCategory category) {

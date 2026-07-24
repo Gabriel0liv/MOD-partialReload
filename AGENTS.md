@@ -32,4 +32,12 @@ Este repositório usa Spec-Driven Development (SDD). Leia `docs/specs/` e os ADR
 
 ## Fase atual
 
-A fase 1 implementa somente identidade do mod, configuração, registry de providers, scanner, fingerprints, diff, planejamento e comandos read-only. `apply`, `reload` e `rollback` devem falhar de modo explícito e seguro. Consulte `docs/specs/008-phase-one-foundation.md`.
+A fase 2 implementa preparação passiva de functions conforme
+`docs/specs/009-functions-and-predicates-prepare.md`. A preparação compila a
+geração completa contra o dispatcher ativo, resolve tags e produz um artefato
+imutável, mas nunca o publica no `ServerFunctionManager`. Predicates estão
+bloqueados como `PREDICATES_COUPLED_TO_LOOT` pela ADR-006.
+
+`apply`, `reload` e `rollback` devem continuar falhando de modo explícito e
+seguro. Não exponha `CommandFunction` compilada por API executável e não chame
+`ServerFunctionManager.replaceLibrary` antes de uma spec de commit.

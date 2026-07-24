@@ -1,10 +1,10 @@
 # Matriz de compatibilidade inicial
 
-| Domínio | Detecção fase 1 | Apply fase 1 | Status | Dependência/risco principal |
+| Domínio | Detecção | Preparação fase 2 | Status | Dependência/risco principal |
 |---|---|---|---|---|
-| functions | Sim | Não | `SUPPORTED_READ_ONLY` | compilação, tags tick/load, dispatcher |
+| functions | Sim | Sim, sem publicação | `PREPARE_SUPPORTED` | geração candidata compilada com dispatcher real; commit/tick/load permanecem bloqueados |
 | advancements | Sim | Não | `SUPPORTED_READ_ONLY` | estado por jogador e packets |
-| predicates | Sim | Não | `SUPPORTED_READ_ONLY` | LootDataManager compartilhado |
+| predicates | Sim | Não | `PREDICATES_COUPLED_TO_LOOT` | `LootDataManager` compartilhado; requer candidato conjunto com tables/modifiers |
 | recipes | Sim | Não | `SUPPORTED_READ_ONLY` | tags/conditions/sync/addons |
 | loot tables | Sim | Não | `SUPPORTED_READ_ONLY` | tipos de loot, validação, GLM/hooks |
 | item modifiers | Sim | Não | `SUPPORTED_READ_ONLY` | LootDataManager compartilhado |
@@ -27,14 +27,15 @@ Não haverá reflection genérica. A ausência de provider é válida e deve apa
 ## Roadmap preliminar
 
 1. core read-only, scanner, diff e planos;
-2. functions e predicates;
-3. recipes vanilla e sincronização;
-4. KubeJS recipes/server scripts;
-5. loot e item modifiers;
-6. Origins powers e migração de estado;
-7. origins, layers e global power sets;
-8. tags;
-9. Silent Gear;
-10. advancements completos.
+2. preparação de functions; predicates adiados por ADR-006;
+3. commit transacional de functions ou preparação conjunta de loot/predicates/item modifiers;
+4. recipes vanilla e sincronização;
+5. KubeJS recipes/server scripts;
+6. loot/predicates/item modifiers, caso não antecipados para a fase 3;
+7. Origins powers e migração de estado;
+8. origins, layers e global power sets;
+9. tags;
+10. Silent Gear;
+11. advancements completos.
 
-Functions e predicates são a próxima investigação recomendada: têm superfície menor que recipes/tags e permitem provar prepare/validate sem prometer commit global. A ordem pode mudar por evidência em specs futuras.
+Functions foram aprovadas para preparação passiva. Predicates foram movidos para o grafo conjunto de loot porque validação isolada não prova compatibilidade com os contextos das tabelas/modifiers consumidores.
