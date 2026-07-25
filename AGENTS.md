@@ -42,6 +42,11 @@ A fase 3B continua somente preparação conjunta e passiva de predicates, item
 modifiers e loot tables; `VanillaLootDataProvider` nunca publica no
 `LootDataManager`. GLM permanece separado conforme ADR-007.
 
+A Fase 4A prepara recipes vanilla/Forge read-only. A Fase 4B possui apenas
+pesquisa e snapshot/classificação segura de KubeJS até existir um runtime Forge
+1.20.1 exato e uma API de staging isolada; nunca execute `ServerScriptManager`
+ou `RecipesKubeEvent` no runtime ativo.
+
 `reload` e qualquer apply de loot devem falhar de modo explícito e seguro. Não
 escreva os maps privados do `LootDataManager`.
 

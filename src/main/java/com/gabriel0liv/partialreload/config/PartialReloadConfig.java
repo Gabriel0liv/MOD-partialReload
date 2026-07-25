@@ -21,6 +21,12 @@ public final class PartialReloadConfig {
     private static final ForgeConfigSpec.IntValue MAX_DEPENDENCY_EDGES;
     private static final ForgeConfigSpec.IntValue MAX_RECIPES;
     private static final ForgeConfigSpec.LongValue MAX_RECIPE_JSON_BYTES;
+    private static final ForgeConfigSpec.IntValue KUBEJS_PREPARE_TIMEOUT_SECONDS;
+    private static final ForgeConfigSpec.IntValue KUBEJS_MAX_SCRIPT_FILES;
+    private static final ForgeConfigSpec.LongValue KUBEJS_MAX_SCRIPT_BYTES;
+    private static final ForgeConfigSpec.IntValue KUBEJS_MAX_MUTATIONS;
+    private static final ForgeConfigSpec.IntValue KUBEJS_MAX_FINAL_RECIPES;
+    private static final ForgeConfigSpec.IntValue KUBEJS_MAX_DEPENDENCY_EDGES;
 
     static {
         ForgeConfigSpec.Builder builder = new ForgeConfigSpec.Builder();
@@ -68,6 +74,14 @@ public final class PartialReloadConfig {
         builder.push("recipes");
         MAX_RECIPES = builder.defineInRange("max_recipes", 100_000, 1, 1_000_000);
         MAX_RECIPE_JSON_BYTES = builder.defineInRange("max_total_json_bytes", 268_435_456L, 1L, 2_147_483_647L);
+        builder.pop();
+        builder.push("kubejs_recipes");
+        KUBEJS_PREPARE_TIMEOUT_SECONDS = builder.defineInRange("prepare_timeout_seconds", 90, 1, 3_600);
+        KUBEJS_MAX_SCRIPT_FILES = builder.defineInRange("max_script_files", 10_000, 1, 1_000_000);
+        KUBEJS_MAX_SCRIPT_BYTES = builder.defineInRange("max_total_script_bytes", 67_108_864L, 1L, 2_147_483_647L);
+        KUBEJS_MAX_MUTATIONS = builder.defineInRange("max_recipe_mutations", 1_000_000, 1, 10_000_000);
+        KUBEJS_MAX_FINAL_RECIPES = builder.defineInRange("max_final_recipes", 100_000, 1, 1_000_000);
+        KUBEJS_MAX_DEPENDENCY_EDGES = builder.defineInRange("max_script_dependency_edges", 100_000, 1, 10_000_000);
         builder.pop();
         builder.pop();
 
@@ -141,4 +155,10 @@ public final class PartialReloadConfig {
 
     public static int maxRecipes() { return MAX_RECIPES.get(); }
     public static long maxRecipeJsonBytes() { return MAX_RECIPE_JSON_BYTES.get(); }
+    public static int kubeJsPrepareTimeoutSeconds() { return KUBEJS_PREPARE_TIMEOUT_SECONDS.get(); }
+    public static int kubeJsMaxScriptFiles() { return KUBEJS_MAX_SCRIPT_FILES.get(); }
+    public static long kubeJsMaxScriptBytes() { return KUBEJS_MAX_SCRIPT_BYTES.get(); }
+    public static int kubeJsMaxMutations() { return KUBEJS_MAX_MUTATIONS.get(); }
+    public static int kubeJsMaxFinalRecipes() { return KUBEJS_MAX_FINAL_RECIPES.get(); }
+    public static int kubeJsMaxDependencyEdges() { return KUBEJS_MAX_DEPENDENCY_EDGES.get(); }
 }

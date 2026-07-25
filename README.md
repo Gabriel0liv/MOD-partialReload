@@ -23,6 +23,8 @@ exato Forge 47.4.10.
 - supressão `DO_NOT_RUN` de load functions, verificação e rollback em memória.
 - preparação read-only de recipes com serializers reais, conditions, índices,
   dependências e delta.
+- snapshot/classificação read-only de scripts KubeJS e diagnóstico fechado de
+  runtime incompatível (sem executar scripts).
 
 ## Não implementado
 
@@ -32,6 +34,7 @@ exato Forge 47.4.10.
 - rollback após restart ou histórico de gerações;
 - Global Loot Modifiers (provider separado, planejado);
 - integrações KubeJS, Origins e Silent Gear.
+- candidato KubeJS, execução de handlers e commit/sincronização de recipes.
 
 O commit transacional de functions vanilla foi validado em servidor dedicado
 headless no alvo exato Forge 47.4.10. Loot continua apenas em preparação.
@@ -67,6 +70,9 @@ Requerem nível de operador configurável (padrão 4):
 
 `reload` continua bloqueado. `apply prepared` aceita somente
 `PreparedFunctions`; candidatos de loot continuam rejeitados.
+Quando KubeJS não está presente na versão alvo, `prepared` informa
+explicitamente `KubeJS integration: not loaded` e mantém apenas o baseline
+vanilla/Forge.
 
 ## Desenvolvimento
 
@@ -78,6 +84,7 @@ Requisitos: Java 17 e PowerShell/Gradle Wrapper.
 .\gradlew.bat runServer
 python scripts/run-dedicated-function-acceptance.py
 python scripts/run-dedicated-recipe-acceptance.py
+python scripts/run-dedicated-kubejs-recipe-acceptance.py
 ```
 
 O teste dedicado usa RCON temporário em `127.0.0.1`, com senha/porta efêmeras,

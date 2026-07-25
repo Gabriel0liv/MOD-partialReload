@@ -58,3 +58,7 @@ fora de PREPARING e VALIDATING.
 Preparação de recipes usa exatamente `PREPARING → VALIDATING → READY` e não
 cria estados de commit. `apply prepared` rejeita `PreparedRecipes`, mantendo o
 artefato e o manager ativo inalterados.
+
+Quando a fronteira KubeJS detecta ausência ou versão incompatível, a preparação
+vanilla continua em READY e o diagnóstico KubeJS é BLOCKER separado. Não há
+transição adicional nem execução de scripts.

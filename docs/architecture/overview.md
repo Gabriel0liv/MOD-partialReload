@@ -106,3 +106,11 @@ tags. A preparação é `PREPARE_ONLY`: `RecipeManager.apply`, substituição do
 manager e sincronização nunca são chamados. Tags relevantes alteradas geram
 `RECIPE_TAG_DEPENDENCY_CHANGED` (BLOCKER), preservando a semântica segura até
 que uma fase de tags defina um contrato conjunto.
+
+## KubeJS recipes (Fase 4B)
+
+O provider KubeJS é uma fronteira opcional. O ambiente atual não contém o
+runtime Forge 1.20.1: o único JAR local é NeoForge 2101.7.2. Scripts podem ser
+fingerprintados/classificados, mas não são executados. `prepare recipes` mantém
+o baseline vanilla e informa que a integração não está carregada; nenhum
+runtime ativo, listener ou `RecipeManager` é tocado.

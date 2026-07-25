@@ -62,3 +62,12 @@ WARNING não invalida candidato. ERROR e BLOCKER tornam
 `RECIPE_LIMIT_EXCEEDED`. Recipes com erro ou blocker permanecem somente em
 memória e `apply prepared` responde explicitamente que commit de recipes ainda
 não foi implementado.
+
+## Códigos de KubeJS
+
+`KUBEJS_NOT_PRESENT`, `KUBEJS_VERSION_UNSUPPORTED`,
+`KUBEJS_RUNTIME_UNAVAILABLE`, `KUBEJS_STARTUP_SCRIPT_CHANGED_RESTART_REQUIRED`,
+`KUBEJS_CLIENT_SCRIPT_IGNORED`, `KUBEJS_MIXED_SCRIPT_UNSAFE` e
+`KUBEJS_SCRIPT_CHANGED_DURING_PREPARATION` são diagnósticos da fronteira
+opcional. Ausência do runtime torna somente a camada KubeJS não aplicável; não
+invalida o baseline vanilla já preparado.

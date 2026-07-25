@@ -49,3 +49,8 @@ não existe nesta fase. O `ResourceManager` é apenas a visão fornecida pelo
 servidor, e o artefato é entregue ao executor proprietário para transição de
 estado. Os limites de recipes e bytes são cooperativos e o resultado não é
 publicado após timeout.
+
+O scanner KubeJS, quando usado, só lê arquivos e calcula SHA-256 no executor de
+background. Classificação é conservadora e não interpreta JavaScript. Execução
+Rhino/event handlers permanece desabilitada até um runtime versionado fornecer
+staging seguro.

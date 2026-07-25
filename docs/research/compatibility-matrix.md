@@ -48,6 +48,10 @@ RecipeManager 1.20.1: `RecipeManager.fromJson` e serializers reais foram
 validados; a aceitação dedicada preparou 1175 recipes, 23 tipos e 7 serializers,
 recusou apply e preservou o manager ativo. KubeJS permanece separado.
 
+KubeJS: o único artefato local é `kubejs-neoforge 2101.7.2-build.277` com
+Rhino `2101.2.7-build.77`, exigindo NeoForge 21.1.199+. É incompatível com
+Forge 47.4.10/Minecraft 1.20.1; integração KubeJS permanece `RESEARCH_ONLY`.
+
 ## Atualização da aceitação dedicada
 
 No Forge 47.4.10/Minecraft 1.20.1, o commit vanilla de functions foi validado

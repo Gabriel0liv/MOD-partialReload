@@ -346,6 +346,7 @@ public final class PartialReloadCommand {
         source.sendSuccess(() -> Component.literal("Warnings: " + artifact.validation().count(ValidationSeverity.WARNING)
                 + ", Errors: " + artifact.validation().count(ValidationSeverity.ERROR)), false);
         source.sendSuccess(() -> Component.literal("Technically applicable: " + artifact.isApplicable()), false);
+        source.sendSuccess(() -> Component.literal("KubeJS integration: not loaded (Forge 1.20.1 runtime unavailable)"), false);
         source.sendSuccess(() -> Component.literal("Commit support: not implemented for recipes"), false);
         source.sendSuccess(() -> Component.literal("Active RecipeManager: unchanged"), false);
         return 1;
