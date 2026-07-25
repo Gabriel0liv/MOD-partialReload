@@ -66,3 +66,9 @@ transição adicional nem execução de scripts.
 Tags usam `PREPARING → VALIDATING → READY` ou `FAILED_SAFE`; nunca entram em
 `QUIESCING`/`COMMITTING`. `PreparedTags` é mutuamente exclusivo com os demais
 artefatos e `apply prepared` preserva o candidato.
+## Preparação conjunta
+
+O comando `prepare tags_recipes` usa a sequência global `IDLE -> PREPARING ->
+VALIDATING -> READY`. Tags são construídas primeiro; recipes só são publicadas
+como parte do artefato composto após a validação cross-provider. Falha em um
+subprovider leva a `FAILED_SAFE` e não deixa subartefato disponível.

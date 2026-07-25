@@ -11,10 +11,46 @@ import net.minecraft.server.packs.resources.ResourceManager;
 import net.minecraft.world.item.crafting.RecipeManager;
 import net.minecraftforge.common.crafting.CraftingHelper;
 import net.minecraftforge.common.crafting.conditions.ICondition;
+import com.gabriel0liv.partialreload.tags.CandidateTagResolutionView;
 import java.io.InputStreamReader; import java.nio.charset.StandardCharsets; import java.time.Instant;
 import java.util.*;
 
 public final class VanillaRecipesProvider {
+    public PreparedRecipes prepareWithCandidateTags(ResourceManager manager, ResourceSnapshot snapshot,
+                                                     ResourceSnapshot baseline, CandidateTagResolutionView candidateTags,
+                                                     int maxRecipes, long maxJsonBytes, long timeoutNanos, UUID id) {
+        PreparedRecipes base = prepare(manager, snapshot, baseline, Set.of(), maxRecipes, maxJsonBytes, timeoutNanos, id);
+        List<ValidationIssue> issues = new ArrayList<>(base.validation().issues());
+        Set<ResourceLocation> revalidated = new LinkedHashSet<>();
+        Set<ResourceLocation> invalidated = new LinkedHashSet<>();
+        for (PreparedRecipe recipe : base.recipesById().values()) {
+            if (!(recipe.serializerId().getNamespace().equals("minecraft") || recipe.serializerId().getNamespace().equals("forge"))) {
+                issues.add(issue(ValidationSeverity.BLOCKER, "RECIPE_SERIALIZER_CANDIDATE_TAGS_UNSUPPORTED", recipe.id(),
+                        "serializer behavior with candidate tags is unknown: " + recipe.serializerId()));
+            }
+            for (ResourceLocation tag : recipe.referencedTags()) {
+                if (base.conditionBearingRecipes().contains(recipe.id())) {
+                    invalidated.add(recipe.id());
+                    issues.add(issue(ValidationSeverity.BLOCKER, "RECIPE_CONDITION_CANDIDATE_TAGS_UNSUPPORTED", recipe.id(), "recipe condition context cannot be evaluated against candidate tags"));
+                }
+                revalidated.add(recipe.id());
+                if (!candidateTags.registrySupported("items") || !candidateTags.tagExists("items", tag)) {
+                    invalidated.add(recipe.id());
+                    issues.add(issue(ValidationSeverity.BLOCKER, "RECIPE_CANDIDATE_TAG_MISSING", recipe.id(), "candidate item tag is missing: " + tag));
+                } else if (candidateTags.resolvedMembers("items", tag).isEmpty()) {
+                    invalidated.add(recipe.id());
+                    issues.add(issue(ValidationSeverity.BLOCKER, "RECIPE_CANDIDATE_TAG_EMPTY", recipe.id(), "candidate item tag is empty: " + tag));
+                }
+            }
+        }
+        RecipeDependencyGraph graph = base.dependencyGraph();
+        Map<ResourceLocation, Set<ResourceLocation>> recipeToTags = new LinkedHashMap<>(graph.dependencies());
+        Map<ResourceLocation, Set<ResourceLocation>> tagToRecipes = new LinkedHashMap<>();
+        recipeToTags.forEach((recipe, tags) -> tags.forEach(tag -> tagToRecipes.computeIfAbsent(tag, k -> new LinkedHashSet<>()).add(recipe)));
+        return new PreparedRecipes(base.preparationId(), base.createdAt(), base.sourceSnapshot(), base.recipesById(), base.recipesByType(),
+                graph, base.delta(), new ValidationReport(issues), base.discoveredRecipes(), base.preparedRecipes(), base.skippedByCondition(),
+                base.serializersUsed(), base.recipeTypesUsed(), revalidated, base.conditionBearingRecipes());
+    }
     @SuppressWarnings("deprecation")
     public PreparedRecipes prepare(ResourceManager manager, ResourceSnapshot snapshot,
                                    ResourceSnapshot baseline, Set<ResourceLocation> changedTags,
@@ -22,6 +58,7 @@ public final class VanillaRecipesProvider {
         long deadline = System.nanoTime()+timeoutNanos; List<ValidationIssue> issues=new ArrayList<>();
         Map<ResourceLocation, PreparedRecipe> byId=new LinkedHashMap<>(); Map<ResourceLocation,List<PreparedRecipe>> byType=new LinkedHashMap<>();
         Map<ResourceLocation, Set<ResourceLocation>> deps=new LinkedHashMap<>(); Set<ResourceLocation> serializers=new LinkedHashSet<>(), types=new LinkedHashSet<>();
+        Set<ResourceLocation> conditionBearing = new LinkedHashSet<>();
         int skipped=0; long totalBytes=0; Map<ResourceLocation, Resource> resources=manager.listResources("recipes", l->l.getPath().endsWith(".json"));
         if(resources.size()>maxRecipes) issues.add(issue(ValidationSeverity.BLOCKER,"RECIPE_LIMIT_EXCEEDED",null,"recipe limit exceeded"));
         for(var entry: resources.entrySet().stream().sorted(Map.Entry.comparingByKey(Comparator.comparing(ResourceLocation::toString))).toList()) {
@@ -41,6 +78,7 @@ public final class VanillaRecipesProvider {
                     skipped++; issues.add(issue(ValidationSeverity.INFO,"RECIPE_CONDITION_FALSE",idLoc,"condition evaluated false")); continue;
                 }
                 var recipe=RecipeManager.fromJson(idLoc,json,ICondition.IContext.EMPTY);
+                if (json.has("conditions")) conditionBearing.add(idLoc);
                 ResourceLocation sid=BuiltInRegistries.RECIPE_SERIALIZER.getKey(recipe.getSerializer());
                 ResourceLocation tid=BuiltInRegistries.RECIPE_TYPE.getKey(recipe.getType());
                 if(sid==null) sid=ResourceLocation.withDefaultNamespace("unknown"); if(tid==null) tid=ResourceLocation.withDefaultNamespace("unknown");
@@ -54,7 +92,7 @@ public final class VanillaRecipesProvider {
         }
         Set<ResourceLocation> current=Set.copyOf(byId.keySet()), old=baseline==null?Set.of():baseline.resources().values().stream().filter(e->e.category()==ReloadCategory.RECIPES).map(ResourceDescriptor::logicalId).collect(java.util.stream.Collectors.toSet());
         Set<ResourceLocation> added=new HashSet<>(current); added.removeAll(old); Set<ResourceLocation> removed=new HashSet<>(old); removed.removeAll(current);
-        return new PreparedRecipes(id,Instant.now(),snapshot,byId,byType,new RecipeDependencyGraph(deps),new RecipeDelta(added,Set.of(),removed,Set.of()),new ValidationReport(issues),resources.size(),byId.size(),skipped,serializers,types);
+        return new PreparedRecipes(id,Instant.now(),snapshot,byId,byType,new RecipeDependencyGraph(deps),new RecipeDelta(added,Set.of(),removed,Set.of()),new ValidationReport(issues),resources.size(),byId.size(),skipped,serializers,types,Set.of(),conditionBearing);
     }
     private static void collectDependencies(JsonElement e, Set<ResourceLocation> items, Set<ResourceLocation> tags){
         if(e.isJsonObject()) for(var x:e.getAsJsonObject().entrySet()) {

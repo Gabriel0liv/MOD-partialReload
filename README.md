@@ -26,10 +26,13 @@ exato Forge 47.4.10.
 - snapshot/classificação read-only de scripts KubeJS e diagnóstico fechado.
 - preparação read-only de tags gerais por registry, com stack de datapacks,
   `replace`, entries opcionais, nested tags, grafo e delta imutável.
+- preparação conjunta read-only de tags + recipes com snapshot compartilhado,
+  resolução candidata, revalidação cross-provider, grafo e delta combinados.
 
 ## Não implementado
 
 - commit de loot/predicates/item modifiers;
+- commit de tags, recipes ou do artefato conjunto tags + recipes;
 - commit ou sincronização de recipes;
 - políticas de load diferentes de `DO_NOT_RUN`;
 - rollback após restart ou histórico de gerações;
@@ -59,6 +62,7 @@ Requerem nível de operador configurável (padrão 4):
 /partialreload prepare functions
 /partialreload prepare recipes
 /partialreload prepare tags
+/partialreload prepare tags_recipes
 /partialreload prepare predicates
 /partialreload prepare item_modifiers
 /partialreload prepare loot
@@ -80,6 +84,8 @@ handler foi executado e nenhuma aceitação com runtime alvo foi realizada.
 
 Tags gerais possuem preparação read-only; binding, sincronização e commit ainda
 não são implementados.
+Quando tags e recipes são preparadas juntas, `PreparedTagsAndRecipes` é
+atômico e `apply prepared` permanece recusado.
 
 ## Desenvolvimento
 
@@ -92,6 +98,7 @@ Requisitos: Java 17 e PowerShell/Gradle Wrapper.
 python scripts/run-dedicated-function-acceptance.py
 python scripts/run-dedicated-recipe-acceptance.py
 python scripts/run-dedicated-tag-acceptance.py
+python scripts/run-dedicated-tags-recipes-acceptance.py
 python scripts/run-dedicated-kubejs-recipe-acceptance.py
 ```
 

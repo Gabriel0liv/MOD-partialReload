@@ -5,11 +5,11 @@
 | functions | Sim | Sim, sem publicação | `PREPARE_SUPPORTED` | geração candidata compilada com dispatcher real; commit/tick/load permanecem bloqueados |
 | advancements | Sim | Não | `SUPPORTED_READ_ONLY` | estado por jogador e packets |
 | predicates | Sim | Sim, no candidato conjunto | `PREPARE_SUPPORTED` | resolver/validator compartilhado; commit bloqueado |
-| recipes | Sim | Não | `SUPPORTED_READ_ONLY` | tags/conditions/sync/addons |
+| recipes | Sim | Sim, isolada e conjunta com tags candidatas | `PREPARE_SUPPORTED` | serializers/conditions desconhecidos, sync/addons |
 | loot tables | Sim | Sim, no candidato conjunto | `PREPARE_SUPPORTED` | GLM separado; hooks externos reportados |
 | item modifiers | Sim | Sim, no candidato conjunto | `PREPARE_SUPPORTED` | resolver/validator compartilhado |
 | Forge GLM | Detecção própria | Não | `PLANNED` | ADR-007: listener/codec/estado ativo separados |
-| tags | Sim | Sim, candidato imutável sem binding | `PREPARE_SUPPORTED` | bind de registries, caches, packets/events |
+| tags | Sim | Sim, isolada e conjunta com recipes | `PREPARE_SUPPORTED` | bind de registries, caches, packets/events |
 | Origins/Apoli | Sim | Não | `PLANNED` | Calio registries + migração/sync |
 | KubeJS | Scripts fora de ResourceManager não entram no scanner vanilla; recursos data entram como `UNKNOWN`/categoria estrutural | Não | `KUBEJS_RECIPE_PREPARATION_BLOCKED` | não existe runtime Forge 1.20.1 exato; apenas artefato NeoForge 1.21.1 local |
 | Silent Gear | Sim para materials/traits | Não | `PLANNED` | managers, login packets, NBT/caches |

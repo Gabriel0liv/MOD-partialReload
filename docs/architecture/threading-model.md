@@ -59,3 +59,9 @@ Tags capturam `RegistryAccess` na server thread, mas leitura, parsing, merge de
 packs, grafo e validação rodam no executor de background. Nenhuma chamada de
 `bindTags` ocorre em qualquer thread. O artefato é entregue ao executor owner
 somente para transição de estado.
+## Tags + recipes
+
+A leitura de bytes, parsing JSON e construção de `PreparedTagsResolutionView`
+ocorrem no executor de background. A continuação no executor owner apenas
+instala ou descarta o artefato imutável e atualiza o estado; nenhum binding,
+RecipeManager ou holder é acessado para publicação.

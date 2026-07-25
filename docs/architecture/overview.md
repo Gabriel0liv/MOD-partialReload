@@ -125,3 +125,11 @@ não há runtime Forge 1.20.1 nem API de staging comprovada.
 `replace`, `values` e operações `remove` representadas, resolve referências,
 detecta ciclos, valida elementos via `RegistryAccess` e produz `PreparedTags`.
 Nenhum holder é bindado e `apply` permanece recusado.
+
+## Preparação conjunta tags + recipes
+
+`PreparedTagsAndRecipes` agrega dois candidatos imutáveis derivados do mesmo
+snapshot. `PreparedTagsResolutionView` resolve IDs e membros logicamente,
+sem holders ativos. Tags são preparadas antes de recipes; serializers e
+conditions que exigirem contexto ativo falham fechado. O artefato não pode
+ser publicado ou sincronizado.

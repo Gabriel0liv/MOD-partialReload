@@ -27,12 +27,19 @@ import com.gabriel0liv.partialreload.recipe.PreparedRecipes;
 import com.gabriel0liv.partialreload.recipe.VanillaRecipesProvider;
 import com.gabriel0liv.partialreload.tags.PreparedTags;
 import com.gabriel0liv.partialreload.tags.VanillaTagsProvider;
+import com.gabriel0liv.partialreload.tags.PreparedTagsResolutionView;
+import com.gabriel0liv.partialreload.joint.PreparedTagsAndRecipes;
+import com.gabriel0liv.partialreload.joint.TagRecipeDependencyGraph;
+import com.gabriel0liv.partialreload.joint.TagRecipeDelta;
+import com.gabriel0liv.partialreload.validation.ValidationIssue;
+import com.gabriel0liv.partialreload.validation.ValidationReport;
 import com.gabriel0liv.partialreload.config.PartialReloadConfig;
 import com.gabriel0liv.partialreload.resource.ResourceSnapshot;
 
 import javax.annotation.Nullable;
 import java.util.Objects;
 import java.util.Map;
+import java.util.List;
 import java.util.Set;
 import java.util.UUID;
 import java.time.Instant;
@@ -226,6 +233,10 @@ public final class PartialReloadService {
         return preparedArtifact instanceof PreparedTags tags ? tags : null;
     }
 
+    public synchronized PreparedTagsAndRecipes preparedTagsAndRecipes() {
+        return preparedArtifact instanceof PreparedTagsAndRecipes joint ? joint : null;
+    }
+
     public synchronized boolean hasTagChanges() {
         return lastChangeSet.changedResources().stream().anyMatch(change -> change.category() == ReloadCategory.TAGS);
     }
@@ -284,6 +295,56 @@ public final class PartialReloadService {
                 }, owner);
     }
 
+    public CompletableFuture<PreparedTagsAndRecipes> prepareTagsAndRecipesAsync(
+            net.minecraft.server.packs.resources.ResourceManager resourceManager,
+            net.minecraft.core.RegistryAccess registryAccess, Executor background, Executor owner) {
+        ResourceSnapshot snapshot; ResourceSnapshot baseline;
+        synchronized (this) {
+            snapshot = latestScan;
+            if (snapshot == null) throw new IllegalStateException("JOINT_PREPARATION_REQUIRED: scan first");
+            resetTerminalState(); stateMachine.transitionTo(PartialReloadState.PREPARING);
+            preparedArtifact = null; lastError = null; baseline = activeReference;
+        }
+        final ResourceSnapshot shared = snapshot;
+        return CompletableFuture.supplyAsync(() -> {
+            PreparedTags tags = tagsProvider.prepare(resourceManager, registryAccess, shared, baseline,
+                    PartialReloadConfig.maxTagFiles(), PartialReloadConfig.maxTags(), PartialReloadConfig.maxTagEntries(),
+                    PartialReloadConfig.maxTagJsonBytes(), java.time.Duration.ofSeconds(PartialReloadConfig.tagPrepareTimeoutSeconds()).toNanos(), UUID.randomUUID());
+            if (!tags.isApplicable()) return new PreparedTagsAndRecipes(UUID.randomUUID(), Instant.now(), shared, tags,
+                    new PreparedRecipes(UUID.randomUUID(), Instant.now(), shared, Map.of(), Map.of(),
+                            new com.gabriel0liv.partialreload.recipe.RecipeDependencyGraph(Map.of()),
+                            new com.gabriel0liv.partialreload.recipe.RecipeDelta(Set.of(), Set.of(), Set.of(), Set.of()),
+                            ValidationReport.VALID, 0, 0, 0, Set.of(), Set.of()),
+                    new TagRecipeDependencyGraph(Map.of(), Map.of(), Set.of(), Set.of()),
+                    new TagRecipeDelta(Set.of(), Set.of(), Set.of(), Set.of(), Set.of(), Set.of(), Set.of(), Set.of(), Set.of(), Set.of(), Set.of()),
+                    new ValidationReport(tags.validation().issues()));
+            PreparedRecipes recipes = recipesProvider.prepareWithCandidateTags(resourceManager, shared, baseline,
+                    new PreparedTagsResolutionView(tags), PartialReloadConfig.maxRecipes(), PartialReloadConfig.maxRecipeJsonBytes(),
+                    java.time.Duration.ofSeconds(60).toNanos(), UUID.randomUUID());
+            List<ValidationIssue> issues = new java.util.ArrayList<>(tags.validation().issues());
+            issues.addAll(recipes.validation().issues());
+            Map<ResourceLocation, Set<ResourceLocation>> recipeToTags = new java.util.LinkedHashMap<>(recipes.dependencyGraph().dependencies());
+            Map<ResourceLocation, Set<ResourceLocation>> tagToRecipes = new java.util.LinkedHashMap<>();
+            recipeToTags.forEach((recipe, tagIds) -> tagIds.forEach(tag -> tagToRecipes.computeIfAbsent(tag, k -> new java.util.LinkedHashSet<>()).add(recipe)));
+            Set<ResourceLocation> impacted = new java.util.LinkedHashSet<>();
+            Set<ResourceLocation> changedTags = new java.util.LinkedHashSet<>(tags.delta().tagsAdded());
+            changedTags.addAll(tags.delta().tagsModified()); changedTags.addAll(tags.delta().tagsRemoved());
+            recipeToTags.forEach((recipe, tagIds) -> { if (!java.util.Collections.disjoint(tagIds, changedTags)) impacted.add(recipe); });
+            TagRecipeDependencyGraph graph = new TagRecipeDependencyGraph(recipeToTags, tagToRecipes, recipes.revalidatedDueToTagChange(), Set.of());
+            TagRecipeDelta delta = new TagRecipeDelta(Set.copyOf(changedTags), Set.copyOf(changedTags), tags.delta().membersAdded(), tags.delta().membersRemoved(),
+                    recipes.delta().added(), recipes.delta().modified(), recipes.delta().removed(), impacted,
+                    recipes.revalidatedDueToTagChange(), Set.of(), Set.of());
+            return new PreparedTagsAndRecipes(UUID.randomUUID(), Instant.now(), shared, tags, recipes, graph, delta, new ValidationReport(issues));
+        }, background).handleAsync((artifact, throwable) -> {
+            synchronized (this) {
+                if (throwable != null) { lastError = rootMessage(throwable); stateMachine.transitionTo(PartialReloadState.FAILED_SAFE); throw new CompletionException(throwable); }
+                stateMachine.transitionTo(PartialReloadState.VALIDATING); preparedArtifact = artifact;
+                if (!artifact.isApplicable()) lastError = "JOINT_TAG_RECIPE_PREPARATION_FAILED";
+                stateMachine.transitionTo(PartialReloadState.READY); return artifact;
+            }
+        }, owner);
+    }
+
     public synchronized PreparedReloadArtifact preparedArtifact() {
         return preparedArtifact;
     }
@@ -315,6 +376,9 @@ public final class PartialReloadService {
             }
             if (preparedArtifact instanceof PreparedTags) {
                 throw new IllegalArgumentException("Commit is not implemented for tags. Prepared artifact remains unchanged.");
+            }
+            if (preparedArtifact instanceof PreparedTagsAndRecipes) {
+                throw new IllegalArgumentException("Commit is not implemented for joint tag and recipe candidates. Prepared artifact remains unchanged.");
             }
             throw new IllegalArgumentException("FUNCTION_PREPARATION_REQUIRED");
         }

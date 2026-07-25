@@ -18,6 +18,7 @@ import com.gabriel0liv.partialreload.loot.PreparedLootData;
 import com.gabriel0liv.partialreload.loot.VanillaLootDataProvider;
 import com.gabriel0liv.partialreload.recipe.PreparedRecipes;
 import com.gabriel0liv.partialreload.tags.PreparedTags;
+import com.gabriel0liv.partialreload.joint.PreparedTagsAndRecipes;
 import com.gabriel0liv.partialreload.validation.ValidationSeverity;
 import com.mojang.brigadier.CommandDispatcher;
 import com.mojang.brigadier.arguments.StringArgumentType;
@@ -76,7 +77,9 @@ public final class PartialReloadCommand {
                         .then(Commands.literal("recipes")
                                 .executes(context -> prepareRecipes(context.getSource(), service, false)))
                         .then(Commands.literal("tags")
-                                .executes(context -> prepareTags(context.getSource(), service, false))))
+                                .executes(context -> prepareTags(context.getSource(), service, false)))
+                        .then(Commands.literal("tags_recipes")
+                                .executes(context -> prepareTagsAndRecipes(context.getSource(), service))))
                 .then(Commands.literal("prepared")
                         .executes(context -> prepared(context.getSource(), service)))
                 .then(Commands.literal("discard")
@@ -300,8 +303,13 @@ public final class PartialReloadCommand {
     }
 
     private static int prepareChanged(CommandSourceStack source, PartialReloadService service) {
-        if (service.hasTagChanges() && service.lastChangeSet().changedResources().stream().anyMatch(c -> c.category() != ReloadCategory.TAGS)) {
-            source.sendFailure(Component.literal("Changed resources span tags and other categories. Select an explicit category; joint tag composition is not implemented."));
+        boolean tags = service.hasTagChanges();
+        boolean recipes = service.hasRecipeChanges();
+        boolean onlyTagsRecipes = service.lastChangeSet().changedResources().stream()
+                .allMatch(c -> c.category() == ReloadCategory.TAGS || c.category() == ReloadCategory.RECIPES);
+        if (tags && recipes && onlyTagsRecipes) return prepareTagsAndRecipes(source, service);
+        if (tags && service.lastChangeSet().changedResources().stream().anyMatch(c -> c.category() != ReloadCategory.TAGS && c.category() != ReloadCategory.RECIPES)) {
+            source.sendFailure(Component.literal("Changed resources span tags/recipes and other categories. Select an explicit category."));
             return 0;
         }
         if (service.hasTagChanges()) return prepareTags(source, service, true);
@@ -336,6 +344,7 @@ public final class PartialReloadCommand {
         if (changedOnly && !service.hasRecipeChanges()) {
             source.sendFailure(Component.literal("No changed recipes are present.")); return 0;
         }
+        if (service.hasTagChanges()) return prepareTagsAndRecipes(source, service);
         try {
             service.prepareRecipesAsync(source.getServer().getResourceManager(), Util.backgroundExecutor(), source.getServer())
                     .whenComplete((artifact, throwable) -> {
@@ -344,6 +353,21 @@ public final class PartialReloadCommand {
                     });
         } catch (RuntimeException exception) { source.sendFailure(Component.literal("Preparation rejected: " + exception.getMessage())); return 0; }
         source.sendSuccess(() -> Component.literal("Recipe preparation started. Active RecipeManager remains unchanged."), false);
+        return 1;
+    }
+
+    private static int prepareTagsAndRecipes(CommandSourceStack source, PartialReloadService service) {
+        if (!service.hasTagChanges() && !service.hasRecipeChanges()) {
+            source.sendFailure(Component.literal("No changed tags or recipes are present.")); return 0;
+        }
+        try {
+            service.prepareTagsAndRecipesAsync(source.getServer().getResourceManager(), source.getServer().registryAccess(),
+                    Util.backgroundExecutor(), source.getServer()).whenComplete((artifact, throwable) -> {
+                if (throwable != null) source.sendFailure(Component.literal("Joint tag/recipe preparation failed safely: " + rootMessage(throwable)));
+                else showPreparedTagsAndRecipes(source, artifact);
+            });
+        } catch (RuntimeException exception) { source.sendFailure(Component.literal("Preparation rejected: " + exception.getMessage())); return 0; }
+        source.sendSuccess(() -> Component.literal("Joint tag and recipe preparation started. Active bindings and RecipeManager remain unchanged."), false);
         return 1;
     }
 
@@ -390,6 +414,22 @@ public final class PartialReloadCommand {
                 source.sendFailure(Component.literal(issue.severity() + " " + issue.code() + " " + issue.message())));
         source.sendSuccess(() -> Component.literal("Binding support: not implemented"), false);
         source.sendSuccess(() -> Component.literal("Active registry tags: unchanged"), false);
+        return 1;
+    }
+
+    private static int showPreparedTagsAndRecipes(CommandSourceStack source, PreparedTagsAndRecipes artifact) {
+        source.sendSuccess(() -> Component.literal("PreparedTagsAndRecipes #" + artifact.preparationId()), false);
+        source.sendSuccess(() -> Component.literal("Mode: JOINT_PREPARE_ONLY"), false);
+        source.sendSuccess(() -> Component.literal("Shared snapshot: " + artifact.sourceSnapshot().scannedAt()), false);
+        source.sendSuccess(() -> Component.literal("Tags prepared: " + artifact.preparedTags().preparedTags() + ", resolved members: " + artifact.preparedTags().resolvedMembers()), false);
+        source.sendSuccess(() -> Component.literal("Recipes prepared: " + artifact.preparedRecipes().preparedRecipes()), false);
+        source.sendSuccess(() -> Component.literal("Recipes revalidated due to tag changes: " + artifact.preparedRecipes().revalidatedDueToTagChange().size()), false);
+        source.sendSuccess(() -> Component.literal("Cross-provider dependencies: " + artifact.dependencyGraph().edgeCount()), false);
+        source.sendSuccess(() -> Component.literal("Warnings: " + artifact.validation().count(ValidationSeverity.WARNING) + ", errors/blockers: " + artifact.validation().issues().stream().filter(i -> i.severity() == ValidationSeverity.ERROR || i.severity() == ValidationSeverity.BLOCKER).count()), false);
+        source.sendSuccess(() -> Component.literal("Technically applicable: " + artifact.isApplicable()), false);
+        source.sendSuccess(() -> Component.literal("Tag binding: not implemented"), false);
+        source.sendSuccess(() -> Component.literal("Recipe commit: not implemented"), false);
+        source.sendSuccess(() -> Component.literal("Active tags and RecipeManager: unchanged"), false);
         return 1;
     }
 
@@ -457,6 +497,7 @@ public final class PartialReloadCommand {
         if (artifact instanceof PreparedLootData lootData) return showPreparedLoot(source, lootData);
         if (artifact instanceof PreparedRecipes recipes) return showPreparedRecipes(source, recipes);
         if (artifact instanceof PreparedTags tags) return showPreparedTags(source, tags);
+        if (artifact instanceof PreparedTagsAndRecipes joint) return showPreparedTagsAndRecipes(source, joint);
         source.sendFailure(Component.literal("Unknown prepared artifact type."));
         return 0;
     }

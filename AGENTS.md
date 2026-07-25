@@ -56,6 +56,12 @@ tags, packets ou sincronização de clientes.
 `reload` e qualquer apply de loot devem falhar de modo explícito e seguro. Não
 escreva os maps privados do `LootDataManager`.
 
+A Fase 4D prepara `PreparedTagsAndRecipes` somente quando tags e recipes são
+solicitadas juntas. O artefato usa um snapshot compartilhado e
+`PreparedTagsResolutionView`; não binda tags, não muta `RecipeManager` e
+`apply` deve ser recusado. Serializers ou conditions que dependam de holders
+ativos falham fechado.
+
 A Fase 4A prepara recipes com serializers reais, mas continua PREPARE_ONLY:
 não trocar `RecipeManager`, sincronizar clientes ou executar KubeJS.
 

@@ -80,3 +80,9 @@ invalida o baseline vanilla já preparado.
 `TAG_FUNCTION_DOMAIN_DELEGATED`, `TAG_LIMIT_EXCEEDED` e
 `TAG_PREPARATION_TIMEOUT`. `TAG_BINDING_NOT_PERFORMED` é informativo; ausência
 de binding não é falha porque commit está fora do escopo.
+## Erros cross-provider
+
+`JOINT_PREPARATION_SNAPSHOT_MISMATCH`, `RECIPE_CANDIDATE_TAG_MISSING`,
+`RECIPE_CANDIDATE_TAG_EMPTY`, `RECIPE_SERIALIZER_CANDIDATE_TAGS_UNSUPPORTED` e
+`RECIPE_CONDITION_CANDIDATE_TAGS_UNSUPPORTED` são blockers. A preparação é
+atômica: erros em tags ou recipes invalidam o composto inteiro.
