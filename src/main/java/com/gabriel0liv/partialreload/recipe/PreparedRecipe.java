@@ -1,7 +1,6 @@
 package com.gabriel0liv.partialreload.recipe;
 
 import net.minecraft.resources.ResourceLocation;
-import net.minecraft.tags.TagKey;
 import net.minecraft.world.item.crafting.Recipe;
 import java.util.Set;
 

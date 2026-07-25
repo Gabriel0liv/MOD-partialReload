@@ -16,16 +16,16 @@ import static org.junit.jupiter.api.Assertions.*;
 class PreparedRecipesTest {
     @Test
     void artifactCopiesCollectionsAndKeepsSnapshotIdentity() {
-        ResourceLocation id = new ResourceLocation("test", "recipe");
+        ResourceLocation id = ResourceLocation.fromNamespaceAndPath("test", "recipe");
         PreparedRecipe recipe = new PreparedRecipe(id, "recipes/recipe.json", "pack", "a".repeat(64),
-                new ResourceLocation("minecraft", "crafting_shaped"),
-                new ResourceLocation("minecraft", "crafting"), null,
-                Set.of(new ResourceLocation("minecraft", "stick")), Set.of());
+                ResourceLocation.fromNamespaceAndPath("minecraft", "crafting_shaped"),
+                ResourceLocation.fromNamespaceAndPath("minecraft", "crafting"), null,
+                Set.of(ResourceLocation.fromNamespaceAndPath("minecraft", "stick")), Set.of());
         Map<ResourceLocation, PreparedRecipe> source = new java.util.HashMap<>();
         source.put(id, recipe);
         ResourceSnapshot snapshot = new ResourceSnapshot(Instant.now(), Map.of());
         PreparedRecipes artifact = new PreparedRecipes(UUID.randomUUID(), Instant.now(), snapshot, source,
-                Map.of(new ResourceLocation("minecraft", "crafting"), List.of(recipe)),
+                Map.of(ResourceLocation.fromNamespaceAndPath("minecraft", "crafting"), List.of(recipe)),
                 new RecipeDependencyGraph(Map.of(id, Set.of())),
                 new RecipeDelta(Set.of(id), Set.of(), Set.of(), Set.of()), ValidationReport.VALID,
                 1, 1, 0, Set.of(recipe.serializerId()), Set.of(recipe.recipeTypeId()));

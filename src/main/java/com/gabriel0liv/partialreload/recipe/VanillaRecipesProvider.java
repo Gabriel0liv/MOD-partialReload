@@ -15,6 +15,7 @@ import java.io.InputStreamReader; import java.nio.charset.StandardCharsets; impo
 import java.util.*;
 
 public final class VanillaRecipesProvider {
+    @SuppressWarnings("deprecation")
     public PreparedRecipes prepare(ResourceManager manager, ResourceSnapshot snapshot,
                                    ResourceSnapshot baseline, Set<ResourceLocation> changedTags,
                                    int maxRecipes, long maxJsonBytes, long timeoutNanos, UUID id) {

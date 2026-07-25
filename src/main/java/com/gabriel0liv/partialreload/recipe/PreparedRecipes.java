@@ -5,7 +5,6 @@ import com.gabriel0liv.partialreload.api.ReloadCategory;
 import com.gabriel0liv.partialreload.resource.ResourceSnapshot;
 import com.gabriel0liv.partialreload.validation.ValidationReport;
 import net.minecraft.resources.ResourceLocation;
-import net.minecraft.world.item.crafting.RecipeType;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
