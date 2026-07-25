@@ -23,8 +23,9 @@ exato Forge 47.4.10.
 - supressão `DO_NOT_RUN` de load functions, verificação e rollback em memória.
 - preparação read-only de recipes com serializers reais, conditions, índices,
   dependências e delta.
-- snapshot/classificação read-only de scripts KubeJS e diagnóstico fechado de
-  runtime incompatível (sem executar scripts).
+- snapshot/classificação read-only de scripts KubeJS e diagnóstico fechado.
+- preparação read-only de tags gerais por registry, com stack de datapacks,
+  `replace`, entries opcionais, nested tags, grafo e delta imutável.
 
 ## Não implementado
 
@@ -34,7 +35,7 @@ exato Forge 47.4.10.
 - rollback após restart ou histórico de gerações;
 - Global Loot Modifiers (provider separado, planejado);
 - integrações KubeJS, Origins e Silent Gear.
-- candidato KubeJS, execução de handlers e commit/sincronização de recipes.
+- execução de handlers KubeJS e candidato combinado de recipes (**bloqueado** sem runtime Forge 1.20.1 exato);
 
 O commit transacional de functions vanilla foi validado em servidor dedicado
 headless no alvo exato Forge 47.4.10. Loot continua apenas em preparação.
@@ -57,6 +58,7 @@ Requerem nível de operador configurável (padrão 4):
 /partialreload prepare changed
 /partialreload prepare functions
 /partialreload prepare recipes
+/partialreload prepare tags
 /partialreload prepare predicates
 /partialreload prepare item_modifiers
 /partialreload prepare loot
@@ -73,6 +75,11 @@ Requerem nível de operador configurável (padrão 4):
 Quando KubeJS não está presente na versão alvo, `prepared` informa
 explicitamente `KubeJS integration: not loaded` e mantém apenas o baseline
 vanilla/Forge.
+KubeJS recipe preparation status: `KUBEJS_RECIPE_PREPARATION_BLOCKED`. Nenhum
+handler foi executado e nenhuma aceitação com runtime alvo foi realizada.
+
+Tags gerais possuem preparação read-only; binding, sincronização e commit ainda
+não são implementados.
 
 ## Desenvolvimento
 
@@ -84,6 +91,7 @@ Requisitos: Java 17 e PowerShell/Gradle Wrapper.
 .\gradlew.bat runServer
 python scripts/run-dedicated-function-acceptance.py
 python scripts/run-dedicated-recipe-acceptance.py
+python scripts/run-dedicated-tag-acceptance.py
 python scripts/run-dedicated-kubejs-recipe-acceptance.py
 ```
 

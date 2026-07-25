@@ -9,9 +9,9 @@
 | loot tables | Sim | Sim, no candidato conjunto | `PREPARE_SUPPORTED` | GLM separado; hooks externos reportados |
 | item modifiers | Sim | Sim, no candidato conjunto | `PREPARE_SUPPORTED` | resolver/validator compartilhado |
 | Forge GLM | Detecção própria | Não | `PLANNED` | ADR-007: listener/codec/estado ativo separados |
-| tags | Sim | Não | `SUPPORTED_READ_ONLY` | bind de registries, caches, packets/events |
+| tags | Sim | Sim, candidato imutável sem binding | `PREPARE_SUPPORTED` | bind de registries, caches, packets/events |
 | Origins/Apoli | Sim | Não | `PLANNED` | Calio registries + migração/sync |
-| KubeJS | Scripts fora de ResourceManager não entram no scanner vanilla; recursos data entram como `UNKNOWN`/categoria estrutural | Não | `PLANNED` | lifecycle completo, Mixins, addons |
+| KubeJS | Scripts fora de ResourceManager não entram no scanner vanilla; recursos data entram como `UNKNOWN`/categoria estrutural | Não | `KUBEJS_RECIPE_PREPARATION_BLOCKED` | não existe runtime Forge 1.20.1 exato; apenas artefato NeoForge 1.21.1 local |
 | Silent Gear | Sim para materials/traits | Não | `PLANNED` | managers, login packets, NBT/caches |
 | worldgen/damage type | Sim | Não | `RESTART_REQUIRED` | registries dinâmicos e mundo existente |
 | desconhecido | Sim, quando encontrado dentro dos roots observados | Não | `UNKNOWN` | contrato inexistente; descoberta de novos roots será parte da SPI futura |
@@ -35,7 +35,7 @@ Não haverá reflection genérica. A ausência de provider é válida e deve apa
 6. commit transacional de functions, loot data ou preparação de recipes, conforme nova spec;
 7. Origins powers e migração de estado;
 8. origins, layers e global power sets;
-9. tags;
+9. preparação read-only de tags gerais (Spec 014);
 10. Silent Gear;
 11. advancements completos.
 

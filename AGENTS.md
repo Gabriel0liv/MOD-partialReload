@@ -46,6 +46,12 @@ A Fase 4A prepara recipes vanilla/Forge read-only. A Fase 4B possui apenas
 pesquisa e snapshot/classificação segura de KubeJS até existir um runtime Forge
 1.20.1 exato e uma API de staging isolada; nunca execute `ServerScriptManager`
 ou `RecipesKubeEvent` no runtime ativo.
+O estado oficial da integração é `KUBEJS_RECIPE_PREPARATION_BLOCKED`, não
+pending acceptance.
+
+A Fase 4C prepara tags gerais em `PreparedTags` read-only. `tags/functions` são
+delegadas ao provider de functions; nunca chame `Registry.bindTags`, eventos de
+tags, packets ou sincronização de clientes.
 
 `reload` e qualquer apply de loot devem falhar de modo explícito e seguro. Não
 escreva os maps privados do `LootDataManager`.

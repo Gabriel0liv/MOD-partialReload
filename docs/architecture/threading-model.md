@@ -54,3 +54,8 @@ O scanner KubeJS, quando usado, só lê arquivos e calcula SHA-256 no executor d
 background. Classificação é conservadora e não interpreta JavaScript. Execução
 Rhino/event handlers permanece desabilitada até um runtime versionado fornecer
 staging seguro.
+
+Tags capturam `RegistryAccess` na server thread, mas leitura, parsing, merge de
+packs, grafo e validação rodam no executor de background. Nenhuma chamada de
+`bindTags` ocorre em qualquer thread. O artefato é entregue ao executor owner
+somente para transição de estado.

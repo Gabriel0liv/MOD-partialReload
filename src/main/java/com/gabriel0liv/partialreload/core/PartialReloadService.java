@@ -25,6 +25,8 @@ import com.gabriel0liv.partialreload.loot.PreparedLootData;
 import com.gabriel0liv.partialreload.loot.VanillaLootDataProvider;
 import com.gabriel0liv.partialreload.recipe.PreparedRecipes;
 import com.gabriel0liv.partialreload.recipe.VanillaRecipesProvider;
+import com.gabriel0liv.partialreload.tags.PreparedTags;
+import com.gabriel0liv.partialreload.tags.VanillaTagsProvider;
 import com.gabriel0liv.partialreload.config.PartialReloadConfig;
 import com.gabriel0liv.partialreload.resource.ResourceSnapshot;
 
@@ -48,6 +50,7 @@ public final class PartialReloadService {
     private final VanillaFunctionsProvider functionsProvider;
     private final VanillaLootDataProvider lootDataProvider;
     private final VanillaRecipesProvider recipesProvider = new VanillaRecipesProvider();
+    private final VanillaTagsProvider tagsProvider = new VanillaTagsProvider();
     private final PartialReloadStateMachine stateMachine = new PartialReloadStateMachine();
 
     @Nullable
@@ -219,6 +222,35 @@ public final class PartialReloadService {
         return lastChangeSet.changedResources().stream().anyMatch(change -> change.category() == ReloadCategory.RECIPES);
     }
 
+    public synchronized PreparedTags preparedTags() {
+        return preparedArtifact instanceof PreparedTags tags ? tags : null;
+    }
+
+    public synchronized boolean hasTagChanges() {
+        return lastChangeSet.changedResources().stream().anyMatch(change -> change.category() == ReloadCategory.TAGS);
+    }
+
+    public CompletableFuture<PreparedTags> prepareTagsAsync(net.minecraft.server.packs.resources.ResourceManager resourceManager,
+                                                            net.minecraft.core.RegistryAccess registryAccess,
+                                                            Executor background, Executor owner) {
+        ResourceSnapshot snapshot; ResourceSnapshot baseline;
+        synchronized (this) {
+            snapshot = latestScan;
+            if (snapshot == null) throw new IllegalStateException("TAG_PREPARATION_REQUIRED: scan first");
+            resetTerminalState(); stateMachine.transitionTo(PartialReloadState.PREPARING);
+            preparedArtifact = null; lastError = null; baseline = activeReference;
+        }
+        return CompletableFuture.supplyAsync(() -> tagsProvider.prepare(resourceManager, registryAccess, snapshot, baseline,
+                PartialReloadConfig.maxTagFiles(), PartialReloadConfig.maxTags(), PartialReloadConfig.maxTagEntries(),
+                PartialReloadConfig.maxTagJsonBytes(), java.time.Duration.ofSeconds(PartialReloadConfig.tagPrepareTimeoutSeconds()).toNanos(), UUID.randomUUID()), background)
+                .handleAsync((artifact, throwable) -> {
+                    synchronized (this) {
+                        if (throwable != null) { lastError = rootMessage(throwable); stateMachine.transitionTo(PartialReloadState.FAILED_SAFE); throw new CompletionException(throwable); }
+                        stateMachine.transitionTo(PartialReloadState.VALIDATING); preparedArtifact = artifact; stateMachine.transitionTo(PartialReloadState.READY); return artifact;
+                    }
+                }, owner);
+    }
+
     public synchronized boolean hasMixedRecipeChanges() {
         return lastChangeSet.changedResources().stream().map(ResourceChange::category)
                 .distinct().anyMatch(category -> category != ReloadCategory.RECIPES);
@@ -280,6 +312,9 @@ public final class PartialReloadService {
             }
             if (preparedArtifact instanceof PreparedRecipes) {
                 throw new IllegalArgumentException("Commit is not implemented for recipes. Prepared artifact remains unchanged.");
+            }
+            if (preparedArtifact instanceof PreparedTags) {
+                throw new IllegalArgumentException("Commit is not implemented for tags. Prepared artifact remains unchanged.");
             }
             throw new IllegalArgumentException("FUNCTION_PREPARATION_REQUIRED");
         }

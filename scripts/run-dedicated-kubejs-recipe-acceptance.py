@@ -1,7 +1,7 @@
 """Acceptance preflight for KubeJS recipes.
 
 The exact Forge 1.20.1 KubeJS runtime is intentionally required. When it is
-not installed, this harness records a pending result instead of pretending
+not installed, this harness records a blocked result instead of pretending
 that a dedicated acceptance ran.
 """
 from __future__ import annotations
@@ -17,7 +17,7 @@ def main() -> int:
     result = {
         "runtime_available": False,
         "target": "Minecraft 1.20.1 / Forge 47.4.10",
-        "status": "KUBEJS_RECIPE_PREPARATION_IMPLEMENTED_PENDING_RUNTIME_ACCEPTANCE",
+        "status": "KUBEJS_RECIPE_PREPARATION_BLOCKED",
         "reason": "No exact KubeJS Forge 1.20.1 runtime is installed; no server was started and no script was executed.",
     }
     report.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")

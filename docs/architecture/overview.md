@@ -114,3 +114,14 @@ runtime Forge 1.20.1: o único JAR local é NeoForge 2101.7.2. Scripts podem ser
 fingerprintados/classificados, mas não são executados. `prepare recipes` mantém
 o baseline vanilla e informa que a integração não está carregada; nenhum
 runtime ativo, listener ou `RecipeManager` é tocado.
+
+O estado oficial da integração KubeJS é `KUBEJS_RECIPE_PREPARATION_BLOCKED`:
+não há runtime Forge 1.20.1 nem API de staging comprovada.
+
+## Preparação de tags (Fase 4C)
+
+`VanillaTagsProvider` usa `listResourceStacks("tags", ...)`, exclui
+`tags/functions`, reconstrói cada registry em mapas independentes, aplica
+`replace`, `values` e operações `remove` representadas, resolve referências,
+detecta ciclos, valida elementos via `RegistryAccess` e produz `PreparedTags`.
+Nenhum holder é bindado e `apply` permanece recusado.

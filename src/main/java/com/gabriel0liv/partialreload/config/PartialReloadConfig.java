@@ -27,6 +27,12 @@ public final class PartialReloadConfig {
     private static final ForgeConfigSpec.IntValue KUBEJS_MAX_MUTATIONS;
     private static final ForgeConfigSpec.IntValue KUBEJS_MAX_FINAL_RECIPES;
     private static final ForgeConfigSpec.IntValue KUBEJS_MAX_DEPENDENCY_EDGES;
+    private static final ForgeConfigSpec.IntValue TAG_PREPARE_TIMEOUT_SECONDS;
+    private static final ForgeConfigSpec.IntValue MAX_TAG_FILES;
+    private static final ForgeConfigSpec.IntValue MAX_TAGS;
+    private static final ForgeConfigSpec.IntValue MAX_TAG_ENTRIES;
+    private static final ForgeConfigSpec.IntValue MAX_TAG_DEPENDENCY_EDGES;
+    private static final ForgeConfigSpec.LongValue MAX_TAG_JSON_BYTES;
 
     static {
         ForgeConfigSpec.Builder builder = new ForgeConfigSpec.Builder();
@@ -82,6 +88,14 @@ public final class PartialReloadConfig {
         KUBEJS_MAX_MUTATIONS = builder.defineInRange("max_recipe_mutations", 1_000_000, 1, 10_000_000);
         KUBEJS_MAX_FINAL_RECIPES = builder.defineInRange("max_final_recipes", 100_000, 1, 1_000_000);
         KUBEJS_MAX_DEPENDENCY_EDGES = builder.defineInRange("max_script_dependency_edges", 100_000, 1, 10_000_000);
+        builder.pop();
+        builder.push("tags");
+        TAG_PREPARE_TIMEOUT_SECONDS = builder.defineInRange("prepare_timeout_seconds", 60, 1, 3_600);
+        MAX_TAG_FILES = builder.defineInRange("max_tag_files", 100_000, 1, 1_000_000);
+        MAX_TAGS = builder.defineInRange("max_tags", 100_000, 1, 1_000_000);
+        MAX_TAG_ENTRIES = builder.defineInRange("max_entries", 1_000_000, 1, 10_000_000);
+        MAX_TAG_DEPENDENCY_EDGES = builder.defineInRange("max_dependency_edges", 2_000_000, 1, 20_000_000);
+        MAX_TAG_JSON_BYTES = builder.defineInRange("max_total_json_bytes", 268_435_456L, 1L, 2_147_483_647L);
         builder.pop();
         builder.pop();
 
@@ -161,4 +175,10 @@ public final class PartialReloadConfig {
     public static int kubeJsMaxMutations() { return KUBEJS_MAX_MUTATIONS.get(); }
     public static int kubeJsMaxFinalRecipes() { return KUBEJS_MAX_FINAL_RECIPES.get(); }
     public static int kubeJsMaxDependencyEdges() { return KUBEJS_MAX_DEPENDENCY_EDGES.get(); }
+    public static int tagPrepareTimeoutSeconds() { return TAG_PREPARE_TIMEOUT_SECONDS.get(); }
+    public static int maxTagFiles() { return MAX_TAG_FILES.get(); }
+    public static int maxTags() { return MAX_TAGS.get(); }
+    public static int maxTagEntries() { return MAX_TAG_ENTRIES.get(); }
+    public static int maxTagDependencyEdges() { return MAX_TAG_DEPENDENCY_EDGES.get(); }
+    public static long maxTagJsonBytes() { return MAX_TAG_JSON_BYTES.get(); }
 }

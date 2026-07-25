@@ -17,6 +17,7 @@ import com.gabriel0liv.partialreload.loot.LootPreparationContext;
 import com.gabriel0liv.partialreload.loot.PreparedLootData;
 import com.gabriel0liv.partialreload.loot.VanillaLootDataProvider;
 import com.gabriel0liv.partialreload.recipe.PreparedRecipes;
+import com.gabriel0liv.partialreload.tags.PreparedTags;
 import com.gabriel0liv.partialreload.validation.ValidationSeverity;
 import com.mojang.brigadier.CommandDispatcher;
 import com.mojang.brigadier.arguments.StringArgumentType;
@@ -73,7 +74,9 @@ public final class PartialReloadCommand {
                                 .executes(context -> prepareLootData(
                                         context.getSource(), service, ReloadCategory.LOOT, false)))
                         .then(Commands.literal("recipes")
-                                .executes(context -> prepareRecipes(context.getSource(), service, false))))
+                                .executes(context -> prepareRecipes(context.getSource(), service, false)))
+                        .then(Commands.literal("tags")
+                                .executes(context -> prepareTags(context.getSource(), service, false))))
                 .then(Commands.literal("prepared")
                         .executes(context -> prepared(context.getSource(), service)))
                 .then(Commands.literal("discard")
@@ -113,6 +116,9 @@ public final class PartialReloadCommand {
         ), false);
         source.sendSuccess(() -> Component.literal("Changed resources: " + status.changedResources()), false);
         source.sendSuccess(() -> Component.literal("Loot data commit: not implemented"), false);
+        source.sendSuccess(() -> Component.literal("Recipe commit: not implemented"), false);
+        source.sendSuccess(() -> Component.literal("Tag commit: not implemented"), false);
+        source.sendSuccess(() -> Component.literal("KubeJS recipe preparation: blocked"), false);
         source.sendSuccess(() -> Component.literal(
                 "Prepared artifact: " + (status.preparedId() == null
                         ? "none"
@@ -129,7 +135,7 @@ public final class PartialReloadCommand {
             String support = switch (category) {
                 case DYNAMIC_REGISTRIES -> "RESTART_REQUIRED";
                 case UNKNOWN -> "UNKNOWN";
-                case FUNCTIONS, PREDICATES, ITEM_MODIFIERS, LOOT -> "PREPARE_SUPPORTED";
+                case FUNCTIONS, PREDICATES, ITEM_MODIFIERS, LOOT, TAGS -> "PREPARE_SUPPORTED";
                 case ORIGINS, KUBEJS, SILENTGEAR -> "PLANNED";
                 default -> "SUPPORTED_READ_ONLY";
             };
@@ -294,6 +300,11 @@ public final class PartialReloadCommand {
     }
 
     private static int prepareChanged(CommandSourceStack source, PartialReloadService service) {
+        if (service.hasTagChanges() && service.lastChangeSet().changedResources().stream().anyMatch(c -> c.category() != ReloadCategory.TAGS)) {
+            source.sendFailure(Component.literal("Changed resources span tags and other categories. Select an explicit category; joint tag composition is not implemented."));
+            return 0;
+        }
+        if (service.hasTagChanges()) return prepareTags(source, service, true);
         if (service.hasRecipeChanges() && service.hasMixedRecipeChanges()) {
             source.sendFailure(Component.literal("Changed resources span recipes and other categories. Select an explicit category."));
             return 0;
@@ -316,7 +327,7 @@ public final class PartialReloadCommand {
             return prepareLootData(source, service, requested, true);
         }
         source.sendFailure(Component.literal(
-                "No changed functions or loot data are present in the current ChangeSet."
+                "No changed functions, tags, recipes or loot data are present in the current ChangeSet."
         ));
         return 0;
     }
@@ -336,6 +347,19 @@ public final class PartialReloadCommand {
         return 1;
     }
 
+    private static int prepareTags(CommandSourceStack source, PartialReloadService service, boolean changedOnly) {
+        if (changedOnly && !service.hasTagChanges()) { source.sendFailure(Component.literal("No changed tags are present.")); return 0; }
+        try {
+            service.prepareTagsAsync(source.getServer().getResourceManager(), source.getServer().registryAccess(), Util.backgroundExecutor(), source.getServer())
+                    .whenComplete((artifact, throwable) -> {
+                        if (throwable != null) source.sendFailure(Component.literal("Tag preparation failed safely: " + rootMessage(throwable)));
+                        else showPreparedTags(source, artifact);
+                    });
+        } catch (RuntimeException exception) { source.sendFailure(Component.literal("Preparation rejected: " + exception.getMessage())); return 0; }
+        source.sendSuccess(() -> Component.literal("Tag preparation started. Active tag bindings remain unchanged."), false);
+        return 1;
+    }
+
     private static int showPreparedRecipes(CommandSourceStack source, PreparedRecipes artifact) {
         source.sendSuccess(() -> Component.literal("PreparedRecipes #" + artifact.preparationId()), false);
         source.sendSuccess(() -> Component.literal("Recipes discovered: " + artifact.discoveredRecipes()), false);
@@ -349,6 +373,23 @@ public final class PartialReloadCommand {
         source.sendSuccess(() -> Component.literal("KubeJS integration: not loaded (Forge 1.20.1 runtime unavailable)"), false);
         source.sendSuccess(() -> Component.literal("Commit support: not implemented for recipes"), false);
         source.sendSuccess(() -> Component.literal("Active RecipeManager: unchanged"), false);
+        return 1;
+    }
+
+    private static int showPreparedTags(CommandSourceStack source, PreparedTags artifact) {
+        source.sendSuccess(() -> Component.literal("PreparedTags #" + artifact.preparationId()), false);
+        source.sendSuccess(() -> Component.literal("Tag files discovered: " + artifact.discoveredFiles()), false);
+        source.sendSuccess(() -> Component.literal("Registries prepared: " + artifact.registries().size()), false);
+        source.sendSuccess(() -> Component.literal("Tags prepared: " + artifact.preparedTags() + ", resolved members: " + artifact.resolvedMembers()), false);
+        source.sendSuccess(() -> Component.literal("Dependency edges: " + artifact.dependencyGraph().edgeCount()), false);
+        source.sendSuccess(() -> Component.literal("Warnings: " + artifact.validation().count(ValidationSeverity.WARNING) + ", errors/blockers: " + artifact.validation().issues().stream().filter(i -> i.severity() == ValidationSeverity.ERROR || i.severity() == ValidationSeverity.BLOCKER).count()), false);
+        source.sendSuccess(() -> Component.literal("Technically applicable: " + artifact.isApplicable()), false);
+        artifact.validation().issues().stream().limit(30).forEach(issue ->
+                source.sendFailure(Component.literal(issue.severity() + " " + issue.code() + " " + issue.message())));
+        artifact.validation().issues().stream().filter(issue -> issue.severity() == ValidationSeverity.ERROR || issue.severity() == ValidationSeverity.BLOCKER).limit(20).forEach(issue ->
+                source.sendFailure(Component.literal(issue.severity() + " " + issue.code() + " " + issue.message())));
+        source.sendSuccess(() -> Component.literal("Binding support: not implemented"), false);
+        source.sendSuccess(() -> Component.literal("Active registry tags: unchanged"), false);
         return 1;
     }
 
@@ -415,6 +456,7 @@ public final class PartialReloadCommand {
         if (artifact instanceof PreparedFunctions functions) return showPrepared(source, functions);
         if (artifact instanceof PreparedLootData lootData) return showPreparedLoot(source, lootData);
         if (artifact instanceof PreparedRecipes recipes) return showPreparedRecipes(source, recipes);
+        if (artifact instanceof PreparedTags tags) return showPreparedTags(source, tags);
         source.sendFailure(Component.literal("Unknown prepared artifact type."));
         return 0;
     }

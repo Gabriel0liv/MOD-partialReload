@@ -62,3 +62,7 @@ artefato e o manager ativo inalterados.
 Quando a fronteira KubeJS detecta ausência ou versão incompatível, a preparação
 vanilla continua em READY e o diagnóstico KubeJS é BLOCKER separado. Não há
 transição adicional nem execução de scripts.
+
+Tags usam `PREPARING → VALIDATING → READY` ou `FAILED_SAFE`; nunca entram em
+`QUIESCING`/`COMMITTING`. `PreparedTags` é mutuamente exclusivo com os demais
+artefatos e `apply prepared` preserva o candidato.

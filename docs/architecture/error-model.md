@@ -71,3 +71,12 @@ não foi implementado.
 `KUBEJS_SCRIPT_CHANGED_DURING_PREPARATION` são diagnósticos da fronteira
 opcional. Ausência do runtime torna somente a camada KubeJS não aplicável; não
 invalida o baseline vanilla já preparado.
+
+## Códigos de tags
+
+`TAG_JSON_SYNTAX_ERROR`, `TAG_ENTRY_INVALID`,
+`TAG_ELEMENT_REFERENCE_MISSING`, `TAG_REFERENCE_CYCLE`,
+`TAG_REGISTRY_UNKNOWN`, `TAG_REGISTRY_UNSUPPORTED`,
+`TAG_FUNCTION_DOMAIN_DELEGATED`, `TAG_LIMIT_EXCEEDED` e
+`TAG_PREPARATION_TIMEOUT`. `TAG_BINDING_NOT_PERFORMED` é informativo; ausência
+de binding não é falha porque commit está fora do escopo.
