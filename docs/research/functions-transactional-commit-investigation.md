@@ -167,12 +167,12 @@ efêmera, porta aleatória, janela curta e restauração obrigatória.
 ### Schedules e observabilidade lateral
 
 No alvo 1.20.1, schedules por ID e por tag foram aceitos. A execução dedicada
-demonstrou que callbacks criados antes do commit retêm a implementação/tag
-expandida da geração A (`scheduled_id=1`, `scheduled_tag=1`); o commit não
-reescreve a fila existente. Um schedule criado depois do commit resolve B, e
-um novo schedule criado após rollback resolve A (`scheduled_id=1`). Um target removido em
-B permaneceu sem efeito e não causou crash. A fila preserva IDs/tags e resolve
-no disparo, sem migração manual.
+demonstrou que a fila preserva o ID/tag e resolve o alvo quando o callback
+dispara: callbacks criados sob A, mas disparados depois do commit, resolvem B
+(`scheduled_id=2`, `scheduled_tag=2`). Um target removido em B não resolve e
+permanece sem efeito (`scheduled_removed=0`). Um schedule criado sob B e
+disparado depois do rollback resolve A (`scheduled_id=1`); um novo schedule
+criado após rollback também resolve A. Não há migração manual da fila.
 
 `partialreload debug manager_fingerprints` é userdev-only e expõe somente
 `System.identityHashCode`. FunctionManager, LootDataManager, RecipeManager e

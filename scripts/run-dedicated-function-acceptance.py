@@ -132,18 +132,18 @@ class Acceptance:
         self.password = secrets.token_urlsafe(32)
         self.owned_pid: int | None = None
 
-    def assert_no_owned_processes(self) -> None:
-        """Fail/clean only the previous harness-owned wrapper, never Java globally."""
-        stale = []
-        for p in (ROOT / "run" / "world" / "session.lock",):
-            if p.exists(): stale.append(p)
-        if stale:
-            # The world is disposable userdev state.  At this point no process
-            # from this Acceptance instance is alive, so a stale lock from a
-            # previously forced run may be removed safely and is reported.
-            for p in stale:
-                self.log("STALE_TEST_LOCK_REMOVED " + str(p))
-                p.unlink()
+    def assert_test_world_unlocked(self) -> None:
+        """Remove a stale disposable-world lock only when the OS permits it."""
+        lock = ROOT / "run" / "world" / "session.lock"
+        if not lock.exists():
+            return
+        if self.owned_pid is not None:
+            raise RuntimeError("owned server process is still registered")
+        try:
+            lock.unlink()
+        except OSError as exc:
+            raise RuntimeError("test world lock persists; ownership is uncertain") from exc
+        self.log("STALE_TEST_LOCK_REMOVED " + str(lock))
 
     def log(self, text: str) -> None:
         self.transcript.append(text)
@@ -171,7 +171,7 @@ class Acceptance:
         self.server_properties.write_text("\n".join(out) + "\n", encoding="utf-8")
 
     def start(self) -> None:
-        self.assert_no_owned_processes()
+        self.assert_test_world_unlocked()
         self.proc = subprocess.Popen(
             ["cmd.exe", "/c", "gradlew.bat", "--no-daemon", "--console=plain", "runServer"],
             cwd=ROOT, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
@@ -236,6 +236,17 @@ class Acceptance:
         match = re.search(r"(?:has\s+)?(-?\d+)(?:\s|$)", response.strip())
         if not match: raise AssertionError(f"score {player}/{objective} unavailable: {response!r}")
         return int(match.group(1))
+
+    def wait_score(self, objective: str, player: str, predicate: Callable[[int], bool],
+                   timeout: float, interval: float = 0.1) -> int:
+        deadline = time.monotonic() + timeout
+        last: int | None = None
+        while time.monotonic() < deadline:
+            last = self.score(objective, player)
+            if predicate(last):
+                return last
+            time.sleep(interval)
+        raise AssertionError(f"score timeout {objective}/{player}: last={last!r}, timeout={timeout}s")
 
     def scores(self, *players: str) -> dict[str, int]:
         return {player: self.score("pr_acceptance", player) for player in players}
@@ -308,12 +319,6 @@ class Acceptance:
             self.command("function partialreload_test:behavior")
             if self.score("pr_acceptance", "result") != 1: raise AssertionError("generation A behavior mismatch")
             self.results["generation_a"] = "passed"
-            # Keep enough ticks for scan/prepare/commit to complete before the
-            # callback fires; the assertion then observes the pre-commit
-            # generation captured by the schedule.
-            self.command("schedule function partialreload_test:scheduled_target 2000t")
-            self.command("schedule function #partialreload_test:scheduled_tag 2000t")
-            self.command("schedule function partialreload_test:removed 2000t")
             install_generation("B")
             self.expect("prepare_b_scan", "partialreload scan", r"scan started|scan", 30)
             self.wait_state(r"Last scan:\s*(?!never)", 120)
@@ -323,6 +328,12 @@ class Acceptance:
             self.results["prepare_b"] = "passed"
             self.command("function partialreload_test:behavior")
             if self.score("pr_acceptance", "result") != 1: raise AssertionError("active generation changed before apply")
+            # B is fully prepared while A remains active. Schedule only now,
+            # immediately before apply, so the delay covers the safe point and
+            # not the scan/preparation work.
+            self.command("schedule function partialreload_test:scheduled_target 200t replace")
+            self.command("schedule function #partialreload_test:scheduled_tag 200t replace")
+            self.command("schedule function partialreload_test:removed 200t replace")
             queued = self.expect("commit_queued", "partialreload apply prepared", r"queued|safe point", 30)
             tx = self.expect("commit", "partialreload transaction", r"Status:\s*SUCCESS", 60)
             if not re.search(r"Mutation occurred:\s*true", tx, re.I): raise AssertionError("commit did not mutate")
@@ -349,19 +360,16 @@ class Acceptance:
             self.results["generation_b"] = "passed"
             self.command("function #partialreload_test:acceptance_tag")
             if self.score("pr_acceptance", "tag_result") != 2: raise AssertionError("generation B tag mismatch")
-            # In Minecraft 1.20.1 the scheduled callback captures the
-            # CommandFunction/tag expansion when it is scheduled.  A swap
-            # therefore does not rewrite already queued callbacks; newly
-            # scheduled work resolves the current generation.
-            time.sleep(5.5)
-            if self.score("pr_acceptance", "scheduled_id") != 1:
-                raise AssertionError("pre-commit scheduled ID did not retain generation A")
-            if self.score("pr_acceptance", "scheduled_tag") != 1:
-                raise AssertionError("pre-commit scheduled tag did not retain generation A")
-            self.results.update({"schedule_id_after_commit": {"status": "passed", "observed": "generation A callback retained"},
-                                 "schedule_tag_after_commit": {"status": "passed", "observed": "generation A tag expansion retained"},
-                                 "schedule_id_captures_generation_a": {"status": "passed", "expected": 1, "observed": self.score("pr_acceptance", "scheduled_id")},
-                                 "schedule_tag_captures_generation_a": {"status": "passed", "expected": 1, "observed": self.score("pr_acceptance", "scheduled_tag")},
+            if any(self.score("pr_acceptance", player) != 0 for player in ("scheduled_id", "scheduled_tag", "scheduled_removed")):
+                raise AssertionError("SCHEDULE_FIRED_BEFORE_COMMIT")
+            scheduled_id = self.wait_score("pr_acceptance", "scheduled_id", lambda value: value != 0, 20)
+            scheduled_tag = self.wait_score("pr_acceptance", "scheduled_tag", lambda value: value != 0, 20)
+            if scheduled_id != 2 or scheduled_tag != 2:
+                raise AssertionError(f"schedule callbacks did not resolve active generation B: id={scheduled_id}, tag={scheduled_tag}")
+            self.results.update({"schedule_id_after_commit": {"status": "passed", "observed": scheduled_id},
+                                 "schedule_tag_after_commit": {"status": "passed", "observed": scheduled_tag},
+                                 "schedule_id_captures_generation_a": {"status": "passed", "scheduled_while": "A", "active_when_fired": "B", "expected": 2, "observed": scheduled_id, "commit_completed_before_callback": True},
+                                 "schedule_tag_captures_generation_a": {"status": "passed", "scheduled_while": "A", "active_when_fired": "B", "expected": 2, "observed": scheduled_tag, "commit_completed_before_callback": True},
                                  "schedule_queue_preserved": "passed"})
             if self.score("pr_acceptance", "scheduled_removed") != 0:
                 raise AssertionError("removed schedule executed after target removal")
@@ -377,23 +385,25 @@ class Acceptance:
             # Schedule while B is active, then roll back before its callback
             # fires.  The captured B implementation must still run.
             self.command("scoreboard players set scheduled_id pr_acceptance 0")
-            self.command("schedule function partialreload_test:scheduled_target 240t")
+            self.command("schedule function partialreload_test:scheduled_target 200t replace")
             self.expect("rollback", "partialreload rollback functions", r"queued|Rollback", 30)
             tx2 = self.expect("rollback_status", "partialreload transaction", r"Status:\s*ROLLED_BACK", 60)
             if not re.search(r"Verification:\s*true", tx2, re.I): raise AssertionError("rollback verification failed")
-            time.sleep(13)
-            if self.score("pr_acceptance", "scheduled_id") != 2:
-                raise AssertionError("schedule created in B did not retain generation B after rollback")
-            self.results["schedule_created_in_b_survives_rollback"] = {"status": "passed", "expected": 2, "observed": 2}
+            if self.score("pr_acceptance", "scheduled_id") != 0:
+                raise AssertionError("schedule created in B fired before rollback completed")
+            scheduled_after_rollback = self.wait_score("pr_acceptance", "scheduled_id", lambda value: value != 0, 20)
+            if scheduled_after_rollback != 1:
+                raise AssertionError("schedule created in B did not resolve active generation A after rollback")
+            self.results["schedule_created_in_b_survives_rollback"] = {"status": "passed", "scheduled_while": "B", "active_when_fired": "A", "expected": 1, "observed": scheduled_after_rollback, "rollback_completed_before_callback": True}
             self.command("function partialreload_test:behavior")
             if self.score("pr_acceptance", "result") != 1: raise AssertionError("generation A not restored")
             self.results["generation_a_restored"] = "passed"
             self.command("scoreboard players set scheduled_id pr_acceptance 0")
-            self.command("schedule function partialreload_test:scheduled_target 40t")
-            time.sleep(2.5)
-            if self.score("pr_acceptance", "scheduled_id") != 1:
+            self.command("schedule function partialreload_test:scheduled_target 40t replace")
+            scheduled_after_new = self.wait_score("pr_acceptance", "scheduled_id", lambda value: value != 0, 20)
+            if scheduled_after_new != 1:
                 raise AssertionError("schedule did not resolve restored generation A")
-            self.results["schedule_created_after_rollback_uses_a"] = {"status": "passed", "expected": 1, "observed": 1}
+            self.results["schedule_created_after_rollback_uses_a"] = {"status": "passed", "expected": 1, "observed": scheduled_after_new}
             managers_rollback = self.fingerprints()
             if managers_rollback["FunctionManager"] != managers_before["FunctionManager"]:
                 raise AssertionError("function manager identity changed after rollback")

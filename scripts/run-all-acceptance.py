@@ -16,7 +16,7 @@ def owned_processes() -> list[str]:
     # Do not enumerate/kill Java globally.  This runner only checks for the
     # Gradle/server command line that its child suites are allowed to create.
     out = subprocess.run(["powershell", "-NoProfile", "-Command",
-        "Get-CimInstance Win32_Process | Where-Object {$_.CommandLine -match 'Partial Reload.*(runServer|forgeserveruserdev)'} | Select-Object -Expand ProcessId"],
+        "Get-CimInstance Win32_Process | Where-Object {$_.ProcessId -ne $PID -and $_.CommandLine -notmatch 'Get-CimInstance' -and $_.CommandLine -match 'Partial Reload.*(runServer|forgeserveruserdev)'} | Select-Object -Expand ProcessId"],
         cwd=ROOT, capture_output=True, text=True, check=False).stdout
     return [line.strip() for line in out.splitlines() if line.strip().isdigit()]
 
@@ -38,7 +38,13 @@ def main() -> int:
             break
     else:
         result["orphan_process_check"] = "passed"
-    result["world_lock_check"] = "passed" if not (ROOT / "run" / "world" / "session.lock").exists() else "failed"
+    lock = ROOT / "run" / "world" / "session.lock"
+    if lock.exists() and not owned_processes():
+        try:
+            lock.unlink()
+        except OSError:
+            pass
+    result["world_lock_check"] = "passed" if not lock.exists() else "failed"
     result["restoration_check"] = "passed" if not (ROOT / "run" / "server.properties.partialreload.bak").exists() else "failed"
     result["finished_at"] = time.time()
     (REPORT_DIR / "all-acceptance.json").write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")

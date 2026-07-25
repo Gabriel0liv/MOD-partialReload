@@ -52,9 +52,9 @@ imutável de eventos observados.
 - RF-011-11: rollback manual usa o mesmo safe point, consome a única retenção e
   restaura baseline.
 - RF-011-12: schedules existentes não são escritos ou migrados; no Minecraft
-  1.20.1 o callback já agendado retém a implementação/expansão observada no
-  momento do agendamento. Apenas schedules criados após a publicação resolvem a
-  nova geração.
+  1.20.1 a fila preserva o ID/tag e resolve o alvo no disparo. Assim, um
+  schedule criado sob A pode resolver B após commit, e um schedule criado sob B
+  pode resolver A após rollback. Um ID removido não executa e não causa crash.
 - RF-011-13: journal registra REQUESTED, VALIDATED, QUEUED,
   SAFE_POINT_REACHED, PREVIOUS_GENERATION_CAPTURED, CANDIDATE_BUILT,
   LIBRARY_SWAPPED, LOAD_SUPPRESSED, TICK_SET_UPDATED,

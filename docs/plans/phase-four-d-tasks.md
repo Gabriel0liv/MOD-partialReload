@@ -24,6 +24,11 @@ recipes por mudanças de tags, manteve fingerprints ativos, recusou apply e
 encerrou via RCON com shutdown normal. O relatório está em
 `build/reports/dedicated-tags-recipes-acceptance.json`.
 
+As assertions de schedules não usam delays para cobrir preparação: B é
+preparada primeiro, callbacks são agendados sob A, `apply` é enviado em seguida
+e o harness confirma `SUCCESS` antes de fazer polling dos scoreboards. A fila
+1.20.1 resolve ID/tag no disparo; target removido é no-op.
+
 Os harnesses usam RCON efêmero, `CREATE_NEW_PROCESS_GROUP`, PID do wrapper
 Gradle e encerramento limitado à árvore própria (`taskkill /PID /T /F` apenas
 após timeout). A thread de captura é aguardada e locks stale só são removidos

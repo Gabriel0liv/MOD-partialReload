@@ -119,6 +119,10 @@ backup e restauração de `run/server.properties`. O servidor chegou a `Done`,
 publicou a geração B, voltou à geração A por rollback e encerrou normalmente.
 O relatório também cobre deltas de tick, schedules por ID/tag, target removido
 e fingerprints dos managers laterais em ambiente userdev.
+Schedules são testados de forma determinística: B é preparada enquanto A está
+ativa, os callbacks são agendados imediatamente antes de `apply`, a transação
+chega a `SUCCESS` antes do polling dos callbacks e a fila vanilla resolve IDs e
+tags no momento do disparo. Targets removidos tornam-se no-op sem crash.
 Os harnesses controlam o PID do wrapper Gradle e sua árvore (`taskkill /PID /T`)
 somente em caso de timeout, aguardam a thread de captura e removem apenas locks
 stale do mundo userdev quando nenhum processo próprio está vivo. O runner
