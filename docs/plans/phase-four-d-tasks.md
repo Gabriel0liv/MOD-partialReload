@@ -23,3 +23,10 @@ preparou 735 tags e 1.175 recipes com snapshot compartilhado, revalidou 240
 recipes por mudanças de tags, manteve fingerprints ativos, recusou apply e
 encerrou via RCON com shutdown normal. O relatório está em
 `build/reports/dedicated-tags-recipes-acceptance.json`.
+
+Os harnesses usam RCON efêmero, `CREATE_NEW_PROCESS_GROUP`, PID do wrapper
+Gradle e encerramento limitado à árvore própria (`taskkill /PID /T /F` apenas
+após timeout). A thread de captura é aguardada e locks stale só são removidos
+no mundo descartável userdev quando o processo anterior não está vivo. O
+runner `scripts/run-all-acceptance.py` impede sobreposição e consolida os
+resultados em `build/reports/all-acceptance.json`.

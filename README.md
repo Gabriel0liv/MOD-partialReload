@@ -111,6 +111,7 @@ python scripts/run-dedicated-recipe-acceptance.py
 python scripts/run-dedicated-tag-acceptance.py
 python scripts/run-dedicated-tags-recipes-acceptance.py
 python scripts/run-dedicated-kubejs-recipe-acceptance.py
+python scripts/run-all-acceptance.py
 ```
 
 O teste dedicado usa RCON temporário em `127.0.0.1`, com senha/porta efêmeras,
@@ -118,6 +119,11 @@ backup e restauração de `run/server.properties`. O servidor chegou a `Done`,
 publicou a geração B, voltou à geração A por rollback e encerrou normalmente.
 O relatório também cobre deltas de tick, schedules por ID/tag, target removido
 e fingerprints dos managers laterais em ambiente userdev.
+Os harnesses controlam o PID do wrapper Gradle e sua árvore (`taskkill /PID /T`)
+somente em caso de timeout, aguardam a thread de captura e removem apenas locks
+stale do mundo userdev quando nenhum processo próprio está vivo. O runner
+consolidado executa as suítes sequencialmente e grava
+`build/reports/all-acceptance.json`.
 
 O projeto segue Spec-Driven Development. Leia `AGENTS.md`,
 `docs/specs/010-loot-data-prepare.md` e as ADRs antes de alterar

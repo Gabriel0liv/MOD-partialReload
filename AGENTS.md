@@ -76,3 +76,10 @@ aprovada deve observar `Done`, `SUCCESS`, `ROLLED_BACK` e shutdown normal;
 falhas devem preservar o log para diagnóstico.
 `partialreload debug manager_fingerprints` é userdev-only, read-only e serve
 somente para aceitação; não criar equivalente de produção sem nova spec.
+
+Os harnesses dedicados possuem ownership explícito do wrapper Gradle iniciado:
+usam RCON, registram o PID, aguardam shutdown gracioso e, somente em timeout,
+encerram a árvore própria com `taskkill /PID <pid> /T`. Nunca encerrar `java.exe`
+globalmente. Locks stale só podem ser removidos no mundo descartável de userdev
+depois de confirmar que nenhum processo da aceitação está vivo. O runner
+consolidado é `python scripts/run-all-acceptance.py`.

@@ -124,11 +124,26 @@ class Acceptance:
         self.transcript: list[str] = []
         self.results: dict[str, str] = {}
         self.proc: subprocess.Popen[str] | None = None
+        self.reader_thread: threading.Thread | None = None
         self.rcon: RconClient | None = None
         self.server_properties = ROOT / "run" / "server.properties"
         self.properties_backup = self.server_properties.with_suffix(".properties.partialreload.bak")
         self.port = free_port()
         self.password = secrets.token_urlsafe(32)
+        self.owned_pid: int | None = None
+
+    def assert_no_owned_processes(self) -> None:
+        """Fail/clean only the previous harness-owned wrapper, never Java globally."""
+        stale = []
+        for p in (ROOT / "run" / "world" / "session.lock",):
+            if p.exists(): stale.append(p)
+        if stale:
+            # The world is disposable userdev state.  At this point no process
+            # from this Acceptance instance is alive, so a stale lock from a
+            # previously forced run may be removed safely and is reported.
+            for p in stale:
+                self.log("STALE_TEST_LOCK_REMOVED " + str(p))
+                p.unlink()
 
     def log(self, text: str) -> None:
         self.transcript.append(text)
@@ -156,17 +171,21 @@ class Acceptance:
         self.server_properties.write_text("\n".join(out) + "\n", encoding="utf-8")
 
     def start(self) -> None:
+        self.assert_no_owned_processes()
         self.proc = subprocess.Popen(
             ["cmd.exe", "/c", "gradlew.bat", "--no-daemon", "--console=plain", "runServer"],
             cwd=ROOT, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT, text=True, bufsize=1,
+            creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
         )
+        self.owned_pid = self.proc.pid
         assert self.proc.stdout is not None
         def reader() -> None:
             for line in self.proc.stdout:
                 line = line.rstrip("\r\n")
                 self.events.put(line); self.log(line)
-        threading.Thread(target=reader, daemon=True).start()
+        self.reader_thread = threading.Thread(target=reader, name=f"partialreload-reader-{self.proc.pid}", daemon=True)
+        self.reader_thread.start()
         self.wait_log(r"Done \([0-9.]+s\)! For help", self.args.server_startup_timeout)
         deadline = time.time() + self.args.rcon_startup_timeout
         last: Exception | None = None
@@ -244,8 +263,22 @@ class Acceptance:
         if self.proc is not None:
             try: self.proc.wait(timeout=self.args.shutdown_timeout)
             except subprocess.TimeoutExpired:
-                self.log("SHUTDOWN_FORCED"); self.proc.kill(); self.proc.wait(timeout=10)
+                self.log("SHUTDOWN_FORCED owned_pid=" + str(self.proc.pid))
+                # /T scopes termination to this wrapper's process tree.  Never
+                # use taskkill /IM java.exe, because unrelated IDE/game JVMs
+                # must remain untouched.
+                subprocess.run(["taskkill", "/PID", str(self.proc.pid), "/T", "/F"],
+                               check=False, capture_output=True, text=True)
+                try: self.proc.wait(timeout=15)
+                except subprocess.TimeoutExpired:
+                    self.proc.kill(); self.proc.wait(timeout=10)
             if self.proc.returncode != 0: raise RuntimeError(f"server exit code {self.proc.returncode}")
+            if self.proc.stdout is not None:
+                self.proc.stdout.close()
+            if self.reader_thread is not None:
+                self.reader_thread.join(timeout=5)
+                if self.reader_thread.is_alive():
+                    raise RuntimeError("owned output reader thread did not terminate")
         self.results["shutdown"] = "passed"
 
     def run(self) -> None:
@@ -278,9 +311,9 @@ class Acceptance:
             # Keep enough ticks for scan/prepare/commit to complete before the
             # callback fires; the assertion then observes the pre-commit
             # generation captured by the schedule.
-            self.command("schedule function partialreload_test:scheduled_target 600t")
-            self.command("schedule function #partialreload_test:scheduled_tag 600t")
-            self.command("schedule function partialreload_test:removed 600t")
+            self.command("schedule function partialreload_test:scheduled_target 2000t")
+            self.command("schedule function #partialreload_test:scheduled_tag 2000t")
+            self.command("schedule function partialreload_test:removed 2000t")
             install_generation("B")
             self.expect("prepare_b_scan", "partialreload scan", r"scan started|scan", 30)
             self.wait_state(r"Last scan:\s*(?!never)", 120)
@@ -327,6 +360,8 @@ class Acceptance:
                 raise AssertionError("pre-commit scheduled tag did not retain generation A")
             self.results.update({"schedule_id_after_commit": {"status": "passed", "observed": "generation A callback retained"},
                                  "schedule_tag_after_commit": {"status": "passed", "observed": "generation A tag expansion retained"},
+                                 "schedule_id_captures_generation_a": {"status": "passed", "expected": 1, "observed": self.score("pr_acceptance", "scheduled_id")},
+                                 "schedule_tag_captures_generation_a": {"status": "passed", "expected": 1, "observed": self.score("pr_acceptance", "scheduled_tag")},
                                  "schedule_queue_preserved": "passed"})
             if self.score("pr_acceptance", "scheduled_removed") != 0:
                 raise AssertionError("removed schedule executed after target removal")
@@ -339,9 +374,17 @@ class Acceptance:
             self.expect("loot_rejection_prepare", "partialreload prepare loot", r"started|prepar", 120)
             self.expect("loot_rejection", "partialreload apply prepared", r"Commit is not implemented for loot data", 30)
             self.command("partialreload discard")
+            # Schedule while B is active, then roll back before its callback
+            # fires.  The captured B implementation must still run.
+            self.command("scoreboard players set scheduled_id pr_acceptance 0")
+            self.command("schedule function partialreload_test:scheduled_target 240t")
             self.expect("rollback", "partialreload rollback functions", r"queued|Rollback", 30)
             tx2 = self.expect("rollback_status", "partialreload transaction", r"Status:\s*ROLLED_BACK", 60)
             if not re.search(r"Verification:\s*true", tx2, re.I): raise AssertionError("rollback verification failed")
+            time.sleep(13)
+            if self.score("pr_acceptance", "scheduled_id") != 2:
+                raise AssertionError("schedule created in B did not retain generation B after rollback")
+            self.results["schedule_created_in_b_survives_rollback"] = {"status": "passed", "expected": 2, "observed": 2}
             self.command("function partialreload_test:behavior")
             if self.score("pr_acceptance", "result") != 1: raise AssertionError("generation A not restored")
             self.results["generation_a_restored"] = "passed"
@@ -350,6 +393,7 @@ class Acceptance:
             time.sleep(2.5)
             if self.score("pr_acceptance", "scheduled_id") != 1:
                 raise AssertionError("schedule did not resolve restored generation A")
+            self.results["schedule_created_after_rollback_uses_a"] = {"status": "passed", "expected": 1, "observed": 1}
             managers_rollback = self.fingerprints()
             if managers_rollback["FunctionManager"] != managers_before["FunctionManager"]:
                 raise AssertionError("function manager identity changed after rollback")
