@@ -19,6 +19,8 @@ public final class PartialReloadConfig {
     private static final ForgeConfigSpec.IntValue MAX_LOOT_TABLES;
     private static final ForgeConfigSpec.LongValue MAX_TOTAL_JSON_BYTES;
     private static final ForgeConfigSpec.IntValue MAX_DEPENDENCY_EDGES;
+    private static final ForgeConfigSpec.IntValue MAX_RECIPES;
+    private static final ForgeConfigSpec.LongValue MAX_RECIPE_JSON_BYTES;
 
     static {
         ForgeConfigSpec.Builder builder = new ForgeConfigSpec.Builder();
@@ -62,6 +64,10 @@ public final class PartialReloadConfig {
                 .defineInRange("max_total_json_bytes", 268_435_456L, 1L, 2_147_483_647L);
         MAX_DEPENDENCY_EDGES = builder
                 .defineInRange("max_dependency_edges", 1_000_000, 1, 10_000_000);
+        builder.pop();
+        builder.push("recipes");
+        MAX_RECIPES = builder.defineInRange("max_recipes", 100_000, 1, 1_000_000);
+        MAX_RECIPE_JSON_BYTES = builder.defineInRange("max_total_json_bytes", 268_435_456L, 1L, 2_147_483_647L);
         builder.pop();
         builder.pop();
 
@@ -132,4 +138,7 @@ public final class PartialReloadConfig {
     public static int maxDependencyEdges() {
         return MAX_DEPENDENCY_EDGES.get();
     }
+
+    public static int maxRecipes() { return MAX_RECIPES.get(); }
+    public static long maxRecipeJsonBytes() { return MAX_RECIPE_JSON_BYTES.get(); }
 }

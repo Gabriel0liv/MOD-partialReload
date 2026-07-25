@@ -50,6 +50,10 @@ def generation(letter: str) -> dict[str, str]:
     tick_fn = "tick_b" if b else "tick_a"
     files = {
         "pack.mcmeta": '{"pack":{"pack_format":15,"description":"Partial Reload acceptance"}}\n',
+        "data/partialreload_test/recipes/acceptance.json": json.dumps({
+            "type": "minecraft:crafting_shapeless", "ingredients": [{"item": "minecraft:stick"}],
+            "result": {"item": "minecraft:torch", "count": 1 if not b else 2}
+        }) + "\n",
         f"data/partialreload_test/functions/behavior.mcfunction":
             f"scoreboard players set result pr_acceptance {value}\n",
         f"data/partialreload_test/functions/{tag_fn}.mcfunction":

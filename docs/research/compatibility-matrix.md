@@ -44,6 +44,10 @@ passiva. GLM permanece separado. Nenhum manager ativo é substituído. A coluna
 “preparação” descreve elegibilidade técnica do candidato, não suporte a
 `apply`/commit.
 
+RecipeManager 1.20.1: `RecipeManager.fromJson` e serializers reais foram
+validados; a aceitação dedicada preparou 1175 recipes, 23 tipos e 7 serializers,
+recusou apply e preservou o manager ativo. KubeJS permanece separado.
+
 ## Atualização da aceitação dedicada
 
 No Forge 47.4.10/Minecraft 1.20.1, o commit vanilla de functions foi validado

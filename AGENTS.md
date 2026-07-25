@@ -45,6 +45,9 @@ modifiers e loot tables; `VanillaLootDataProvider` nunca publica no
 `reload` e qualquer apply de loot devem falhar de modo explícito e seguro. Não
 escreva os maps privados do `LootDataManager`.
 
+A Fase 4A prepara recipes com serializers reais, mas continua PREPARE_ONLY:
+não trocar `RecipeManager`, sincronizar clientes ou executar KubeJS.
+
 ## Aceitação dedicada
 
 O console stdin do `runServer` via wrapper Gradle não é um transporte confiável.

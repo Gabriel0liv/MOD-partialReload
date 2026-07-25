@@ -54,3 +54,11 @@
 
 WARNING não invalida candidato. ERROR e BLOCKER tornam
 `PreparedReloadArtifact.isApplicable()` falso.
+
+## Códigos de recipes
+
+`RECIPE_JSON_SYNTAX_ERROR`, `RECIPE_DESERIALIZATION_ERROR`,
+`RECIPE_CONDITION_FALSE` (INFO), `RECIPE_TAG_DEPENDENCY_CHANGED` e
+`RECIPE_LIMIT_EXCEEDED`. Recipes com erro ou blocker permanecem somente em
+memória e `apply prepared` responde explicitamente que commit de recipes ainda
+não foi implementado.

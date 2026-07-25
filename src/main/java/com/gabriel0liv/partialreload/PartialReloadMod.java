@@ -14,7 +14,6 @@ import net.minecraftforge.common.MinecraftForge;
 import net.minecraftforge.event.RegisterCommandsEvent;
 import net.minecraftforge.event.TickEvent;
 import net.minecraftforge.eventbus.api.EventPriority;
-import net.minecraftforge.fml.ModLoadingContext;
 import net.minecraftforge.fml.common.Mod;
 import net.minecraftforge.fml.config.ModConfig;
 import net.minecraftforge.fml.javafmlmod.FMLJavaModLoadingContext;
@@ -26,7 +25,7 @@ import java.util.UUID;
 @Mod(PartialReloadMod.MOD_ID)
 public final class PartialReloadMod {
     public static final String MOD_ID = "partialreload";
-    public static final String VERSION = "0.1.0-SNAPSHOT";
+    public static final String VERSION = "0.2.0-SNAPSHOT";
     public static final Logger LOGGER = LogUtils.getLogger();
 
     private final PartialReloadService service;

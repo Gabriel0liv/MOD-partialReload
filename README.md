@@ -3,7 +3,7 @@
 Framework estritamente server-side para reloads parciais seguros, categorizados
 e transacionais em servidores Forge 1.20.1.
 
-Versão atual: `0.1.0-SNAPSHOT` — commit de functions vanilla suportado no alvo
+Versão atual: `0.2.0-SNAPSHOT` — preparação de recipes adicionada; commit de functions vanilla suportado no alvo
 exato Forge 47.4.10.
 
 ## Implementado
@@ -21,10 +21,13 @@ exato Forge 47.4.10.
 - stack de datapacks, grafo de loot, deltas e restauração de pack inferior.
 - commit transacional de functions vanilla em safe point da server thread;
 - supressão `DO_NOT_RUN` de load functions, verificação e rollback em memória.
+- preparação read-only de recipes com serializers reais, conditions, índices,
+  dependências e delta.
 
 ## Não implementado
 
 - commit de loot/predicates/item modifiers;
+- commit ou sincronização de recipes;
 - políticas de load diferentes de `DO_NOT_RUN`;
 - rollback após restart ou histórico de gerações;
 - Global Loot Modifiers (provider separado, planejado);
@@ -32,6 +35,9 @@ exato Forge 47.4.10.
 
 O commit transacional de functions vanilla foi validado em servidor dedicado
 headless no alvo exato Forge 47.4.10. Loot continua apenas em preparação.
+Recipes agora possuem preparação read-only completa (serializers reais,
+conditions, índices, dependências e delta); commit/sync de recipes continuam
+não implementados.
 
 ## Comandos
 
@@ -47,6 +53,7 @@ Requerem nível de operador configurável (padrão 4):
 /partialreload plan functions
 /partialreload prepare changed
 /partialreload prepare functions
+/partialreload prepare recipes
 /partialreload prepare predicates
 /partialreload prepare item_modifiers
 /partialreload prepare loot
@@ -70,6 +77,7 @@ Requisitos: Java 17 e PowerShell/Gradle Wrapper.
 .\gradlew.bat runGameTestServer
 .\gradlew.bat runServer
 python scripts/run-dedicated-function-acceptance.py
+python scripts/run-dedicated-recipe-acceptance.py
 ```
 
 O teste dedicado usa RCON temporário em `127.0.0.1`, com senha/porta efêmeras,

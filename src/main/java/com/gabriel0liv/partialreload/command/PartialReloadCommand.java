@@ -16,6 +16,8 @@ import com.gabriel0liv.partialreload.function.VanillaFunctionsProvider;
 import com.gabriel0liv.partialreload.loot.LootPreparationContext;
 import com.gabriel0liv.partialreload.loot.PreparedLootData;
 import com.gabriel0liv.partialreload.loot.VanillaLootDataProvider;
+import com.gabriel0liv.partialreload.recipe.PreparedRecipes;
+import com.gabriel0liv.partialreload.validation.ValidationSeverity;
 import com.mojang.brigadier.CommandDispatcher;
 import com.mojang.brigadier.arguments.StringArgumentType;
 import com.mojang.brigadier.suggestion.SuggestionsBuilder;
@@ -69,7 +71,9 @@ public final class PartialReloadCommand {
                                         context.getSource(), service, ReloadCategory.ITEM_MODIFIERS, false)))
                         .then(Commands.literal("loot")
                                 .executes(context -> prepareLootData(
-                                        context.getSource(), service, ReloadCategory.LOOT, false))))
+                                        context.getSource(), service, ReloadCategory.LOOT, false)))
+                        .then(Commands.literal("recipes")
+                                .executes(context -> prepareRecipes(context.getSource(), service, false))))
                 .then(Commands.literal("prepared")
                         .executes(context -> prepared(context.getSource(), service)))
                 .then(Commands.literal("discard")
@@ -290,6 +294,11 @@ public final class PartialReloadCommand {
     }
 
     private static int prepareChanged(CommandSourceStack source, PartialReloadService service) {
+        if (service.hasRecipeChanges() && service.hasMixedRecipeChanges()) {
+            source.sendFailure(Component.literal("Changed resources span recipes and other categories. Select an explicit category."));
+            return 0;
+        }
+        if (service.hasRecipeChanges()) return prepareRecipes(source, service, true);
         if (service.hasMixedFunctionAndLootChanges()) {
             source.sendFailure(Component.literal(
                     "Changed resources span functions and loot data. Select an explicit category; "
@@ -310,6 +319,36 @@ public final class PartialReloadCommand {
                 "No changed functions or loot data are present in the current ChangeSet."
         ));
         return 0;
+    }
+
+    private static int prepareRecipes(CommandSourceStack source, PartialReloadService service, boolean changedOnly) {
+        if (changedOnly && !service.hasRecipeChanges()) {
+            source.sendFailure(Component.literal("No changed recipes are present.")); return 0;
+        }
+        try {
+            service.prepareRecipesAsync(source.getServer().getResourceManager(), Util.backgroundExecutor(), source.getServer())
+                    .whenComplete((artifact, throwable) -> {
+                        if (throwable != null) source.sendFailure(Component.literal("Recipe preparation failed safely: " + rootMessage(throwable)));
+                        else showPreparedRecipes(source, artifact);
+                    });
+        } catch (RuntimeException exception) { source.sendFailure(Component.literal("Preparation rejected: " + exception.getMessage())); return 0; }
+        source.sendSuccess(() -> Component.literal("Recipe preparation started. Active RecipeManager remains unchanged."), false);
+        return 1;
+    }
+
+    private static int showPreparedRecipes(CommandSourceStack source, PreparedRecipes artifact) {
+        source.sendSuccess(() -> Component.literal("PreparedRecipes #" + artifact.preparationId()), false);
+        source.sendSuccess(() -> Component.literal("Recipes discovered: " + artifact.discoveredRecipes()), false);
+        source.sendSuccess(() -> Component.literal("Recipes prepared: " + artifact.preparedRecipes()), false);
+        source.sendSuccess(() -> Component.literal("Recipes skipped by conditions: " + artifact.skippedByCondition()), false);
+        source.sendSuccess(() -> Component.literal("Serializers used: " + artifact.serializersUsed().size()
+                + ", Recipe types used: " + artifact.recipeTypesUsed().size()), false);
+        source.sendSuccess(() -> Component.literal("Warnings: " + artifact.validation().count(ValidationSeverity.WARNING)
+                + ", Errors: " + artifact.validation().count(ValidationSeverity.ERROR)), false);
+        source.sendSuccess(() -> Component.literal("Technically applicable: " + artifact.isApplicable()), false);
+        source.sendSuccess(() -> Component.literal("Commit support: not implemented for recipes"), false);
+        source.sendSuccess(() -> Component.literal("Active RecipeManager: unchanged"), false);
+        return 1;
     }
 
     private static int prepareLootData(
@@ -374,6 +413,7 @@ public final class PartialReloadCommand {
         }
         if (artifact instanceof PreparedFunctions functions) return showPrepared(source, functions);
         if (artifact instanceof PreparedLootData lootData) return showPreparedLoot(source, lootData);
+        if (artifact instanceof PreparedRecipes recipes) return showPreparedRecipes(source, recipes);
         source.sendFailure(Component.literal("Unknown prepared artifact type."));
         return 0;
     }

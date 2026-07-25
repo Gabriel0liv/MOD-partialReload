@@ -7,6 +7,7 @@ import com.gabriel0liv.partialreload.api.ScanContext;
 import com.gabriel0liv.partialreload.api.ScanResult;
 import com.gabriel0liv.partialreload.change.ChangeDetector;
 import com.gabriel0liv.partialreload.change.ChangeSet;
+import com.gabriel0liv.partialreload.change.ResourceChange;
 import com.gabriel0liv.partialreload.plan.ReloadPlan;
 import com.gabriel0liv.partialreload.plan.ReloadPlanner;
 import com.gabriel0liv.partialreload.function.FunctionPreparationContext;
@@ -14,7 +15,6 @@ import com.gabriel0liv.partialreload.function.PreparedFunctions;
 import com.gabriel0liv.partialreload.function.VanillaFunctionsProvider;
 import com.gabriel0liv.partialreload.function.FunctionCommitCompatibility;
 import com.gabriel0liv.partialreload.function.FunctionCommitPolicy;
-import com.gabriel0liv.partialreload.function.FunctionCommitResult;
 import com.gabriel0liv.partialreload.function.FunctionCommitTransaction;
 import com.gabriel0liv.partialreload.function.FunctionGeneration;
 import com.gabriel0liv.partialreload.function.FunctionLibraryBridge;
@@ -23,6 +23,9 @@ import com.gabriel0liv.partialreload.function.TransactionEventType;
 import com.gabriel0liv.partialreload.loot.LootPreparationContext;
 import com.gabriel0liv.partialreload.loot.PreparedLootData;
 import com.gabriel0liv.partialreload.loot.VanillaLootDataProvider;
+import com.gabriel0liv.partialreload.recipe.PreparedRecipes;
+import com.gabriel0liv.partialreload.recipe.VanillaRecipesProvider;
+import com.gabriel0liv.partialreload.config.PartialReloadConfig;
 import com.gabriel0liv.partialreload.resource.ResourceSnapshot;
 
 import javax.annotation.Nullable;
@@ -44,6 +47,7 @@ public final class PartialReloadService {
     private final ReloadPlanner planner;
     private final VanillaFunctionsProvider functionsProvider;
     private final VanillaLootDataProvider lootDataProvider;
+    private final VanillaRecipesProvider recipesProvider = new VanillaRecipesProvider();
     private final PartialReloadStateMachine stateMachine = new PartialReloadStateMachine();
 
     @Nullable
@@ -207,6 +211,47 @@ public final class PartialReloadService {
         return preparedArtifact instanceof PreparedLootData lootData ? lootData : null;
     }
 
+    public synchronized PreparedRecipes preparedRecipes() {
+        return preparedArtifact instanceof PreparedRecipes recipes ? recipes : null;
+    }
+
+    public synchronized boolean hasRecipeChanges() {
+        return lastChangeSet.changedResources().stream().anyMatch(change -> change.category() == ReloadCategory.RECIPES);
+    }
+
+    public synchronized boolean hasMixedRecipeChanges() {
+        return lastChangeSet.changedResources().stream().map(ResourceChange::category)
+                .distinct().anyMatch(category -> category != ReloadCategory.RECIPES);
+    }
+
+    public CompletableFuture<PreparedRecipes> prepareRecipesAsync(
+            net.minecraft.server.packs.resources.ResourceManager resourceManager,
+            Executor background, Executor owner) {
+        ResourceSnapshot snapshot;
+        ResourceSnapshot baseline;
+        Set<ResourceLocation> changedTags;
+        synchronized (this) {
+            snapshot = latestScan;
+            if (snapshot == null) throw new IllegalStateException("RECIPE_PREPARATION_REQUIRED: scan first");
+            resetTerminalState();
+            stateMachine.transitionTo(PartialReloadState.PREPARING);
+            preparedArtifact = null; lastError = null;
+            baseline = activeReference;
+            changedTags = lastChangeSet.changedResources().stream()
+                    .filter(change -> change.category() == ReloadCategory.TAGS)
+                    .map(ResourceChange::location).collect(java.util.stream.Collectors.toUnmodifiableSet());
+        }
+        return CompletableFuture.supplyAsync(() -> recipesProvider.prepare(resourceManager, snapshot, baseline,
+                changedTags, PartialReloadConfig.maxRecipes(), PartialReloadConfig.maxRecipeJsonBytes(),
+                java.time.Duration.ofSeconds(60).toNanos(), UUID.randomUUID()), background)
+                .handleAsync((artifact, throwable) -> {
+                    synchronized (this) {
+                        if (throwable != null) { lastError = rootMessage(throwable); stateMachine.transitionTo(PartialReloadState.FAILED_SAFE); throw new CompletionException(throwable); }
+                        preparedArtifact = artifact; stateMachine.transitionTo(PartialReloadState.VALIDATING); stateMachine.transitionTo(PartialReloadState.READY); return artifact;
+                    }
+                }, owner);
+    }
+
     public synchronized PreparedReloadArtifact preparedArtifact() {
         return preparedArtifact;
     }
@@ -232,6 +277,9 @@ public final class PartialReloadService {
         if (!(preparedArtifact instanceof PreparedFunctions functions)) {
             if (preparedArtifact instanceof PreparedLootData) {
                 throw new IllegalArgumentException("Commit is not implemented for loot data. Prepared artifact remains unchanged.");
+            }
+            if (preparedArtifact instanceof PreparedRecipes) {
+                throw new IllegalArgumentException("Commit is not implemented for recipes. Prepared artifact remains unchanged.");
             }
             throw new IllegalArgumentException("FUNCTION_PREPARATION_REQUIRED");
         }

@@ -96,3 +96,13 @@ independentes de `ServerFunctionLibrary`, chama `replaceLibrary`, desativa
 somente os descritores de functions e consome o artefato. Falhas após a troca
 publicam a geração retida e restauram o baseline; uma falha nessa restauração
 entra em DEGRADED. A política de load implementada é sempre `DO_NOT_RUN`.
+
+## Preparação de recipes (Fase 4A)
+
+`VanillaRecipesProvider` enumera a visão vencedora de `recipes/**/*.json`,
+avalia condições Forge, desserializa com `RecipeManager.fromJson` e produz
+`PreparedRecipes` imutável, com índices por ID/tipo, hashes e grafo de itens e
+tags. A preparação é `PREPARE_ONLY`: `RecipeManager.apply`, substituição do
+manager e sincronização nunca são chamados. Tags relevantes alteradas geram
+`RECIPE_TAG_DEPENDENCY_CHANGED` (BLOCKER), preservando a semântica segura até
+que uma fase de tags defina um contrato conjunto.

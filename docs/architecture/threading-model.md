@@ -42,3 +42,10 @@ Sincronização e commit de outras categorias permanecem futuros.
 Para loot, commit futuro também precisa de barreira contra criação/uso de
 `LootContext`, consultas de containers/entidades e interação atômica com o
 manager GLM separado.
+
+Recipes seguem o mesmo ownership: enumeração, leitura de bytes, condições,
+desserialização e índices são executados no executor de background; publicação
+não existe nesta fase. O `ResourceManager` é apenas a visão fornecida pelo
+servidor, e o artefato é entregue ao executor proprietário para transição de
+estado. Os limites de recipes e bytes são cooperativos e o resultado não é
+publicado após timeout.

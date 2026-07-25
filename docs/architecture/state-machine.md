@@ -54,3 +54,7 @@ Um novo prepare descarta explicitamente o artefato anterior antes de entrar em
 PREPARING. Uma tentativa concorrente, inclusive functions contra loot, é
 rejeitada; nenhum lock é mantido durante IO/parsing. `discard` só é permitido
 fora de PREPARING e VALIDATING.
+
+Preparação de recipes usa exatamente `PREPARING → VALIDATING → READY` e não
+cria estados de commit. `apply prepared` rejeita `PreparedRecipes`, mantendo o
+artefato e o manager ativo inalterados.
