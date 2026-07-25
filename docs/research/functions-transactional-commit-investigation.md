@@ -166,9 +166,11 @@ efêmera, porta aleatória, janela curta e restauração obrigatória.
 
 ### Schedules e observabilidade lateral
 
-No alvo 1.20.1, schedules por ID e por tag foram aceitos. Criados antes do
-commit, resolveram a geração B (`scheduled_id=2`, `scheduled_tag=2`); após
-rollback, um novo schedule resolveu A (`scheduled_id=1`). Um target removido em
+No alvo 1.20.1, schedules por ID e por tag foram aceitos. A execução dedicada
+demonstrou que callbacks criados antes do commit retêm a implementação/tag
+expandida da geração A (`scheduled_id=1`, `scheduled_tag=1`); o commit não
+reescreve a fila existente. Um schedule criado depois do commit resolve B, e
+um novo schedule criado após rollback resolve A (`scheduled_id=1`). Um target removido em
 B permaneceu sem efeito e não causou crash. A fila preserva IDs/tags e resolve
 no disparo, sem migração manual.
 

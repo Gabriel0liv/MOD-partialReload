@@ -7,6 +7,14 @@
 - [x] grafo/delta cross-provider;
 - [x] testes unitários e aceitação dedicada;
 - [x] documentar limitações e preservar preparação isolada.
+- [x] fechar impacto exato de recipes por tags alteradas, incluindo dependências
+  aninhadas e hash JSON inalterado;
+- [x] propagar recipes invalidadas e delta cross-provider sem artefato fictício;
+- [x] usar classificação explícita/conservadora de segurança de serializers e
+  conditions;
+- [x] expor diagnóstico read-only de views candidata/ativa e comprovar conteúdo
+  no harness dedicado;
+- [x] executar GameTest com providers reais e verificar atomicidade da falha.
 
 ## Evidência dedicada
 

@@ -11,3 +11,8 @@ O provider conjunto valida a referência e os membros por IDs contra
 `CandidateTagResolutionView` e não executa crafting, `getItems`, sync ou
 `RecipeManager.apply`. Serializers que materializam holders no `fromJson` não
 podem ser considerados seguros sem evidência e falham fechado.
+
+O provider distingue recipes que usam qualquer tag das que dependem do
+fechamento transitivo de uma tag alterada. Apenas recipes com hash JSON
+inalterado entram em `revalidatedDueToTagChange`; serializers desconhecidos só
+bloqueiam quando essa dependência é real.

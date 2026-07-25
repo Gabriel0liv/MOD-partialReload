@@ -86,3 +86,19 @@ de binding não é falha porque commit está fora do escopo.
 `RECIPE_CANDIDATE_TAG_EMPTY`, `RECIPE_SERIALIZER_CANDIDATE_TAGS_UNSUPPORTED` e
 `RECIPE_CONDITION_CANDIDATE_TAGS_UNSUPPORTED` são blockers. A preparação é
 atômica: erros em tags ou recipes invalidam o composto inteiro.
+
+## Hardening conjunto tags + recipes
+
+`recipesUsingAnyTag` é apenas um índice de diagnóstico. Os conjuntos
+`recipesImpactedByTagChanges`, `recipesRevalidatedWithoutJsonChange` e
+`invalidatedByTagChange` são calculados por fechamento transitivo sobre as tags
+realmente adicionadas, modificadas ou removidas e pela comparação do hash do
+JSON. Serializer desconhecido, serializer que lê membros ativos ou condition
+com comportamento de tags desconhecido só bloqueiam uma recipe quando ela é
+afetada por uma tag candidata alterada.
+
+Falha na resolução de tags (ausente, vazia, ciclo ou membro obrigatório
+ausente), serializer inseguro ou condition insegura não produz um
+`PreparedRecipes` vazio: a preparação conjunta entra em `FAILED_SAFE` e nenhum
+subartefato é publicado. A view candidata expõe `TagResolutionStatus` para
+distinguir esses diagnósticos de uma tag resolvida.

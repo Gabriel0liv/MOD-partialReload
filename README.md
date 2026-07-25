@@ -87,6 +87,17 @@ não são implementados.
 Quando tags e recipes são preparadas juntas, `PreparedTagsAndRecipes` é
 atômico e `apply prepared` permanece recusado.
 
+Na preparação conjunta, recipes só são revalidadas quando dependem
+direta/transitivamente de tags realmente alteradas e o hash do JSON permanece
+igual. A saída `prepared` separa recipes que usam tags, impactadas,
+revalidadas e invalidadas; serializers e conditions recebem classificação
+conservadora. Uma falha de tags não publica subartefatos parciais.
+
+Em userdev, os comandos read-only
+`/partialreload debug prepared_tag`, `active_tag`, `prepared_recipe` e
+`active_recipe` fornecem evidência direta para a aceitação; eles não são
+registrados como API de produção.
+
 ## Desenvolvimento
 
 Requisitos: Java 17 e PowerShell/Gradle Wrapper.

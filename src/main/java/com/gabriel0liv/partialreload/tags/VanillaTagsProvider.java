@@ -7,6 +7,7 @@ import com.gabriel0liv.partialreload.validation.*;
 import net.minecraft.core.Registry;
 import net.minecraft.core.RegistryAccess;
 import net.minecraft.resources.ResourceKey;
+import net.minecraft.tags.TagKey;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.packs.resources.Resource;
 import net.minecraft.server.packs.resources.ResourceManager;
@@ -57,9 +58,20 @@ public final class VanillaTagsProvider {
         Map<String, PreparedRegistryTags> registriesOut = new LinkedHashMap<>(); int preparedCount=0, members=0;
         for (var e : byRegistry.entrySet()) { int count=e.getValue().values().stream().mapToInt(t->t.orderedEntries().size()).sum(); members+=count; preparedCount+=e.getValue().size(); registriesOut.put(e.getKey(),new PreparedRegistryTags(e.getKey(),e.getValue(),count)); }
         Set<ResourceLocation> current = new LinkedHashSet<>(); byRegistry.values().forEach(m->current.addAll(m.keySet()));
-        Set<ResourceLocation> old = baseline == null ? Set.of() : baseline.resources().values().stream().filter(d -> d.category()==ReloadCategory.TAGS).map(ResourceDescriptor::logicalId).collect(java.util.stream.Collectors.toSet());
-        Set<ResourceLocation> added=new HashSet<>(current); added.removeAll(old); Set<ResourceLocation> removedTags=new HashSet<>(old); removedTags.removeAll(current); Set<ResourceLocation> modified=new HashSet<>(current); modified.retainAll(old);
-        return new PreparedTags(id, Instant.now(), snapshot, registriesOut, new TagDependencyGraph(deps), new TagDelta(added,modified,removedTags,Set.of(),Set.of(),Set.of(),false,false), new ValidationReport(issues), files.size(), preparedCount, members, byRegistry.keySet(), Set.of());
+        Set<ResourceLocation> old = baseline == null ? Set.of() : baseline.resources().values().stream().filter(d -> d.category()==ReloadCategory.TAGS).map(d -> tagIdFromLocation(d.location())).collect(java.util.stream.Collectors.toSet());
+        Set<ResourceLocation> added=new HashSet<>(current); added.removeAll(old); Set<ResourceLocation> removedTags=new HashSet<>(old); removedTags.removeAll(current); Set<ResourceLocation> modified=new HashSet<>();
+        Set<String> membersAdded = new LinkedHashSet<>(), membersRemoved = new LinkedHashSet<>();
+        for (PreparedRegistryTags registry : registriesOut.values()) for (PreparedTag tag : registry.tags().values()) {
+            ResourceLocation fileLocation = ResourceLocation.fromNamespaceAndPath(tag.id().getNamespace(), tag.logicalPath());
+            ResourceDescriptor now = snapshot.resources().get(fileLocation), before = baseline == null ? null : baseline.resources().get(fileLocation);
+            if (before != null && now != null && !before.fingerprint().hash().equals(now.fingerprint().hash())) modified.add(tag.id());
+            if (before != null && now == null) removedTags.add(tag.id());
+            Set<String> candidateMembers = candidateMembers(registry.tags(), tag.id(), new LinkedHashSet<>());
+            Set<String> activeMembers = activeMembers(registries, registry.registryPath(), tag.id());
+            candidateMembers.stream().filter(m -> !activeMembers.contains(m)).forEach(m -> membersAdded.add(tag.id() + "=" + m));
+            activeMembers.stream().filter(m -> !candidateMembers.contains(m)).forEach(m -> membersRemoved.add(tag.id() + "=" + m));
+        }
+        return new PreparedTags(id, Instant.now(), snapshot, registriesOut, new TagDependencyGraph(deps), new TagDelta(added,modified,removedTags,membersAdded,membersRemoved,Set.of(),false,false), new ValidationReport(issues), files.size(), preparedCount, members, byRegistry.keySet(), Set.of());
     }
 
     private static int readValues(JsonArray values, List<String> output, Set<String> optional, List<ValidationIssue> issues, ResourceLocation tag) {
@@ -70,10 +82,35 @@ public final class VanillaTagsProvider {
         Optional<Registry<Object>> registry = access.registry(key); if (registry.isEmpty()) { issues.add(issue(ValidationSeverity.INFO,"TAG_REGISTRY_UNSUPPORTED",tag.id(),"registry not available in RegistryAccess: " + path)); return; }
         for (String value : tag.orderedEntries()) if (!value.startsWith("#") && !tag.missingOptionalEntries().contains(value)) { try { if (!registry.get().containsKey(ResourceLocation.parse(value))) issues.add(issue(ValidationSeverity.ERROR,"TAG_ELEMENT_REFERENCE_MISSING",tag.id(),value)); } catch(Exception ex) { issues.add(issue(ValidationSeverity.ERROR,"TAG_ENTRY_INVALID",tag.id(),value)); } }
     }
+    private static Set<String> candidateMembers(Map<ResourceLocation, PreparedTag> tags, ResourceLocation id, Set<ResourceLocation> visiting) {
+        if (!visiting.add(id)) return Set.of(); PreparedTag tag = tags.get(id); if (tag == null) return Set.of();
+        LinkedHashSet<String> result = new LinkedHashSet<>();
+        for (String entry : tag.orderedEntries()) {
+            if (entry.startsWith("#")) { try { result.addAll(candidateMembers(tags, ResourceLocation.parse(entry.substring(1)), visiting)); } catch (IllegalArgumentException ignored) { } }
+            else if (!tag.missingOptionalEntries().contains(entry)) result.add(entry);
+        }
+        visiting.remove(id); return result;
+    }
+    @SuppressWarnings("unchecked")
+    private static Set<String> activeMembers(RegistryAccess access, String path, ResourceLocation id) {
+        ResourceKey<Registry<Object>> key = (ResourceKey) ResourceKey.createRegistryKey(ResourceLocation.fromNamespaceAndPath("minecraft", canonical(path)));
+        Optional<Registry<Object>> registry = access.registry(key); if (registry.isEmpty()) return Set.of();
+        Optional<net.minecraft.core.HolderSet.Named<Object>> set = registry.get().getTag(TagKey.create(key, id));
+        if (set.isEmpty()) return Set.of();
+        return set.get().stream().map(holder -> registry.get().getKey(holder.value())).filter(Objects::nonNull).map(ResourceLocation::toString).collect(java.util.stream.Collectors.toUnmodifiableSet());
+    }
     private static void detectCycles(Map<ResourceLocation, Set<ResourceLocation>> graph, List<ValidationIssue> issues) { Set<ResourceLocation> visiting=new HashSet<>(), done=new HashSet<>(); for(ResourceLocation id:graph.keySet()) if(dfs(id,graph,visiting,done)) issues.add(issue(ValidationSeverity.ERROR,"TAG_REFERENCE_CYCLE",id,"nested tag cycle detected")); }
     private static boolean dfs(ResourceLocation id, Map<ResourceLocation,Set<ResourceLocation>> graph, Set<ResourceLocation> visiting, Set<ResourceLocation> done) { if(done.contains(id)) return false; if(!visiting.add(id)) return true; for(ResourceLocation next:graph.getOrDefault(id,Set.of())) if(dfs(next,graph,visiting,done)) return true; visiting.remove(id); done.add(id); return false; }
     private static String registryPath(String path) { if(!path.startsWith("tags/")) return null; String rest=path.substring(5); int slash=rest.indexOf('/'); if(slash<0)return null; String first=rest.substring(0,slash); if(first.equals("worldgen")){ int second=rest.indexOf('/',slash+1); return second<0?first:rest.substring(0,second); } return first; }
     private static ResourceLocation tagId(ResourceLocation file,String registry) { String prefix="tags/"+registry+"/"; String rest=file.getPath().substring(prefix.length()); if(rest.endsWith(".json")) rest=rest.substring(0,rest.length()-5); return ResourceLocation.fromNamespaceAndPath(file.getNamespace(),rest); }
     private static String canonical(String path) { String p=path.startsWith("worldgen/")?path.substring(9):path; return switch(p){case "items"->"item";case "blocks"->"block";case "fluids"->"fluid";case "entity_types"->"entity_type";case "game_events"->"game_event";case "biomes"->"biome";case "damage_type"->"damage_type";default->p;}; }
+    private static ResourceLocation tagIdFromLocation(ResourceLocation location) {
+        String path = location.getPath();
+        if (!path.startsWith("tags/")) return ResourceLocation.fromNamespaceAndPath(location.getNamespace(), path);
+        String rest = path.substring(5); int slash = rest.indexOf('/'); if (slash < 0) return ResourceLocation.fromNamespaceAndPath(location.getNamespace(), rest);
+        String registry = rest.substring(0, slash); String nested = rest.substring(slash + 1);
+        if (nested.endsWith(".json")) nested = nested.substring(0, nested.length() - 5);
+        return ResourceLocation.fromNamespaceAndPath(location.getNamespace(), nested);
+    }
     private static ValidationIssue issue(ValidationSeverity severity,String code,ResourceLocation resource,String message){ return new ValidationIssue(severity,code,ReloadCategory.TAGS,null,resource,null,message,null,null); }
 }

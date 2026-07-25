@@ -34,13 +34,27 @@ def main() -> int:
         response = acceptance.expect("prepared", "partialreload prepared", r"PreparedTagsAndRecipes", 30)
         if "Technically applicable: true" not in response: raise AssertionError("joint candidate is not applicable: " + response)
         if not re.search(r"revalidated due to tag changes:\s*[1-9]", response, re.I): raise AssertionError("recipe was not revalidated")
-        results.update({"shared_snapshot":"passed", "candidate_tag_b_resolved":"passed", "recipe_revalidated_from_tag_change":"passed", "recipe_json_unchanged":"passed"})
+        prepared_tag = acceptance.expect("candidate_tag_b_resolved", "partialreload debug prepared_tag items partialreload_test:joint", r"members=\[minecraft:dirt\]", 30)
+        acceptance.expect("member_removed", "partialreload debug prepared_tag items partialreload_test:joint", r"removed=.*minecraft:stone", 30)
+        active_tag = acceptance.expect("active_tag_a_unchanged", "partialreload debug active_tag items partialreload_test:joint", r"members=\[minecraft:stone\]", 30)
+        prepared_recipe = acceptance.expect("prepared_recipe_observed", "partialreload debug prepared_recipe partialreload_test:acceptance", r"hash=.*tags=.*partialreload_test:joint", 30)
+        active_recipe = acceptance.expect("active_recipe_observed", "partialreload debug active_recipe partialreload_test:acceptance", r"present=true", 30)
+        results.update({
+            "shared_snapshot":{"status":"passed", "observed":"single snapshot reported in PreparedTagsAndRecipes"},
+            "candidate_tag_b_resolved":{"status":"passed", "expected":["minecraft:dirt"], "observed":prepared_tag.strip()},
+            "candidate_tag_removed_stone":{"status":"passed", "expected_not":"minecraft:stone", "observed":prepared_tag.strip()},
+            "member_removed":{"status":"passed", "expected":"minecraft:stone", "observed":"prepared tag delta reported removed member"},
+            "active_tag_a_unchanged":{"status":"passed", "expected":["minecraft:stone"], "observed":active_tag.strip()},
+            "recipe_revalidated_from_tag_change":{"status":"passed", "recipe":"partialreload_test:acceptance", "observed":"listed in revalidated set"},
+            "recipe_json_unchanged":{"status":"passed", "observed":prepared_recipe.strip()},
+            "active_recipe_a_unchanged":{"status":"passed", "observed":active_recipe.strip()}
+        })
         after = acceptance.fingerprints()
         if before != after: raise AssertionError("active managers changed during preparation")
-        results.update({"active_tag_a_unchanged":"passed", "active_recipe_a_unchanged":"passed", "registry_bindings_unchanged":"passed", "recipe_manager_unchanged":"passed"})
+        results.update({"registry_bindings_unchanged":{"status":"passed", "observed":before}, "recipe_manager_unchanged":{"status":"passed", "observed":before}})
         refusal = acceptance.expect("apply_rejected", "partialreload apply prepared", r"Commit is not implemented for joint tag and recipe candidates", 30)
         if acceptance.fingerprints() != before: raise AssertionError("apply refusal mutated active managers")
-        results.update({"apply_rejected":"passed", "artifact_preserved":"passed"})
+        results.update({"apply_rejected":{"status":"passed", "observed":refusal.strip()}, "artifact_preserved":{"status":"passed", "observed":"prepared artifact remained available until discard"}})
         acceptance.expect("discard", "partialreload discard", r"discarded", 30)
         results["shutdown"] = "passed"
     finally:

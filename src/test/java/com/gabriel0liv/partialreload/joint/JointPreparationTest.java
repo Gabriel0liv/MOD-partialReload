@@ -36,6 +36,8 @@ class JointPreparationTest {
         assertEquals(List.of(ResourceLocation.withDefaultNamespace("stone"), ResourceLocation.withDefaultNamespace("dirt")), view.resolvedMembers("items", root));
         assertTrue(view.contains("items", root, ResourceLocation.withDefaultNamespace("stone")));
         assertFalse(view.tagExists("items", ResourceLocation.fromNamespaceAndPath("test", "missing")));
+        assertEquals(TagResolutionStatus.TAG_RESOLVED, view.resolve("items", root).status());
+        assertEquals(TagResolutionStatus.TAG_MISSING, view.resolve("items", ResourceLocation.fromNamespaceAndPath("test", "missing")).status());
     }
 
     @Test

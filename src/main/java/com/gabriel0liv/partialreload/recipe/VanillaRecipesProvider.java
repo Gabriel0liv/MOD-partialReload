@@ -19,28 +19,57 @@ public final class VanillaRecipesProvider {
     public PreparedRecipes prepareWithCandidateTags(ResourceManager manager, ResourceSnapshot snapshot,
                                                      ResourceSnapshot baseline, CandidateTagResolutionView candidateTags,
                                                      int maxRecipes, long maxJsonBytes, long timeoutNanos, UUID id) {
+        return prepareWithCandidateTags(manager, snapshot, baseline, candidateTags, Set.of(), maxRecipes, maxJsonBytes, timeoutNanos, id);
+    }
+
+    public PreparedRecipes prepareWithCandidateTags(ResourceManager manager, ResourceSnapshot snapshot,
+                                                     ResourceSnapshot baseline, CandidateTagResolutionView candidateTags,
+                                                     Set<ResourceLocation> changedTagIds,
+                                                     int maxRecipes, long maxJsonBytes, long timeoutNanos, UUID id) {
         PreparedRecipes base = prepare(manager, snapshot, baseline, Set.of(), maxRecipes, maxJsonBytes, timeoutNanos, id);
         List<ValidationIssue> issues = new ArrayList<>(base.validation().issues());
         Set<ResourceLocation> revalidated = new LinkedHashSet<>();
         Set<ResourceLocation> invalidated = new LinkedHashSet<>();
+        Set<ResourceLocation> impacted = new LinkedHashSet<>();
+        Map<ResourceLocation, RecipeSerializerTagSafety> safety = new LinkedHashMap<>();
+        Map<ResourceLocation, String> safetySources = new LinkedHashMap<>();
+        Map<ResourceLocation, String> conditionClassifications = new LinkedHashMap<>();
         for (PreparedRecipe recipe : base.recipesById().values()) {
-            if (!(recipe.serializerId().getNamespace().equals("minecraft") || recipe.serializerId().getNamespace().equals("forge"))) {
-                issues.add(issue(ValidationSeverity.BLOCKER, "RECIPE_SERIALIZER_CANDIDATE_TAGS_UNSUPPORTED", recipe.id(),
-                        "serializer behavior with candidate tags is unknown: " + recipe.serializerId()));
-            }
+            var classification = RecipeSerializerSafetyClassifier.classify(recipe.serializerId(), recipe.recipe() == null ? null : recipe.recipe().getSerializer());
+            safety.put(recipe.serializerId(), classification.safety()); safetySources.put(recipe.serializerId(), classification.source());
+            boolean usesChangedTag = false;
             for (ResourceLocation tag : recipe.referencedTags()) {
-                if (base.conditionBearingRecipes().contains(recipe.id())) {
-                    invalidated.add(recipe.id());
-                    issues.add(issue(ValidationSeverity.BLOCKER, "RECIPE_CONDITION_CANDIDATE_TAGS_UNSUPPORTED", recipe.id(), "recipe condition context cannot be evaluated against candidate tags"));
-                }
-                revalidated.add(recipe.id());
-                if (!candidateTags.registrySupported("items") || !candidateTags.tagExists("items", tag)) {
+                if (dependsOnChangedTag(candidateTags, tag, changedTagIds, new LinkedHashSet<>())) usesChangedTag = true;
+                var result = candidateTags.resolve("items", tag);
+                if (result.status() == com.gabriel0liv.partialreload.tags.TagResolutionStatus.TAG_MISSING || result.status() == com.gabriel0liv.partialreload.tags.TagResolutionStatus.REGISTRY_UNSUPPORTED) {
                     invalidated.add(recipe.id());
                     issues.add(issue(ValidationSeverity.BLOCKER, "RECIPE_CANDIDATE_TAG_MISSING", recipe.id(), "candidate item tag is missing: " + tag));
-                } else if (candidateTags.resolvedMembers("items", tag).isEmpty()) {
+                } else if (result.status() == com.gabriel0liv.partialreload.tags.TagResolutionStatus.TAG_EMPTY) {
                     invalidated.add(recipe.id());
                     issues.add(issue(ValidationSeverity.BLOCKER, "RECIPE_CANDIDATE_TAG_EMPTY", recipe.id(), "candidate item tag is empty: " + tag));
+                } else if (result.status() == com.gabriel0liv.partialreload.tags.TagResolutionStatus.CYCLE) {
+                    invalidated.add(recipe.id());
+                    issues.add(issue(ValidationSeverity.BLOCKER, "RECIPE_CANDIDATE_TAG_CYCLE", recipe.id(), "candidate item tag contains a cycle: " + tag));
                 }
+            }
+            if (usesChangedTag) {
+                impacted.add(recipe.id());
+                boolean jsonChanged = recipeJsonChanged(snapshot, baseline, recipe);
+                if (!jsonChanged) revalidated.add(recipe.id());
+                if (classification.safety() == RecipeSerializerTagSafety.UNKNOWN_TAG_BEHAVIOR
+                        || classification.safety() == RecipeSerializerTagSafety.READS_ACTIVE_TAG_MEMBERS
+                        || classification.safety() == RecipeSerializerTagSafety.STORES_ACTIVE_HOLDER_SET) {
+                    invalidated.add(recipe.id());
+                    issues.add(issue(ValidationSeverity.BLOCKER, "RECIPE_SERIALIZER_CANDIDATE_TAGS_UNSUPPORTED", recipe.id(),
+                            "serializer behavior with candidate tags is unknown or reads active members: " + recipe.serializerId()));
+                }
+                if (base.conditionBearingRecipes().contains(recipe.id())) {
+                    conditionClassifications.put(recipe.id(), "CONDITION_TAG_BEHAVIOR_UNKNOWN");
+                    invalidated.add(recipe.id());
+                    issues.add(issue(ValidationSeverity.BLOCKER, "RECIPE_CONDITION_CANDIDATE_TAGS_UNSUPPORTED", recipe.id(), "condition behavior with candidate tags is unknown"));
+                }
+            } else if (base.conditionBearingRecipes().contains(recipe.id())) {
+                conditionClassifications.put(recipe.id(), "CONDITION_TAG_INDEPENDENT");
             }
         }
         RecipeDependencyGraph graph = base.dependencyGraph();
@@ -49,7 +78,26 @@ public final class VanillaRecipesProvider {
         recipeToTags.forEach((recipe, tags) -> tags.forEach(tag -> tagToRecipes.computeIfAbsent(tag, k -> new LinkedHashSet<>()).add(recipe)));
         return new PreparedRecipes(base.preparationId(), base.createdAt(), base.sourceSnapshot(), base.recipesById(), base.recipesByType(),
                 graph, base.delta(), new ValidationReport(issues), base.discoveredRecipes(), base.preparedRecipes(), base.skippedByCondition(),
-                base.serializersUsed(), base.recipeTypesUsed(), revalidated, base.conditionBearingRecipes());
+                base.serializersUsed(), base.recipeTypesUsed(), revalidated, base.conditionBearingRecipes(), impacted, invalidated,
+                safety, safetySources, conditionClassifications);
+    }
+
+    private static boolean dependsOnChangedTag(CandidateTagResolutionView view, ResourceLocation tag,
+                                                Set<ResourceLocation> changed, Set<ResourceLocation> visiting) {
+        if (changed.contains(tag)) return true;
+        if (!visiting.add(tag)) return false;
+        for (ResourceLocation nested : view.referencedTags("items", tag)) {
+            if (dependsOnChangedTag(view, nested, changed, visiting)) return true;
+        }
+        visiting.remove(tag); return false;
+    }
+
+    private static boolean recipeJsonChanged(ResourceSnapshot snapshot, ResourceSnapshot baseline, PreparedRecipe recipe) {
+        if (baseline == null) return true;
+        ResourceLocation location = ResourceLocation.fromNamespaceAndPath(recipe.id().getNamespace(), recipe.logicalPath());
+        ResourceDescriptor current = snapshot.resources().get(location);
+        ResourceDescriptor previous = baseline.resources().get(location);
+        return current == null || previous == null || !current.fingerprint().hash().equals(previous.fingerprint().hash());
     }
     @SuppressWarnings("deprecation")
     public PreparedRecipes prepare(ResourceManager manager, ResourceSnapshot snapshot,

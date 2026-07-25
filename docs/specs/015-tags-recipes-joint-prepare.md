@@ -61,3 +61,12 @@ Forge oficial para conditions dependentes de tags ficam para pesquisa/runtime.
 
 ## 14. Relação com outras specs
 Evolui 012 e 014; preserva 009–011 e 013; prepara eventual Fase 4E.
+
+## Hardening da aceitação
+
+`recipesImpactedByTagChanges` usa o fechamento transitivo de tags alteradas;
+`revalidatedDueToTagChange` exige hash JSON inalterado. `invalidatedByTagChange`
+preserva blockers de tag, serializer e condition. Serializers usam tabela
+explícita e fallback desconhecido; conditions afetadas são diagnosticadas como
+`CONDITION_TAG_BEHAVIOR_UNKNOWN`. Falha de tags termina em `FAILED_SAFE` sem
+artefato fictício.

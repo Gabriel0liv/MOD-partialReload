@@ -17,6 +17,7 @@ import com.gabriel0liv.partialreload.loot.LootPreparationContext;
 import com.gabriel0liv.partialreload.loot.PreparedLootData;
 import com.gabriel0liv.partialreload.loot.VanillaLootDataProvider;
 import com.gabriel0liv.partialreload.recipe.PreparedRecipes;
+import com.gabriel0liv.partialreload.recipe.PreparedRecipe;
 import com.gabriel0liv.partialreload.tags.PreparedTags;
 import com.gabriel0liv.partialreload.joint.PreparedTagsAndRecipes;
 import com.gabriel0liv.partialreload.validation.ValidationSeverity;
@@ -26,7 +27,12 @@ import com.mojang.brigadier.suggestion.SuggestionsBuilder;
 import net.minecraft.Util;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
+import net.minecraft.commands.arguments.ResourceLocationArgument;
 import net.minecraft.network.chat.Component;
+import net.minecraft.resources.ResourceLocation;
+import net.minecraft.resources.ResourceKey;
+import net.minecraft.core.registries.Registries;
+import net.minecraft.tags.TagKey;
 
 import java.time.Duration;
 import java.time.Clock;
@@ -98,7 +104,27 @@ public final class PartialReloadCommand {
                 .then(Commands.literal("debug")
                         .then(Commands.literal("manager_fingerprints")
                                 .requires(source -> !net.minecraftforge.fml.loading.FMLEnvironment.production)
-                                .executes(context -> managerFingerprints(context.getSource()))))
+                                .executes(context -> managerFingerprints(context.getSource())))
+                        .then(Commands.literal("prepared_tag")
+                                .requires(source -> !net.minecraftforge.fml.loading.FMLEnvironment.production)
+                                .then(Commands.argument("registry", StringArgumentType.word())
+                                        .then(Commands.argument("tag", ResourceLocationArgument.id())
+                                                .executes(context -> debugPreparedTag(context.getSource(), service,
+                                                        StringArgumentType.getString(context, "registry"), ResourceLocationArgument.getId(context, "tag"))))))
+                        .then(Commands.literal("active_tag")
+                                .requires(source -> !net.minecraftforge.fml.loading.FMLEnvironment.production)
+                                .then(Commands.argument("registry", StringArgumentType.word())
+                                        .then(Commands.argument("tag", ResourceLocationArgument.id())
+                                                .executes(context -> debugActiveTag(context.getSource(), StringArgumentType.getString(context, "registry"), ResourceLocationArgument.getId(context, "tag"))))))
+                        .then(Commands.literal("prepared_recipe")
+                                .requires(source -> !net.minecraftforge.fml.loading.FMLEnvironment.production)
+                                .then(Commands.argument("recipe", ResourceLocationArgument.id())
+                                        .executes(context -> debugPreparedRecipe(context.getSource(), service, ResourceLocationArgument.getId(context, "recipe")))))
+                        .then(Commands.literal("active_recipe")
+                                .requires(source -> !net.minecraftforge.fml.loading.FMLEnvironment.production)
+                                .then(Commands.argument("recipe", ResourceLocationArgument.id())
+                                        .executes(context -> debugActiveRecipe(context.getSource(), ResourceLocationArgument.getId(context, "recipe")))))
+                )
                 .then(unsupported("reload"))
                 );
     }
@@ -424,12 +450,55 @@ public final class PartialReloadCommand {
         source.sendSuccess(() -> Component.literal("Tags prepared: " + artifact.preparedTags().preparedTags() + ", resolved members: " + artifact.preparedTags().resolvedMembers()), false);
         source.sendSuccess(() -> Component.literal("Recipes prepared: " + artifact.preparedRecipes().preparedRecipes()), false);
         source.sendSuccess(() -> Component.literal("Recipes revalidated due to tag changes: " + artifact.preparedRecipes().revalidatedDueToTagChange().size()), false);
+        source.sendSuccess(() -> Component.literal("Recipes using tags: " + artifact.preparedRecipes().dependencyGraph().dependencies().values().stream().filter(s -> !s.isEmpty()).count()), false);
+        source.sendSuccess(() -> Component.literal("Recipes impacted by changed tags: " + artifact.preparedRecipes().recipesImpactedByTagChanges().size()), false);
+        source.sendSuccess(() -> Component.literal("Recipes invalidated by changed tags: " + artifact.preparedRecipes().invalidatedByTagChange().size()), false);
+        source.sendSuccess(() -> Component.literal("Safe serializers: " + artifact.preparedRecipes().serializerSafety().values().stream().filter(s -> s == com.gabriel0liv.partialreload.recipe.RecipeSerializerTagSafety.TAG_INDEPENDENT_DURING_PARSE || s == com.gabriel0liv.partialreload.recipe.RecipeSerializerTagSafety.STORES_TAG_KEY_ONLY).count()), false);
+        source.sendSuccess(() -> Component.literal("Unsafe/unknown serializers: " + artifact.preparedRecipes().serializerSafety().values().stream().filter(s -> s != com.gabriel0liv.partialreload.recipe.RecipeSerializerTagSafety.TAG_INDEPENDENT_DURING_PARSE && s != com.gabriel0liv.partialreload.recipe.RecipeSerializerTagSafety.STORES_TAG_KEY_ONLY).count()), false);
         source.sendSuccess(() -> Component.literal("Cross-provider dependencies: " + artifact.dependencyGraph().edgeCount()), false);
         source.sendSuccess(() -> Component.literal("Warnings: " + artifact.validation().count(ValidationSeverity.WARNING) + ", errors/blockers: " + artifact.validation().issues().stream().filter(i -> i.severity() == ValidationSeverity.ERROR || i.severity() == ValidationSeverity.BLOCKER).count()), false);
         source.sendSuccess(() -> Component.literal("Technically applicable: " + artifact.isApplicable()), false);
         source.sendSuccess(() -> Component.literal("Tag binding: not implemented"), false);
         source.sendSuccess(() -> Component.literal("Recipe commit: not implemented"), false);
         source.sendSuccess(() -> Component.literal("Active tags and RecipeManager: unchanged"), false);
+        return 1;
+    }
+
+    private static int debugPreparedTag(CommandSourceStack source, PartialReloadService service, String registry, ResourceLocation id) {
+        com.gabriel0liv.partialreload.tags.PreparedTags tags = service.preparedTags();
+        Set<String> added = Set.of(), removed = Set.of();
+        if (service.preparedArtifact() instanceof PreparedTagsAndRecipes joint) {
+            tags = joint.preparedTags(); added = joint.preparedTags().delta().membersAdded(); removed = joint.preparedTags().delta().membersRemoved();
+        } else if (tags != null) { added = tags.delta().membersAdded(); removed = tags.delta().membersRemoved(); }
+        if (tags == null) { source.sendFailure(Component.literal("No prepared tags artifact.")); return 0; }
+        var view = new com.gabriel0liv.partialreload.tags.PreparedTagsResolutionView(tags);
+        var result = view.resolve(registry, id);
+        Set<String> finalAdded = added, finalRemoved = removed;
+        source.sendSuccess(() -> Component.literal("Prepared tag " + registry + " " + id + " status=" + result.status() + " members=" + result.members() + " added=" + finalAdded + " removed=" + finalRemoved), false);
+        return 1;
+    }
+
+    private static int debugActiveTag(CommandSourceStack source, String registry, ResourceLocation id) {
+        if (!registry.equals("items")) { source.sendFailure(Component.literal("Only items active-tag diagnostics are supported.")); return 0; }
+        var registryAccess = source.getServer().registryAccess().registryOrThrow(Registries.ITEM);
+        var optional = registryAccess.getTag(TagKey.create(Registries.ITEM, id));
+        List<ResourceLocation> members = optional.map(set -> set.stream().map(holder -> registryAccess.getKey(holder.value())).toList()).orElse(List.of());
+        source.sendSuccess(() -> Component.literal("Active tag " + registry + " " + id + " members=" + members), false);
+        return 1;
+    }
+
+    private static int debugPreparedRecipe(CommandSourceStack source, PartialReloadService service, ResourceLocation id) {
+        PreparedRecipes recipes = service.preparedRecipes();
+        if (service.preparedArtifact() instanceof PreparedTagsAndRecipes joint) recipes = joint.preparedRecipes();
+        if (recipes == null || !recipes.recipesById().containsKey(id)) { source.sendFailure(Component.literal("Prepared recipe not found: " + id)); return 0; }
+        PreparedRecipe recipe = recipes.recipesById().get(id);
+        source.sendSuccess(() -> Component.literal("Prepared recipe " + id + " hash=" + recipe.contentHash() + " tags=" + recipe.referencedTags()), false);
+        return 1;
+    }
+
+    private static int debugActiveRecipe(CommandSourceStack source, ResourceLocation id) {
+        var recipe = source.getServer().getRecipeManager().byKey(id);
+        source.sendSuccess(() -> Component.literal("Active recipe " + id + " present=" + recipe.isPresent()), false);
         return 1;
     }
 
