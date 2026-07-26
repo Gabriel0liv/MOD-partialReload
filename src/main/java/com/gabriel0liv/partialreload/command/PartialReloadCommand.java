@@ -160,6 +160,7 @@ public final class PartialReloadCommand {
 
     private static int debugFaultSet(CommandSourceStack source, String name) {
         try {
+            TagRecipeFaultInjection.clear();
             TagRecipeFaultInjection.failAt(TagRecipeFaultPoint.valueOf(name.toUpperCase(java.util.Locale.ROOT)));
             source.sendSuccess(() -> Component.literal("Tag/recipe fault armed: " + name), false);
             return 1;
@@ -171,6 +172,7 @@ public final class PartialReloadCommand {
 
     private static int debugFaultSequence(CommandSourceStack source, String first, String second) {
         try {
+            TagRecipeFaultInjection.clear();
             TagRecipeFaultInjection.armSequence(List.of(TagRecipeFaultPoint.valueOf(first.toUpperCase(java.util.Locale.ROOT)), TagRecipeFaultPoint.valueOf(second.toUpperCase(java.util.Locale.ROOT))));
             source.sendSuccess(() -> Component.literal("Tag/recipe fault sequence armed: " + first + "," + second), false);
             return 1;
@@ -199,6 +201,7 @@ public final class PartialReloadCommand {
         source.sendSuccess(() -> Component.literal("status=" + tx.status() + " failure=" + tx.failure()), false);
         source.sendSuccess(() -> Component.literal("registriesToMutate=" + tx.registriesToMutate() + " mutatedRegistries=" + tx.mutatedTagRegistries()), false);
         source.sendSuccess(() -> Component.literal("recipePublicationOccurred=" + tx.recipePublicationOccurred() + " ingredientInvalidationOccurred=" + tx.ingredientInvalidationOccurred() + " tagsUpdatedEventDispatched=" + tx.tagsUpdatedEventDispatched()), false);
+        source.sendSuccess(() -> Component.literal("ingredientCommitInvalidations=" + tx.ingredientCommitInvalidations() + " ingredientRollbackInvalidations=" + tx.ingredientRollbackInvalidations() + " commitTagEvents=" + tx.commitTagEvents() + " rollbackTagEvents=" + tx.rollbackTagEvents()), false);
         source.sendSuccess(() -> Component.literal("verificationPassed=" + tx.verificationPassed() + " retainedGeneration=" + (service.retainedTagRecipeGeneration() != null)), false);
         return 1;
     }
@@ -557,11 +560,20 @@ public final class PartialReloadCommand {
     }
 
     private static int debugActiveTag(CommandSourceStack source, String registry, ResourceLocation id) {
-        if (!registry.equals("items")) { source.sendFailure(Component.literal("Only items active-tag diagnostics are supported.")); return 0; }
-        var registryAccess = source.getServer().registryAccess().registryOrThrow(Registries.ITEM);
-        var optional = registryAccess.getTag(TagKey.create(Registries.ITEM, id));
-        List<ResourceLocation> members = optional.map(set -> set.stream().map(holder -> registryAccess.getKey(holder.value())).toList()).orElse(List.of());
-        String state = optional.isEmpty() ? "MISSING" : (members.isEmpty() ? "EMPTY" : "RESOLVED");
+        boolean present;
+        List<ResourceLocation> members;
+        if (registry.equals("items")) {
+            var registryAccess = source.getServer().registryAccess().registryOrThrow(Registries.ITEM);
+            var found = registryAccess.getTag(TagKey.create(Registries.ITEM, id));
+            present = found.isPresent();
+            members = found.map(set -> set.stream().map(holder -> registryAccess.getKey(holder.value())).toList()).orElse(List.of());
+        } else if (registry.equals("blocks")) {
+            var registryAccess = source.getServer().registryAccess().registryOrThrow(Registries.BLOCK);
+            var found = registryAccess.getTag(TagKey.create(Registries.BLOCK, id));
+            present = found.isPresent();
+            members = found.map(set -> set.stream().map(holder -> registryAccess.getKey(holder.value())).toList()).orElse(List.of());
+        } else { source.sendFailure(Component.literal("Unsupported active-tag registry: " + registry)); return 0; }
+        String state = !present ? "MISSING" : (members.isEmpty() ? "EMPTY" : "RESOLVED");
         source.sendSuccess(() -> Component.literal("Active tag registry=" + registry + " tag=" + id + " state=" + state + " members=" + members), false);
         return 1;
     }

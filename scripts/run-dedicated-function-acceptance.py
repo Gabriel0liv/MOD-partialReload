@@ -157,6 +157,8 @@ class Acceptance:
 
     def configure_rcon(self) -> None:
         if self.server_properties.exists():
+            if self.properties_backup.exists():
+                raise RuntimeError("previous server.properties backup exists; restore it before starting")
             shutil.copy2(self.server_properties, self.properties_backup)
             lines = self.server_properties.read_text(encoding="utf-8").splitlines()
         else:
@@ -175,6 +177,13 @@ class Acceptance:
                 out.append(line)
         out.extend(k + "=" + v for k, v in values.items() if k not in seen)
         self.server_properties.write_text("\n".join(out) + "\n", encoding="utf-8")
+
+    def restore_properties(self) -> None:
+        if not self.properties_backup.exists():
+            return
+        os.replace(self.properties_backup, self.server_properties)
+        if self.properties_backup.exists():
+            raise RuntimeError("server.properties backup was not consumed")
 
     def start(self) -> None:
         self.assert_test_world_unlocked()
@@ -291,7 +300,8 @@ class Acceptance:
                     self.proc.kill(); self.proc.wait(timeout=10)
             if self.proc.returncode != 0: raise RuntimeError(f"server exit code {self.proc.returncode}")
             if self.proc.stdout is not None:
-                self.proc.stdout.close()
+                try: self.proc.stdout.close()
+                except OSError: pass
             if self.reader_thread is not None:
                 self.reader_thread.join(timeout=5)
                 if self.reader_thread.is_alive():

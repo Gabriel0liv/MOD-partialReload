@@ -25,6 +25,7 @@ def main() -> int:
     class Args:
         server_startup_timeout=180; rcon_startup_timeout=30; command_timeout=15; shutdown_timeout=60
     results = {}
+    transcript: list[str] = []
     for fault in FAULTS:
         acceptance = Acceptance(Args())
         structured("A", initial=True); acceptance.configure_rcon(); acceptance.start()
@@ -41,13 +42,19 @@ def main() -> int:
                 raise AssertionError(f"{fault}: expected {expected}, observed {terminal}")
             journal = acceptance.expect("journal", "partialreload debug tag_recipe_journal", r"Transaction", 30)
             tx = acceptance.expect("transaction_probe", "partialreload debug tag_recipe_transaction", r"status=", 30)
-            results[fault] = {"status": "passed", "fault_plan": [fault], "transaction": terminal.strip(), "journal_observed": journal.strip(), "transaction_probe": tx.strip()}
+            final_item = acceptance.expect("final_item", "partialreload debug active_tag items partialreload_test:item_joint", r"stone", 30)
+            final_block = acceptance.expect("final_block", "partialreload debug active_tag blocks partialreload_test:block_joint", r"stone", 30)
+            final_recipe = acceptance.expect("final_recipe", "partialreload debug active_recipe partialreload_test:acceptance", r"count=1", 30)
+            if "mutatedRegistries=[]" in tx and fault != "BEFORE_FIRST_TAG_BIND": raise AssertionError(f"{fault}: expected mutation footprint")
+            results[fault] = {"status": "passed", "fault_plan": [fault], "transaction": terminal.strip(), "journal_observed": journal.strip(), "transaction_probe": tx.strip(), "tags_final": {"items": final_item.strip(), "blocks": final_block.strip()}, "recipe_final": final_recipe.strip()}
         except Exception as exc:
             results[fault] = {"status": "failed", "fault_plan": [fault], "error": str(exc)}
         finally:
             try: acceptance.shutdown()
-            except Exception as exc: results.setdefault(fault, {})["shutdown_error"] = str(exc)
-            structured("A", initial=True)
+            except Exception as exc: results.setdefault(fault, {})["shutdown_error"] = str(exc); results.setdefault(fault, {})["status"] = "failed"
+            try: acceptance.restore_properties()
+            except Exception as exc: results.setdefault(fault, {})["properties_error"] = str(exc); results.setdefault(fault, {})["status"] = "failed"
+            transcript.extend([f"===== {fault} =====", *acceptance.transcript]); structured("A", initial=True)
     # Dedicated isolated DEGRADED scenario: the primary fault is consumed
     # after recipe publication, then rollback itself is faulted.
     acceptance = Acceptance(Args()); structured("A", initial=True); acceptance.configure_rcon(); acceptance.start()
@@ -64,11 +71,13 @@ def main() -> int:
         results["DEGRADED"] = {"status": "failed", "fault_plan": ["AFTER_RECIPE_PUBLICATION", "DURING_ROLLBACK"], "error": str(exc)}
     finally:
         try: acceptance.shutdown()
-        except Exception as exc: results.setdefault("DEGRADED", {})["shutdown_error"] = str(exc)
-        structured("A", initial=True)
+        except Exception as exc: results.setdefault("DEGRADED", {})["shutdown_error"] = str(exc); results.setdefault("DEGRADED", {})["status"] = "failed"
+        try: acceptance.restore_properties()
+        except Exception as exc: results.setdefault("DEGRADED", {})["properties_error"] = str(exc); results.setdefault("DEGRADED", {})["status"] = "failed"
+        transcript.extend(["===== DEGRADED =====", *acceptance.transcript]); structured("A", initial=True)
     REPORT.parent.mkdir(parents=True, exist_ok=True)
     REPORT.write_text(json.dumps(results, indent=2) + "\n", encoding="utf-8")
-    LOG.write_text("\n".join(f"{k}: {v.get('status')}" for k, v in results.items()) + "\n", encoding="utf-8")
+    LOG.write_text("\n".join(transcript) + "\n", encoding="utf-8")
     ok = bool(results) and all(v.get("status") == "passed" for v in results.values())
     print("DEDICATED_TAGS_RECIPES_SAFETY_ACCEPTANCE_PASSED" if ok else "DEDICATED_TAGS_RECIPES_SAFETY_ACCEPTANCE_FAILED")
     print(f"Report: {REPORT}")
