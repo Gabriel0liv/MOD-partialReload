@@ -137,13 +137,22 @@ public final class PartialReloadCommand {
                                 .requires(source -> !net.minecraftforge.fml.loading.FMLEnvironment.production)
                                 .then(Commands.literal("tags_recipes")
                                         .then(Commands.literal("set")
+                                                .requires(source -> !net.minecraftforge.fml.loading.FMLEnvironment.production && source.hasPermission(4))
                                                 .then(Commands.argument("point", StringArgumentType.word())
                                                         .executes(context -> debugFaultSet(context.getSource(), StringArgumentType.getString(context, "point")))))
-                                        .then(Commands.literal("clear").executes(context -> { TagRecipeFaultInjection.clear(); context.getSource().sendSuccess(() -> Component.literal("Tag/recipe fault cleared"), false); return 1; }))
+                                        .then(Commands.literal("sequence")
+                                                .requires(source -> !net.minecraftforge.fml.loading.FMLEnvironment.production && source.hasPermission(4))
+                                                .then(Commands.argument("first", StringArgumentType.word())
+                                                        .then(Commands.argument("second", StringArgumentType.word())
+                                                                .executes(context -> debugFaultSequence(context.getSource(), StringArgumentType.getString(context, "first"), StringArgumentType.getString(context, "second"))))))
+                                        .then(Commands.literal("clear").requires(source -> !net.minecraftforge.fml.loading.FMLEnvironment.production && source.hasPermission(4)).executes(context -> { TagRecipeFaultInjection.clear(); context.getSource().sendSuccess(() -> Component.literal("Tag/recipe fault cleared"), false); return 1; }))
                                         .then(Commands.literal("status").executes(context -> debugFaultStatus(context.getSource())))))
                         .then(Commands.literal("tag_recipe_journal")
                                 .requires(source -> !net.minecraftforge.fml.loading.FMLEnvironment.production)
                                 .executes(context -> debugTagRecipeJournal(context.getSource(), service)))
+                        .then(Commands.literal("tag_recipe_transaction")
+                                .requires(source -> !net.minecraftforge.fml.loading.FMLEnvironment.production)
+                                .executes(context -> debugTagRecipeTransaction(context.getSource(), service)))
                 )
                 .then(unsupported("reload"))
                 );
@@ -160,8 +169,19 @@ public final class PartialReloadCommand {
         }
     }
 
+    private static int debugFaultSequence(CommandSourceStack source, String first, String second) {
+        try {
+            TagRecipeFaultInjection.armSequence(List.of(TagRecipeFaultPoint.valueOf(first.toUpperCase(java.util.Locale.ROOT)), TagRecipeFaultPoint.valueOf(second.toUpperCase(java.util.Locale.ROOT))));
+            source.sendSuccess(() -> Component.literal("Tag/recipe fault sequence armed: " + first + "," + second), false);
+            return 1;
+        } catch (IllegalArgumentException ex) {
+            source.sendFailure(Component.literal("Unknown fault point in sequence"));
+            return 0;
+        }
+    }
+
     private static int debugFaultStatus(CommandSourceStack source) {
-        source.sendSuccess(() -> Component.literal("Tag/recipe fault: " + TagRecipeFaultInjection.current().map(Enum::name).orElse("none")), false);
+        source.sendSuccess(() -> Component.literal("Tag/recipe faults: " + TagRecipeFaultInjection.pending().stream().map(Enum::name).collect(Collectors.joining(","))), false);
         return 1;
     }
 
@@ -170,6 +190,16 @@ public final class PartialReloadCommand {
         if (tx == null) { source.sendSuccess(() -> Component.literal("No tag/recipe transaction"), false); return 1; }
         source.sendSuccess(() -> Component.literal("Transaction " + tx.transactionId() + " status=" + tx.status()), false);
         tx.events().forEach(event -> source.sendSuccess(() -> Component.literal(event.at() + " " + event.status() + (event.detail() == null ? "" : " " + event.detail())), false));
+        return 1;
+    }
+
+    private static int debugTagRecipeTransaction(CommandSourceStack source, PartialReloadService service) {
+        var tx = service.tagRecipeTransaction();
+        if (tx == null) { source.sendSuccess(() -> Component.literal("No tag/recipe transaction"), false); return 1; }
+        source.sendSuccess(() -> Component.literal("status=" + tx.status() + " failure=" + tx.failure()), false);
+        source.sendSuccess(() -> Component.literal("registriesToMutate=" + tx.registriesToMutate() + " mutatedRegistries=" + tx.mutatedTagRegistries()), false);
+        source.sendSuccess(() -> Component.literal("recipePublicationOccurred=" + tx.recipePublicationOccurred() + " ingredientInvalidationOccurred=" + tx.ingredientInvalidationOccurred() + " tagsUpdatedEventDispatched=" + tx.tagsUpdatedEventDispatched()), false);
+        source.sendSuccess(() -> Component.literal("verificationPassed=" + tx.verificationPassed() + " retainedGeneration=" + (service.retainedTagRecipeGeneration() != null)), false);
         return 1;
     }
 
@@ -531,7 +561,8 @@ public final class PartialReloadCommand {
         var registryAccess = source.getServer().registryAccess().registryOrThrow(Registries.ITEM);
         var optional = registryAccess.getTag(TagKey.create(Registries.ITEM, id));
         List<ResourceLocation> members = optional.map(set -> set.stream().map(holder -> registryAccess.getKey(holder.value())).toList()).orElse(List.of());
-        source.sendSuccess(() -> Component.literal("Active tag " + registry + " " + id + " members=" + members), false);
+        String state = optional.isEmpty() ? "MISSING" : (members.isEmpty() ? "EMPTY" : "RESOLVED");
+        source.sendSuccess(() -> Component.literal("Active tag registry=" + registry + " tag=" + id + " state=" + state + " members=" + members), false);
         return 1;
     }
 
@@ -550,7 +581,8 @@ public final class PartialReloadCommand {
         var value = recipe.get();
         var result = value.getResultItem(source.getServer().registryAccess());
         ResourceLocation itemId = source.getServer().registryAccess().registryOrThrow(Registries.ITEM).getKey(result.getItem());
-        source.sendSuccess(() -> Component.literal("Active recipe " + id + " present=true serializer=" + value.getSerializer().getClass().getName()
+        long typeOccurrences = source.getServer().getRecipeManager().getRecipes().stream().filter(r -> r.getType().equals(value.getType()) && source.getServer().getRecipeManager().byKey(id).orElse(null) == r).count();
+        source.sendSuccess(() -> Component.literal("Active recipe " + id + " present=true byName=true typeIndexOccurrences=" + typeOccurrences + " serializer=" + value.getSerializer().getClass().getName()
                 + " type=" + value.getType() + " result=" + itemId + " count=" + result.getCount()
                 + " identity=" + System.identityHashCode(value)), false);
         return 1;

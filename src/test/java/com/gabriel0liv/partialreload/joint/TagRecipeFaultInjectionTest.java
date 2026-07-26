@@ -15,4 +15,16 @@ class TagRecipeFaultInjectionTest {
         TagRecipeFaultInjection.clear();
         assertTrue(TagRecipeFaultInjection.current().isEmpty());
     }
+
+    @Test
+    void sequencePreservesOrderAndNonMatchingPoints() {
+        TagRecipeFaultInjection.clear();
+        TagRecipeFaultInjection.armSequence(java.util.List.of(TagRecipeFaultPoint.AFTER_RECIPE_PUBLICATION, TagRecipeFaultPoint.DURING_ROLLBACK));
+        assertEquals(java.util.List.of(TagRecipeFaultPoint.AFTER_RECIPE_PUBLICATION, TagRecipeFaultPoint.DURING_ROLLBACK), TagRecipeFaultInjection.pending());
+        assertDoesNotThrow(() -> TagRecipeFaultInjection.hit(TagRecipeFaultPoint.BEFORE_VERIFICATION));
+        assertEquals(2, TagRecipeFaultInjection.pending().size());
+        assertThrows(IllegalStateException.class, () -> TagRecipeFaultInjection.hit(TagRecipeFaultPoint.AFTER_RECIPE_PUBLICATION));
+        assertEquals(java.util.List.of(TagRecipeFaultPoint.DURING_ROLLBACK), TagRecipeFaultInjection.pending());
+        TagRecipeFaultInjection.clear();
+    }
 }

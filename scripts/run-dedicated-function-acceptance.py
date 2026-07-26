@@ -141,7 +141,7 @@ class Acceptance:
             raise RuntimeError("owned server process is still registered")
         probe = subprocess.run(
             ["powershell", "-NoProfile", "-Command",
-             "Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match 'Partial Reload.*(runServer|forgeserveruserdev)' } | Select-Object -Expand ProcessId"],
+             "Get-CimInstance Win32_Process | Where-Object { $_.Name -notmatch '^(pwsh|pwsh.exe|powershell|powershell.exe|python|python.exe)$' -and $_.CommandLine -match 'Partial Reload.*(runServer|forgeserveruserdev)' } | Select-Object -Expand ProcessId"],
             cwd=ROOT, capture_output=True, text=True, check=False)
         if any(line.strip().isdigit() for line in probe.stdout.splitlines()):
             raise RuntimeError("test world lock persists while an owned server process is alive")

@@ -467,7 +467,7 @@ public final class PartialReloadService {
         tx.recipeManagerIdentity(compatibility.recipeManagerIdentity());
         tx.registryAccessIdentity(compatibility.registryAccessIdentity());
         tx.compatibilityFingerprint(compatibility.fingerprint());
-        tx.status(TagRecipeTransactionStatus.PREFLIGHT); tx.status(TagRecipeTransactionStatus.QUIESCING);
+        tx.event(TagRecipeTransactionStatus.PREFLIGHT, "INITIAL_PREFLIGHT_PASSED"); tx.status(TagRecipeTransactionStatus.PREFLIGHT); tx.status(TagRecipeTransactionStatus.QUIESCING);
         tagRecipeTransaction = tx; stateMachine.transitionTo(PartialReloadState.QUIESCING); return tx;
     }
 
@@ -483,32 +483,31 @@ public final class PartialReloadService {
         try {
             if (tx.preparationId()==null) { stateMachine.transitionTo(PartialReloadState.COMMITTING); restoreTagRecipeGeneration(server, tx.previousGeneration(), tx); return; }
             PreparedTagsAndRecipes artifact=preparedArtifact instanceof PreparedTagsAndRecipes j ? j : null;
-            preflightTagRecipeCommit(server, tx, artifact);
+            tx.event(TagRecipeTransactionStatus.QUIESCING, "SAFE_POINT_REACHED"); preflightTagRecipeCommit(server, tx, artifact); tx.event(TagRecipeTransactionStatus.QUIESCING, "SAFE_POINT_PREFLIGHT_PASSED");
             Set<ResourceKey<? extends Registry<?>>> registriesToMutate=deriveRegistriesToMutate(artifact);
-            tx.registriesToMutate(registriesToMutate);
-            Map<ResourceKey<? extends Registry<?>>, Map<TagKey<?>, List<Holder<?>>>> candidate=buildCandidateBindings(server.registryAccess(), artifact.preparedTags(), registriesToMutate);
-            List<Recipe<?>> candidateRecipes=artifact.preparedRecipes().recipesById().values().stream().map(PreparedRecipe::recipe).toList();
-            ActiveTagRecipeGeneration previous=captureTagRecipeGeneration(server, registriesToMutate); tx.previousGeneration(previous); retainedTagRecipeGeneration=previous;
+            tx.registriesToMutate(registriesToMutate); tx.event(TagRecipeTransactionStatus.BUILDING_BINDINGS, "REGISTRY_SCOPE_DERIVED:" + registriesToMutate);
+            Map<ResourceKey<? extends Registry<?>>, Map<TagKey<?>, List<Holder<?>>>> candidate=buildCandidateBindings(server.registryAccess(), artifact.preparedTags(), registriesToMutate); tx.event(TagRecipeTransactionStatus.BUILDING_BINDINGS, "CANDIDATE_BINDINGS_BUILT");
+            List<Recipe<?>> candidateRecipes=artifact.preparedRecipes().recipesById().values().stream().map(PreparedRecipe::recipe).toList(); tx.event(TagRecipeTransactionStatus.BUILDING_BINDINGS, "CANDIDATE_RECIPES_BUILT:" + candidateRecipes.size());
+            ActiveTagRecipeGeneration previous=captureTagRecipeGeneration(server, registriesToMutate); tx.previousGeneration(previous); retainedTagRecipeGeneration=previous; tx.event(TagRecipeTransactionStatus.READY_TO_COMMIT, "PREVIOUS_GENERATION_CAPTURED:" + previous.generationId());
             stateMachine.transitionTo(PartialReloadState.COMMITTING);
             tx.status(TagRecipeTransactionStatus.BINDING_TAGS);
-            int bindIndex=0; for (var e:candidate.entrySet()) { if(bindIndex==0) TagRecipeFaultInjection.hit(TagRecipeFaultPoint.BEFORE_FIRST_TAG_BIND); if(bindIndex==1) TagRecipeFaultInjection.hit(TagRecipeFaultPoint.BEFORE_SECOND_TAG_BIND); bind(server.registryAccess(),e.getKey(),e.getValue()); tx.tagRegistryMutated(e.getKey()); if(bindIndex==0) TagRecipeFaultInjection.hit(TagRecipeFaultPoint.AFTER_FIRST_TAG_BIND); bindIndex++; }
+            int bindIndex=0; for (var e:candidate.entrySet()) { tx.event(TagRecipeTransactionStatus.BINDING_TAGS, "TAG_REGISTRY_BIND_STARTED:" + e.getKey().location()); if(bindIndex==0) TagRecipeFaultInjection.hit(TagRecipeFaultPoint.BEFORE_FIRST_TAG_BIND); if(bindIndex==1) TagRecipeFaultInjection.hit(TagRecipeFaultPoint.BEFORE_SECOND_TAG_BIND); bind(server.registryAccess(),e.getKey(),e.getValue()); tx.tagRegistryMutated(e.getKey()); tx.event(TagRecipeTransactionStatus.BINDING_TAGS, "TAG_REGISTRY_BOUND:" + e.getKey().location()); if(bindIndex==0) TagRecipeFaultInjection.hit(TagRecipeFaultPoint.AFTER_FIRST_TAG_BIND); bindIndex++; }
             TagRecipeFaultInjection.hit(TagRecipeFaultPoint.AFTER_ALL_TAG_BINDS);
             tx.status(TagRecipeTransactionStatus.PUBLISHING_RECIPES);
-            TagRecipeFaultInjection.hit(TagRecipeFaultPoint.BEFORE_RECIPE_PUBLICATION); server.getRecipeManager().replaceRecipes(candidateRecipes); tx.recipeMutationOccurred(true); TagRecipeFaultInjection.hit(TagRecipeFaultPoint.AFTER_RECIPE_PUBLICATION);
-            tx.status(TagRecipeTransactionStatus.INVALIDATING_CACHES); Ingredient.invalidateAll(); tx.ingredientInvalidationOccurred(true); TagRecipeFaultInjection.hit(TagRecipeFaultPoint.AFTER_INGREDIENT_INVALIDATION);
-            tx.status(TagRecipeTransactionStatus.DISPATCHING_EVENTS); if (MinecraftForge.EVENT_BUS.post(new TagsUpdatedEvent(server.registryAccess(), false, false))) throw new IllegalStateException("TAG_UPDATE_EVENT_FAILED"); tx.tagsUpdatedEventDispatched(true); TagRecipeFaultInjection.hit(TagRecipeFaultPoint.AFTER_TAGS_UPDATED_EVENT);
+            tx.event(TagRecipeTransactionStatus.PUBLISHING_RECIPES, "RECIPE_PUBLICATION_STARTED:" + candidateRecipes.size()); TagRecipeFaultInjection.hit(TagRecipeFaultPoint.BEFORE_RECIPE_PUBLICATION); server.getRecipeManager().replaceRecipes(candidateRecipes); tx.recipeMutationOccurred(true); tx.event(TagRecipeTransactionStatus.PUBLISHING_RECIPES, "RECIPES_PUBLISHED:" + candidateRecipes.size()); TagRecipeFaultInjection.hit(TagRecipeFaultPoint.AFTER_RECIPE_PUBLICATION);
+            tx.status(TagRecipeTransactionStatus.INVALIDATING_CACHES); tx.event(TagRecipeTransactionStatus.INVALIDATING_CACHES, "INGREDIENT_INVALIDATION_STARTED"); Ingredient.invalidateAll(); tx.ingredientInvalidationOccurred(true); tx.event(TagRecipeTransactionStatus.INVALIDATING_CACHES, "INGREDIENTS_INVALIDATED"); TagRecipeFaultInjection.hit(TagRecipeFaultPoint.AFTER_INGREDIENT_INVALIDATION);
+            tx.status(TagRecipeTransactionStatus.DISPATCHING_EVENTS); tx.event(TagRecipeTransactionStatus.DISPATCHING_EVENTS, "TAGS_EVENT_DISPATCH_STARTED"); if (MinecraftForge.EVENT_BUS.post(new TagsUpdatedEvent(server.registryAccess(), false, false))) throw new IllegalStateException("TAG_UPDATE_EVENT_FAILED"); tx.tagsUpdatedEventDispatched(true); tx.event(TagRecipeTransactionStatus.DISPATCHING_EVENTS, "TAGS_EVENT_DISPATCHED"); TagRecipeFaultInjection.hit(TagRecipeFaultPoint.AFTER_TAGS_UPDATED_EVENT);
             tx.status(TagRecipeTransactionStatus.VERIFYING_SERVER); stateMachine.transitionTo(PartialReloadState.VERIFYING); TagRecipeFaultInjection.hit(TagRecipeFaultPoint.BEFORE_VERIFICATION); verifyTagRecipe(server, candidate, artifact);
             tx.candidateGeneration(new ActiveTagRecipeGeneration(UUID.randomUUID(),Instant.now(),new ActiveTagGeneration(UUID.randomUUID(),Instant.now(),captureTags(server.registryAccess(),tx.registriesToMutate())),new ActiveRecipeGeneration(UUID.randomUUID(),Instant.now(),server.getRecipeManager().getRecipes()),artifact.sourceSnapshot())); tx.verificationPassed(true); tx.status(TagRecipeTransactionStatus.SUCCESS); activeTagRecipeGeneration=tx.candidateGeneration(); promoteTagRecipeBaseline(artifact, tx.registriesToMutate()); preparedArtifact=null; stateMachine.transitionTo(PartialReloadState.SUCCESS);
         } catch (RuntimeException failure) {
             lastError = failure.getMessage() == null ? failure.getClass().getSimpleName() : failure.getMessage();
             tx.failure(lastError);
-            if (tx.previousGeneration() == null && !tx.tagMutationOccurred() && !tx.recipeMutationOccurred()) {
+            if (!tx.tagMutationOccurred() && !tx.recipeMutationOccurred() && !tx.ingredientInvalidationOccurred() && !tx.tagsUpdatedEventDispatched()) {
                 tx.status(TagRecipeTransactionStatus.FAILED_SAFE);
                 stateMachine.transitionTo(PartialReloadState.FAILED_SAFE);
                 return;
             }
             tx.status(TagRecipeTransactionStatus.ROLLBACK_REQUESTED);
-            if (tx.mutatedTagRegistries().isEmpty() && !tx.recipePublicationOccurred() && !tx.ingredientInvalidationOccurred() && !tx.tagsUpdatedEventDispatched()) { tx.status(TagRecipeTransactionStatus.FAILED_SAFE); stateMachine.transitionTo(PartialReloadState.FAILED_SAFE); return; }
             try { TagRecipeFaultInjection.hit(TagRecipeFaultPoint.DURING_ROLLBACK); restoreTagRecipeGeneration(server,tx.previousGeneration(),tx); }
             catch(RuntimeException rollback){
                 lastError = "TAG_RECIPE_ROLLBACK_FAILED: " + (rollback.getMessage() == null ? rollback.getClass().getSimpleName() : rollback.getMessage());
