@@ -23,3 +23,10 @@ rodada os cenários de player race, lifecycle de tags ausente/removida,
 registries não suportados e GameTests específicos. A promoção
 para `JOINT_TAG_RECIPE_TRANSACTIONAL_COMMIT_IMPLEMENTED_SERVER_ONLY` é proibida
 até cada linha possuir evidência direta.
+
+Atualização posterior: `ActiveRecipeSnapshot` passou a participar da
+verificação estrutural de rollback e o índice de recipes usa
+`RecipeManager.getAllRecipesFor(RecipeType)`. Os eventos de tags/recipes usam
+tipos explícitos nos call sites de produção. Os cenários de player, lifecycle
+de tags ausente/vazia/removida, registries não suportados e GameTests dedicados
+continuam pendentes e não foram marcados como aceitos.
