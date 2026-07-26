@@ -8,15 +8,17 @@
 | recipes | recipe count 1 | recipe count 2 | AFTER_RECIPE_PUBLICATION | tags+recipes | passed | completa | ROLLED_BACK | dedicated-tags-recipes-safety-acceptance.json | dedicated |
 | ingredient | tags/recipe A | tags/recipe B | AFTER_INGREDIENT_INVALIDATION | tags+recipes+cache | passed | completa | ROLLED_BACK | dedicated-tags-recipes-safety-acceptance.json | dedicated |
 | evento | tags/recipe A | tags/recipe B | AFTER_TAGS_UPDATED_EVENT | tags+recipes+evento | passed | completa | ROLLED_BACK | dedicated-tags-recipes-safety-acceptance.json | dedicated |
-| rollback impossível | geração A | geração B | DURING_ROLLBACK | parcial | pending | DEGRADED | DEGRADED | sequência adicionada, execução pendente | dedicated |
+| rollback impossível | geração A | geração B | DURING_ROLLBACK | parcial | passed | DEGRADED | DEGRADED | dedicated-tags-recipes-safety-acceptance.json + transcript | dedicated |
 | player request | sem player | com player | — | nenhuma | pendente | não aplicável | FAILED_SAFE | race não automatizada | GameTest |
 | player safe point | 0 players | player entre fases | — | nenhuma | pendente | não aplicável | FAILED_SAFE | probe ausente | GameTest |
 | tag ausente | missing | dirt | — | tag nova | pendente | missing | ROLLED_BACK | fixture ausente | dedicated |
 | tag removida | stone | removida | — | tag removida | pendente | stone | ROLLED_BACK | fixture ausente | dedicated |
 | registry não suportado | sem mudança | biome/damage_type | — | nenhuma | pendente | não aplicável | FAILED_SAFE | matriz ausente | unit/dedicated |
 
-O harness `run-dedicated-tags-recipes-safety-acceptance.py` falha fechado e
-produz relatório `blocked` até que a execução real seja implementada. Os hooks
-existem e são userdev-only, mas a matriz não está fechada. A promoção
+O harness `run-dedicated-tags-recipes-safety-acceptance.py` executou os nove
+faults recoverable e o cenário isolado `DEGRADED` com RCON, incluindo
+restauração de properties e shutdown limpo. Permanecem sem evidência nesta
+rodada os cenários de player race, lifecycle de tags ausente/removida,
+registries não suportados e GameTests específicos. A promoção
 para `JOINT_TAG_RECIPE_TRANSACTIONAL_COMMIT_IMPLEMENTED_SERVER_ONLY` é proibida
 até cada linha possuir evidência direta.

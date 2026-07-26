@@ -124,6 +124,10 @@ Os hooks `TagRecipeFaultPoint` são armáveis somente em userdev por
 startup/shutdown. Isso fornece o mecanismo de teste, mas não substitui a
 aceitação: fault injection crítica, player race, registry inicialmente vazio,
 registries não suportados e `DEGRADED` ainda precisam de GameTests e dedicated
-acceptance com observação direta. A política continua `SERVER_ONLY_NO_PLAYERS`.
+acceptance com observação direta. A execução de 26/07/2026 comprovou os nove
+faults recoverable e a sequência `AFTER_RECIPE_PUBLICATION` +
+`DURING_ROLLBACK`, incluindo lockout de `DEGRADED`; esses resultados estão no
+relatório dedicado e no transcript completo. A política continua
+`SERVER_ONLY_NO_PLAYERS`.
 O plano `phase-four-e-s-safety-gate-tasks.md` mantém a matriz pendente e impede
 a promoção do estado ou o início da Fase 4F até todas as linhas passarem.

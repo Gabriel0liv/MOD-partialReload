@@ -456,6 +456,7 @@ public final class PartialReloadService {
     public synchronized ActiveTagRecipeGeneration retainedTagRecipeGeneration() { return retainedTagRecipeGeneration; }
 
     public synchronized TagRecipeCommitTransaction requestTagRecipeCommit(MinecraftServer server, String requester) {
+        if (stateMachine.state() == PartialReloadState.DEGRADED) throw new IllegalStateException("TAG_RECIPE_TRANSACTION_DEGRADED: restart is required");
         if (stateMachine.state() != PartialReloadState.READY) throw new IllegalStateException("TAG_RECIPE_COMMIT_ARTIFACT_REQUIRED");
         if (!(preparedArtifact instanceof PreparedTagsAndRecipes joint) || !joint.isApplicable()) throw new IllegalStateException("TAG_RECIPE_COMMIT_ARTIFACT_INVALID");
         if (server.getPlayerList().getPlayerCount() > 0) throw new IllegalStateException("TAG_RECIPE_COMMIT_PLAYERS_CONNECTED");
@@ -472,6 +473,7 @@ public final class PartialReloadService {
     }
 
     public synchronized TagRecipeCommitTransaction requestTagRecipeRollback(String requester) {
+        if (stateMachine.state() == PartialReloadState.DEGRADED) throw new IllegalStateException("TAG_RECIPE_TRANSACTION_DEGRADED: restart is required");
         if (retainedTagRecipeGeneration == null) throw new IllegalStateException("TAG_RECIPE_ROLLBACK_UNAVAILABLE");
         if (stateMachine.state() != PartialReloadState.SUCCESS && stateMachine.state() != PartialReloadState.IDLE) throw new IllegalStateException("TAG_RECIPE_COMMIT_TRANSACTION_RUNNING");
         TagRecipeCommitTransaction tx = new TagRecipeCommitTransaction(UUID.randomUUID(), null, Instant.now(), requester);
@@ -551,7 +553,7 @@ public final class PartialReloadService {
             if (registry.equals("worldgen")) { String tail=rest.substring(slash+1); int second=tail.indexOf('/'); if(second<0) continue; registry="worldgen/"+tail.substring(0,second); }
             String canonical=canonicalRegistry(registry); if(canonical==null) throw new IllegalStateException("TAG_REGISTRY_COMMIT_UNSUPPORTED: "+registry); result.add(registryKey(canonical));
         }
-        return Set.copyOf(result);
+        return result.stream().sorted(java.util.Comparator.comparing(k -> k.location().toString())).collect(java.util.stream.Collectors.toCollection(java.util.LinkedHashSet::new));
     }
 
     @SuppressWarnings("unchecked") private static ResourceKey<Registry<Object>> registryKey(String canonical){return (ResourceKey<Registry<Object>>)(ResourceKey<?>)ResourceKey.createRegistryKey(ResourceLocation.fromNamespaceAndPath("minecraft",canonical));}
@@ -565,7 +567,7 @@ public final class PartialReloadService {
     }
     private static Set<String> expandTag(Map<ResourceLocation, com.gabriel0liv.partialreload.tags.PreparedTag> tags, ResourceLocation id, Set<ResourceLocation> visiting){ if(!visiting.add(id)) throw new IllegalStateException("TAG_COMMIT_BINDING_BUILD_FAILED: cycle"); var tag=tags.get(id); if(tag==null) throw new IllegalStateException("TAG_COMMIT_BINDING_BUILD_FAILED: missing nested tag"); Set<String> out=new LinkedHashSet<>(); for(String v:tag.orderedEntries()){if(v.startsWith("#")) out.addAll(expandTag(tags,ResourceLocation.parse(v.substring(1)),visiting)); else if(!tag.missingOptionalEntries().contains(v)) out.add(v);} visiting.remove(id); return out; }
     private static String canonicalRegistry(String path){return switch(path){case "items"->"item";case "blocks"->"block";case "fluids"->"fluid";case "entity_types"->"entity_type";case "game_events"->"game_event";case "mob_effects"->"mob_effect";case "enchantments"->"enchantment";default->null;};}
-    @SuppressWarnings({"unchecked","rawtypes"}) private static Map<ResourceKey<? extends Registry<?>>, Map<TagKey<?>, List<Holder<?>>>> captureTags(RegistryAccess access, Set<ResourceKey<? extends Registry<?>>> scope){Map<ResourceKey<? extends Registry<?>>,Map<TagKey<?>,List<Holder<?>>>> out=new LinkedHashMap<>(); for (ResourceKey<? extends Registry<?>> key:scope) { Registry registry=access.registryOrThrow((ResourceKey)key); Map<TagKey<?>,List<Holder<?>>> tags=new LinkedHashMap<>(); registry.getTags().forEach(rawPair->{com.mojang.datafixers.util.Pair pair=(com.mojang.datafixers.util.Pair)rawPair; List<Holder<?>> holders=new ArrayList<>(); for(Object holder:(Iterable)pair.getSecond()) holders.add((Holder<?>)holder); tags.put((TagKey)pair.getFirst(),List.copyOf(holders));}); out.put(key,tags); } return out;}
+    @SuppressWarnings({"unchecked","rawtypes"}) private static Map<ResourceKey<? extends Registry<?>>, Map<TagKey<?>, List<Holder<?>>>> captureTags(RegistryAccess access, Set<ResourceKey<? extends Registry<?>>> scope){Map<ResourceKey<? extends Registry<?>>,Map<TagKey<?>,List<Holder<?>>>> out=new LinkedHashMap<>(); for (ResourceKey<? extends Registry<?>> key:scope.stream().sorted(java.util.Comparator.comparing(k -> k.location().toString())).toList()) { Registry registry=access.registryOrThrow((ResourceKey)key); Map<TagKey<?>,List<Holder<?>>> tags=new LinkedHashMap<>(); registry.getTags().forEach(rawPair->{com.mojang.datafixers.util.Pair pair=(com.mojang.datafixers.util.Pair)rawPair; List<Holder<?>> holders=new ArrayList<>(); for(Object holder:(Iterable)pair.getSecond()) holders.add((Holder<?>)holder); tags.put((TagKey)pair.getFirst(),List.copyOf(holders));}); out.put(key,tags); } return out;}
     private ActiveTagRecipeGeneration captureTagRecipeGeneration(MinecraftServer server, Set<ResourceKey<? extends Registry<?>>> scope){return new ActiveTagRecipeGeneration(UUID.randomUUID(),Instant.now(),new ActiveTagGeneration(UUID.randomUUID(),Instant.now(),captureTags(server.registryAccess(),scope)),new ActiveRecipeGeneration(UUID.randomUUID(),Instant.now(),server.getRecipeManager().getRecipes()),activeReference==null?latestScan:activeReference);}
     private void restoreTagRecipeGeneration(MinecraftServer server, ActiveTagRecipeGeneration generation, TagRecipeCommitTransaction tx){
         if(generation==null) throw new IllegalStateException("TAG_RECIPE_ROLLBACK_FAILED");

@@ -28,8 +28,8 @@ def main() -> int:
     transcript: list[str] = []
     for fault in FAULTS:
         acceptance = Acceptance(Args())
-        structured("A", initial=True); acceptance.configure_rcon(); acceptance.start()
         try:
+            structured("A", initial=True); acceptance.configure_rcon(); acceptance.start()
             acceptance.expect("status", "partialreload status", r"FUNCTION_COMMIT_SUPPORTED", 30)
             acceptance.expect("scan_a", "partialreload scan", r"scan", 30); acceptance.wait_state(r"Last scan:\s*(?!never)", 120)
             structured("B"); acceptance.expect("scan_b", "partialreload scan", r"scan", 30); acceptance.wait_state(r"Changed resources:\s*[1-9]", 120)
@@ -57,8 +57,9 @@ def main() -> int:
             transcript.extend([f"===== {fault} =====", *acceptance.transcript]); structured("A", initial=True)
     # Dedicated isolated DEGRADED scenario: the primary fault is consumed
     # after recipe publication, then rollback itself is faulted.
-    acceptance = Acceptance(Args()); structured("A", initial=True); acceptance.configure_rcon(); acceptance.start()
+    acceptance = Acceptance(Args())
     try:
+        structured("A", initial=True); acceptance.configure_rcon(); acceptance.start()
         acceptance.expect("status", "partialreload status", r"FUNCTION_COMMIT_SUPPORTED", 30)
         acceptance.expect("scan_a", "partialreload scan", r"scan", 30); acceptance.wait_state(r"Last scan:\s*(?!never)", 120)
         structured("B"); acceptance.expect("scan_b", "partialreload scan", r"scan", 30); acceptance.wait_state(r"Changed resources:\s*[1-9]", 120)
@@ -66,7 +67,16 @@ def main() -> int:
         acceptance.expect("arm", "partialreload debug fault tags_recipes sequence AFTER_RECIPE_PUBLICATION DURING_ROLLBACK", r"sequence armed", 30)
         acceptance.expect("apply", "partialreload apply prepared", r"queued", 30)
         terminal = acceptance.expect("degraded", "partialreload transaction", r"Status: DEGRADED", 60)
-        results["DEGRADED"] = {"status": "passed", "fault_plan": ["AFTER_RECIPE_PUBLICATION", "DURING_ROLLBACK"], "transaction": terminal.strip(), "restart_required": True}
+        status = acceptance.expect("degraded_status", "partialreload status", r"State:\s*DEGRADED", 15)
+        if not re.search(r"Restart required:\s*true", status, re.I):
+            raise AssertionError("DEGRADED status did not report restart required")
+        apply_reject = acceptance.command("partialreload apply prepared")
+        rollback_reject = acceptance.command("partialreload rollback tags_recipes")
+        if not re.search(r"DEGRADED|restart is required", apply_reject, re.I):
+            raise AssertionError(f"DEGRADED apply was not rejected: {apply_reject!r}")
+        if not re.search(r"DEGRADED|restart is required", rollback_reject, re.I):
+            raise AssertionError(f"DEGRADED rollback was not rejected: {rollback_reject!r}")
+        results["DEGRADED"] = {"status": "passed", "fault_plan": ["AFTER_RECIPE_PUBLICATION", "DURING_ROLLBACK"], "transaction": terminal.strip(), "status_probe": status.strip(), "apply_rejected": apply_reject.strip(), "rollback_rejected": rollback_reject.strip(), "restart_required": True}
     except Exception as exc:
         results["DEGRADED"] = {"status": "failed", "fault_plan": ["AFTER_RECIPE_PUBLICATION", "DURING_ROLLBACK"], "error": str(exc)}
     finally:

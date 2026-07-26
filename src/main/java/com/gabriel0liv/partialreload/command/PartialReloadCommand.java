@@ -217,6 +217,7 @@ public final class PartialReloadCommand {
         final String mode = modeValue;
         source.sendSuccess(() -> Component.literal("Mode: " + mode), false);
         source.sendSuccess(() -> Component.literal("State: " + status.state()), false);
+        if (status.state() == com.gabriel0liv.partialreload.core.PartialReloadState.DEGRADED) source.sendFailure(Component.literal("Restart required: true"));
         source.sendSuccess(() -> Component.literal(
                 "Providers: " + status.registeredProviders() + " compatible, "
                         + status.plannedIntegrations() + " planned integrations"

@@ -17,8 +17,12 @@ public final class TagRecipeCommitTransaction {
     private final List<TagRecipeTransactionEvent> events = new ArrayList<>();
     public TagRecipeCommitTransaction(UUID tx, UUID prep, Instant at, String requester){this.transactionId=tx;this.preparationId=prep;this.requestedAt=at;this.requester=requester;this.status=TagRecipeTransactionStatus.REQUESTED;}
     public UUID transactionId(){return transactionId;} public UUID preparationId(){return preparationId;} public Instant requestedAt(){return requestedAt;} public String requester(){return requester;}
-    public TagRecipeTransactionStatus status(){return status;} public void status(TagRecipeTransactionStatus s){status=s; events.add(new TagRecipeTransactionEvent(Instant.now(), s, null));}
-    public void event(TagRecipeTransactionStatus s, String detail){events.add(new TagRecipeTransactionEvent(Instant.now(), s, detail));}
+    public TagRecipeTransactionStatus status(){return status;} public void status(TagRecipeTransactionStatus s){status=s; events.add(new TagRecipeTransactionEvent(Instant.now(), transactionId, s, TagRecipeTransactionEventType.STATUS_CHANGED, null));}
+    public void event(TagRecipeTransactionStatus s, String detail){
+        TagRecipeTransactionEventType type = detail != null && detail.startsWith("FAILURE:")
+                ? TagRecipeTransactionEventType.FAILURE : TagRecipeTransactionEventType.STATUS_CHANGED;
+        events.add(new TagRecipeTransactionEvent(Instant.now(), transactionId, s, type, detail));
+    }
     public List<TagRecipeTransactionEvent> events(){return List.copyOf(events);}
     public boolean tagMutationOccurred(){return tagMutationOccurred;} public void tagMutationOccurred(boolean v){tagMutationOccurred=v;}
     public boolean recipeMutationOccurred(){return recipeMutationOccurred;} public void recipeMutationOccurred(boolean v){recipeMutationOccurred=v;}
