@@ -29,19 +29,89 @@ def structured(letter: str, initial: bool = False) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps({"replace": True, "values": [value]}) + "\n", encoding="utf-8")
 
+def lifecycle_generation(letter: str, scenario: str, initial: bool = False) -> None:
+    structured(letter, initial=initial)
+    if scenario == "tag_absent_add_rollback":
+        path = PACK / "data/partialreload_test/tags/items/new_tag.json"
+        if letter == "A": path.unlink(missing_ok=True)
+        else: path.write_text(json.dumps({"replace": True, "values": ["minecraft:dirt"]}) + "\n", encoding="utf-8")
+    elif scenario == "tag_empty_modify_rollback":
+        path = PACK / "data/partialreload_test/tags/items/empty_tag.json"
+        path.write_text(json.dumps({"replace": True, "values": [] if letter == "A" else ["minecraft:dirt"]}) + "\n", encoding="utf-8")
+    elif scenario == "tag_remove_rollback":
+        path = PACK / "data/partialreload_test/tags/items/removed_tag.json"
+        if letter == "A": path.write_text(json.dumps({"replace": True, "values": ["minecraft:stone"]}) + "\n", encoding="utf-8")
+        else: path.unlink(missing_ok=True)
+
+def run_lifecycle_scenario(name: str, Args) -> dict:
+    acceptance = Acceptance(Args())
+    result = {"status": "failed", "scenario": name}
+    try:
+        lifecycle_generation("A", name, initial=True); acceptance.configure_rcon(); acceptance.start()
+        acceptance.expect("status", "partialreload status", r"TAG_RECIPE_SERVER_ONLY", 30)
+        acceptance.expect("scan_a", "partialreload scan", r"scan", 30); acceptance.wait_state(r"Last scan:\s*(?!never)", 120)
+        lifecycle_generation("B", name); acceptance.expect("scan_b", "partialreload scan", r"scan", 30); acceptance.wait_state(r"Changed resources:\s*[1-9]", 120)
+        acceptance.expect("prepare", "partialreload prepare tags_recipes", r"preparation started", 30); acceptance.wait_state(r"State:\s*READY", 120)
+        acceptance.expect("apply", "partialreload apply prepared", r"queued", 30); acceptance.expect("commit", "partialreload transaction", r"Status: SUCCESS", 60)
+        candidate = acceptance.command("partialreload debug active_tag items partialreload_test:" + ("new_tag" if name == "tag_absent_add_rollback" else "empty_tag" if name == "tag_empty_modify_rollback" else "removed_tag"))
+        if name == "tag_absent_add_rollback" and "dirt" not in candidate: raise AssertionError("candidate absent-tag did not resolve to dirt")
+        if name == "tag_empty_modify_rollback" and "dirt" not in candidate: raise AssertionError("candidate empty-tag did not resolve to dirt")
+        if name == "tag_remove_rollback" and "MISSING" not in candidate: raise AssertionError("removed tag did not become missing")
+        acceptance.expect("rollback", "partialreload rollback tags_recipes", r"queued", 30); acceptance.expect("rolled_back", "partialreload transaction", r"Status: ROLLED_BACK", 60)
+        restored = acceptance.command("partialreload debug active_tag items partialreload_test:" + ("new_tag" if name == "tag_absent_add_rollback" else "empty_tag" if name == "tag_empty_modify_rollback" else "removed_tag"))
+        expected = "MISSING" if name == "tag_absent_add_rollback" else "EMPTY" if name == "tag_empty_modify_rollback" else "stone"
+        if expected not in restored: raise AssertionError(f"rollback did not restore {expected}: {restored}")
+        result.update(status="passed", candidate=candidate.strip(), restored=restored.strip())
+    except Exception as exc: result["error"] = str(exc)
+    finally:
+        try: acceptance.shutdown()
+        except Exception as exc: result["shutdown_error"] = str(exc); result["status"] = "failed"
+        try: acceptance.restore_properties()
+        except Exception as exc: result["properties_error"] = str(exc); result["status"] = "failed"
+    return result
+
+def run_unsupported_scenario(name: str, Args) -> dict:
+    acceptance = Acceptance(Args()); result = {"status": "failed", "scenario": name}
+    try:
+        structured("A", initial=True)
+        root = PACK / "data/partialreload_test/tags"
+        target = root / ("worldgen/biome/unsupported.json" if name == "biome_add" else "damage_type/unsupported.json")
+        if name != "biome_add" and name == "damage_type_remove": target.parent.mkdir(parents=True, exist_ok=True); target.write_text(json.dumps({"replace": True, "values": ["minecraft:in_fire"]}) + "\n")
+        acceptance.configure_rcon(); acceptance.start(); acceptance.expect("status", "partialreload status", r"TAG_RECIPE_SERVER_ONLY", 30)
+        acceptance.expect("scan_a", "partialreload scan", r"scan", 30); acceptance.wait_state(r"Last scan:\s*(?!never)", 120)
+        structured("B"); target.parent.mkdir(parents=True, exist_ok=True)
+        if name == "biome_add" or name == "damage_type_modify": target.write_text(json.dumps({"replace": True, "values": ["minecraft:plains"]}) + "\n")
+        else: target.unlink(missing_ok=True)
+        acceptance.expect("scan_b", "partialreload scan", r"scan", 30); acceptance.wait_state(r"Changed resources:\s*[1-9]", 120)
+        prep = acceptance.command("partialreload prepare tags_recipes")
+        if "unsupported" not in prep.lower() and "blocker" not in prep.lower(): raise AssertionError(f"unsupported registry not diagnosed: {prep}")
+        result.update(status="passed", preparation=prep.strip())
+    except Exception as exc: result["error"] = str(exc)
+    finally:
+        try: acceptance.shutdown()
+        except Exception as exc: result["shutdown_error"] = str(exc); result["status"] = "failed"
+        try: acceptance.restore_properties()
+        except Exception as exc: result["properties_error"] = str(exc); result["status"] = "failed"
+    return result
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--group", choices=sorted(GROUPS))
     parser.add_argument("--scenario", choices=FAULTS)
     args_filter = parser.parse_args()
     if args_filter.group == "degraded": selected_faults = []
-    elif args_filter.group in ("tag-lifecycle", "unsupported"):
-        report = ROOT / "build" / "reports" / "dedicated-tags-recipes-safety-acceptance-filtered.json"
-        report.parent.mkdir(parents=True, exist_ok=True)
-        report.write_text(json.dumps({"status": "failed", "complete_run": False, "selected_group": args_filter.group,
-                                      "error": "scenario group is not implemented"}, indent=2) + "\n", encoding="utf-8")
-        print(f"Filtered group {args_filter.group} is not implemented; report: {report}")
-        return 1
+    elif args_filter.group == "tag-lifecycle":
+        class Args: server_startup_timeout=180; rcon_startup_timeout=30; command_timeout=15; shutdown_timeout=60
+        results = {name: run_lifecycle_scenario(name, Args) for name in GROUPS["tag-lifecycle"]}
+        report_path = ROOT / "build" / "reports" / "dedicated-tags-recipes-safety-acceptance-filtered.json"
+        report_path.parent.mkdir(parents=True, exist_ok=True); report_path.write_text(json.dumps({"status": "passed" if all(v["status"] == "passed" for v in results.values()) else "failed", "complete_run": False, "selected_group": args_filter.group, "scenarios": results}, indent=2) + "\n", encoding="utf-8")
+        print(f"Report: {report_path}"); return 0 if all(v["status"] == "passed" for v in results.values()) else 1
+    elif args_filter.group == "unsupported":
+        class Args: server_startup_timeout=180; rcon_startup_timeout=30; command_timeout=15; shutdown_timeout=60
+        results = {name: run_unsupported_scenario(name, Args) for name in GROUPS["unsupported"]}
+        report_path = ROOT / "build" / "reports" / "dedicated-tags-recipes-safety-acceptance-filtered.json"
+        report_path.parent.mkdir(parents=True, exist_ok=True); report_path.write_text(json.dumps({"status": "passed" if all(v["status"] == "passed" for v in results.values()) else "failed", "complete_run": False, "selected_group": args_filter.group, "scenarios": results}, indent=2) + "\n", encoding="utf-8")
+        print(f"Report: {report_path}"); return 0 if all(v["status"] == "passed" for v in results.values()) else 1
     elif args_filter.scenario: selected_faults = [args_filter.scenario]
     elif args_filter.group: selected_faults = GROUPS[args_filter.group]
     else: selected_faults = FAULTS

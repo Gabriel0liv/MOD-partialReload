@@ -599,7 +599,7 @@ public final class PartialReloadService {
         if(connectedPlayerProbe.playerCount(server)>0)throw new IllegalStateException("TAG_RECIPE_COMMIT_PLAYERS_CONNECTED");
         Set<ResourceLocation> expected=artifact.preparedRecipes().recipesById().keySet(); Set<ResourceLocation> actual=server.getRecipeManager().getRecipes().stream().map(Recipe::getId).collect(java.util.stream.Collectors.toSet());
         if(!actual.equals(expected))throw new IllegalStateException("RECIPE_COMMIT_VERIFICATION_FAILED");
-        for (var entry : candidate.entrySet()) { Registry registry=server.registryAccess().registryOrThrow((ResourceKey)entry.getKey()); Map<TagKey<?>, List<Holder<?>>> expectedTags=entry.getValue(); Map<TagKey<?>, List<Holder<?>>> observedTags=new LinkedHashMap<>(); registry.getTags().forEach(rawPair->{com.mojang.datafixers.util.Pair pair=(com.mojang.datafixers.util.Pair)rawPair; List<Holder<?>> values=new ArrayList<>(); for(Object holder:(Iterable)pair.getSecond()) values.add((Holder<?>)holder); observedTags.put((TagKey)pair.getFirst(),values);}); if(!observedTags.keySet().equals(expectedTags.keySet())) throw new IllegalStateException("TAG_COMMIT_VERIFICATION_FAILED: tag ids"); for (var tag:expectedTags.entrySet()) { if(!observedTags.get(tag.getKey()).equals(tag.getValue())) throw new IllegalStateException("TAG_COMMIT_VERIFICATION_FAILED: "+tag.getKey()); } }
+        for (var entry : candidate.entrySet()) { Registry registry=server.registryAccess().registryOrThrow((ResourceKey)entry.getKey()); Map<TagKey<?>, List<Holder<?>>> expectedTags=entry.getValue(); Map<TagKey<?>, List<Holder<?>>> observedTags=new LinkedHashMap<>(); registry.getTags().forEach(rawPair->{com.mojang.datafixers.util.Pair pair=(com.mojang.datafixers.util.Pair)rawPair; List<Holder<?>> values=new ArrayList<>(); for(Object holder:(Iterable)pair.getSecond()) values.add((Holder<?>)holder); observedTags.put((TagKey)pair.getFirst(),values);}); for (var tag:expectedTags.entrySet()) { if(!observedTags.containsKey(tag.getKey()) || !observedTags.get(tag.getKey()).equals(tag.getValue())) throw new IllegalStateException("TAG_COMMIT_VERIFICATION_FAILED: "+tag.getKey()); } }
     }
     @SuppressWarnings({"unchecked", "rawtypes"})
     private void verifyRestoredTagRecipe(MinecraftServer server, ActiveTagRecipeGeneration generation, TagRecipeCommitTransaction tx){
@@ -627,12 +627,17 @@ public final class PartialReloadService {
             if (structural == null || (structural.registryIdentity() != 0 && structural.registryIdentity() != System.identityHashCode(registry))) throw new IllegalStateException("TAG_RECIPE_ROLLBACK_VERIFICATION_FAILED: registry identity");
             Map<TagKey<?>, List<Holder<?>>> observed = new LinkedHashMap<>();
             registry.getTags().forEach(raw -> { com.mojang.datafixers.util.Pair pair=(com.mojang.datafixers.util.Pair)raw; List<Holder<?>> values=new ArrayList<>(); for(Object holder:(Iterable)pair.getSecond()) values.add((Holder<?>)holder); observed.put((TagKey)pair.getFirst(), List.copyOf(values)); });
-            if (!observed.keySet().equals(generationEntry.getValue().keySet())) throw new IllegalStateException("TAG_RECIPE_ROLLBACK_VERIFICATION_FAILED: tag ids");
-            for (var tag : generationEntry.getValue().entrySet()) if (!observed.get(tag.getKey()).equals(tag.getValue())) throw new IllegalStateException("TAG_RECIPE_ROLLBACK_VERIFICATION_FAILED: tag members");
             for (var tag : structural.tags().entrySet()) {
-                boolean present = observed.containsKey(TagKey.create((ResourceKey) generationEntry.getKey(), tag.getKey()));
-                if (tag.getValue().state() == com.gabriel0liv.partialreload.tags.TagState.MISSING && present)
-                    throw new IllegalStateException("TAG_RECIPE_ROLLBACK_VERIFICATION_FAILED: missing tag restored");
+                TagKey key = TagKey.create((ResourceKey) generationEntry.getKey(), tag.getKey());
+                boolean present = observed.containsKey(key);
+                if (tag.getValue().state() == com.gabriel0liv.partialreload.tags.TagState.MISSING && present) throw new IllegalStateException("TAG_RECIPE_ROLLBACK_VERIFICATION_FAILED: missing tag restored");
+                if (tag.getValue().state() != com.gabriel0liv.partialreload.tags.TagState.MISSING) {
+                    List<ResourceLocation> observedMembers = present ? observed.get(key).stream()
+                            .map(h -> h.unwrapKey().map(k -> k.location()).orElse(null))
+                            .sorted().toList() : List.of();
+                    if (!present || !observedMembers.equals(tag.getValue().members()))
+                        throw new IllegalStateException("TAG_RECIPE_ROLLBACK_VERIFICATION_FAILED: tag members");
+                }
             }
         }
     }

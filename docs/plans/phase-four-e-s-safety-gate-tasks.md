@@ -37,3 +37,12 @@ capturar IDs A ∪ B, e foi adicionada a matriz unitária de registries não
 suportados. Os grupos dedicados de lifecycle de tags, registries não
 suportados e os GameTests end-to-end continuam bloqueados até execução real;
 nenhum deles é marcado como passed por inferência.
+
+Execução filtrada de `tag-lifecycle` após recompilação: `EMPTY` passou com
+estado candidato `RESOLVED[dirt]` e restauração `EMPTY`. Os cenários de tag
+`MISSING` e remoção falharam na verificação direta: em 1.20.1, o binding
+vanilla preserva a associação nomeada no mapa de tags quando a entrada não é
+fornecida, produzindo `missing tag restored`. Esse comportamento é uma
+pendência funcional real, não foi mascarado pelo harness e impede a promoção
+do gate. A ordenação dos membros do snapshot foi corrigida antes dessa
+execução.
