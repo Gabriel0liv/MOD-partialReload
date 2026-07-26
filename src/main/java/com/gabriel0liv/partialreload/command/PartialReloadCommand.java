@@ -469,9 +469,9 @@ public final class PartialReloadCommand {
         source.sendSuccess(() -> Component.literal("Cross-provider dependencies: " + artifact.dependencyGraph().edgeCount()), false);
         source.sendSuccess(() -> Component.literal("Warnings: " + artifact.validation().count(ValidationSeverity.WARNING) + ", errors/blockers: " + artifact.validation().issues().stream().filter(i -> i.severity() == ValidationSeverity.ERROR || i.severity() == ValidationSeverity.BLOCKER).count()), false);
         source.sendSuccess(() -> Component.literal("Technically applicable: " + artifact.isApplicable()), false);
-        source.sendSuccess(() -> Component.literal("Tag binding: not implemented"), false);
-        source.sendSuccess(() -> Component.literal("Recipe commit: not implemented"), false);
-        source.sendSuccess(() -> Component.literal("Active tags and RecipeManager: unchanged"), false);
+        source.sendSuccess(() -> Component.literal("Tag binding: server-only joint commit when applicable"), false);
+        source.sendSuccess(() -> Component.literal("Recipe commit: server-only joint commit when applicable"), false);
+        source.sendSuccess(() -> Component.literal("Active tags and RecipeManager: unchanged until apply"), false);
         return 1;
     }
 
@@ -509,7 +509,13 @@ public final class PartialReloadCommand {
 
     private static int debugActiveRecipe(CommandSourceStack source, ResourceLocation id) {
         var recipe = source.getServer().getRecipeManager().byKey(id);
-        source.sendSuccess(() -> Component.literal("Active recipe " + id + " present=" + recipe.isPresent()), false);
+        if (recipe.isEmpty()) { source.sendSuccess(() -> Component.literal("Active recipe " + id + " present=false"), false); return 1; }
+        var value = recipe.get();
+        var result = value.getResultItem(source.getServer().registryAccess());
+        ResourceLocation itemId = source.getServer().registryAccess().registryOrThrow(Registries.ITEM).getKey(result.getItem());
+        source.sendSuccess(() -> Component.literal("Active recipe " + id + " present=true serializer=" + value.getSerializer().getClass().getName()
+                + " type=" + value.getType() + " result=" + itemId + " count=" + result.getCount()
+                + " identity=" + System.identityHashCode(value)), false);
         return 1;
     }
 

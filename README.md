@@ -30,7 +30,9 @@ exato Forge 47.4.10.
   resolução candidata, revalidação cross-provider, grafo e delta combinados.
 - commit transacional conjunto server-only de tags + recipes sem jogadores,
   com bind por registry, publicação completa de recipes, invalidação de
-  Ingredient, evento de tags, verificação e rollback em memória.
+  Ingredient, evento de tags, verificação e rollback em memória; o caminho
+  segue marcado como pending safety hardening enquanto a matriz completa de
+  fault injection, player race e registries vazios não estiver automatizada.
 
 ## Não implementado
 

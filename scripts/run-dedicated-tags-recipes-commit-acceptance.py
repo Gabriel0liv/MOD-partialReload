@@ -26,7 +26,7 @@ def install_joint(letter: str, initial: bool = False) -> None:
     )
     # Keep the recipe bytes stable; only candidate tag bindings change.
     (PACK / "data/partialreload_test/recipes/acceptance.json").write_text(
-        json.dumps({"type": "minecraft:crafting_shapeless", "ingredients": [{"tag": "partialreload_test:joint"}], "result": {"item": "minecraft:torch"}}) + "\n",
+        json.dumps({"type": "minecraft:crafting_shapeless", "ingredients": [{"tag": "partialreload_test:joint"}], "result": {"item": "minecraft:torch", "count": 1 if letter == "A" else 2}}) + "\n",
         encoding="utf-8",
     )
 
@@ -58,6 +58,7 @@ def main() -> int:
         if not re.search(r"Technically applicable:\s*true", prepared, re.I):
             raise AssertionError("joint artifact is not applicable: " + prepared)
         active_a = acceptance.expect("active_a", "partialreload debug active_tag items partialreload_test:joint", r"members=.*minecraft:stone", 30)
+        recipe_a = acceptance.expect("recipe_a", "partialreload debug active_recipe partialreload_test:acceptance", r"result=.*torch.*count=1", 30)
 
         acceptance.expect("queued", "partialreload apply prepared", r"queued|safe point", 30)
         transaction = acceptance.expect("commit_success", "partialreload transaction", r"Status:\s*SUCCESS", 60)
@@ -66,6 +67,7 @@ def main() -> int:
         active_b = acceptance.expect("active_b", "partialreload debug active_tag items partialreload_test:joint", r"members=.*minecraft:dirt", 30)
         if "minecraft:stone" in active_b:
             raise AssertionError("candidate tag still contains stone: " + active_b)
+        recipe_b = acceptance.expect("recipe_b", "partialreload debug active_recipe partialreload_test:acceptance", r"result=.*torch.*count=2", 30)
         after_commit = acceptance.fingerprints()
         for name in ("LootDataManager", "RecipeManager", "AdvancementManager"):
             if after_commit[name] != before[name]:
@@ -74,6 +76,7 @@ def main() -> int:
             "commit": {"status": "passed", "transaction": transaction.strip()},
             "candidate_tag_b_active": {"status": "passed", "expected": ["minecraft:dirt"], "observed": active_b.strip()},
             "active_tag_a_before_commit": {"status": "passed", "expected": ["minecraft:stone"], "observed": active_a.strip()},
+            "recipe_publication_scenario": {"status": "pending-rollback-check", "result_before": recipe_a.strip(), "result_after": recipe_b.strip()},
             "function_manager_identity": {"status": "passed", "observed": after_commit["FunctionManager"]},
             "function_library_unchanged": {"status": "passed", "before": before["FunctionLibrary"], "after": after_commit["FunctionLibrary"]},
             "loot_manager_identity": {"status": "passed", "before": before["LootDataManager"], "after": after_commit["LootDataManager"]},
@@ -87,11 +90,13 @@ def main() -> int:
         if "minecraft:dirt" in restored:
             raise AssertionError("rollback left dirt in active tag: " + restored)
         after_rollback = acceptance.fingerprints()
+        recipe_restored = acceptance.expect("recipe_restored", "partialreload debug active_recipe partialreload_test:acceptance", r"result=.*torch.*count=1", 30)
         if after_rollback["LootDataManager"] != before["LootDataManager"] or after_rollback["RecipeManager"] != before["RecipeManager"] or after_rollback["AdvancementManager"] != before["AdvancementManager"]:
             raise AssertionError("lateral manager changed after rollback")
         results.update({
             "rollback": {"status": "passed", "transaction": rollback.strip()},
             "active_tag_a_restored": {"status": "passed", "expected": ["minecraft:stone"], "observed": restored.strip()},
+            "recipe_publication_scenario": {"status": "passed", "result_before": recipe_a.strip(), "result_after": recipe_b.strip(), "result_after_rollback": recipe_restored.strip()},
             "function_library_rollback": {"status": "passed", "before": before["FunctionLibrary"], "after": after_rollback["FunctionLibrary"]},
         })
         acceptance.command("partialreload discard")

@@ -69,3 +69,10 @@ identidades de LootDataManager, RecipeManager e AdvancementManager e restaurou
 A em `ROLLED_BACK`. Registries fora da allowlist estática permanecem fora da
 publicação e alterações custom nesses registries falham fechado. Client sync,
 menus e players continuam não suportados.
+
+O self-check inclui versão MC/Forge, identidades de RecipeManager,
+RegistryAccess e registries allowlisted. O safe point repete esse preflight e
+recaptura hashes de tags/recipes para detectar TOCTOU sem depender de novo scan.
+A aceitação dedicada básica passou, mas fault injection, race de player e
+restauração de registry inicialmente vazio ainda são cobertura pendente; o
+estado permanece `PENDING_SAFETY_HARDENING`.

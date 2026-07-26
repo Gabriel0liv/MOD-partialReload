@@ -9,6 +9,7 @@ SUITES = [
     ("recipe_acceptance", "run-dedicated-recipe-acceptance.py", []),
     ("tag_acceptance", "run-dedicated-tag-acceptance.py", []),
     ("joint_acceptance", "run-dedicated-tags-recipes-acceptance.py", []),
+    ("tag_recipe_commit_acceptance", "run-dedicated-tags-recipes-commit-acceptance.py", []),
     ("kubejs_expected_block", "run-dedicated-kubejs-recipe-acceptance.py", []),
 ]
 
@@ -39,16 +40,14 @@ def main() -> int:
     else:
         result["orphan_process_check"] = "passed"
     lock = ROOT / "run" / "world" / "session.lock"
-    if lock.exists() and not owned_processes():
-        try:
-            lock.unlink()
-        except OSError:
-            pass
+    # A stale lock is a diagnostic failure, never something this consolidator
+    # silently deletes.  Individual suites own cleanup of their disposable
+    # worlds after their process tree has terminated.
     result["world_lock_check"] = "passed" if not lock.exists() else "failed"
     result["restoration_check"] = "passed" if not (ROOT / "run" / "server.properties.partialreload.bak").exists() else "failed"
     result["finished_at"] = time.time()
     (REPORT_DIR / "all-acceptance.json").write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
-    ok = all(v.get("status") == "passed" for v in result["suites"].values()) and result["orphan_process_check"] == "passed" and result["world_lock_check"] == "passed" and result["restoration_check"] == "passed"
+    ok = all(v.get("status") == "passed" for v in result["suites"].values()) and result.get("orphan_process_check") == "passed" and result["world_lock_check"] == "passed" and result["restoration_check"] == "passed"
     print("ALL_ACCEPTANCE_PASSED" if ok else "ALL_ACCEPTANCE_FAILED")
     return 0 if ok else 1
 

@@ -100,3 +100,19 @@ tag ativa A (`minecraft:stone`), publicou a candidata B
 (`minecraft:dirt`) em `SUCCESS`, preservou as identidades laterais e restaurou
 A em `ROLLED_BACK`. Sincronização para clientes não foi exercitada e continua
 fora do contrato.
+
+## 16. Endurecimento de segurança implementado
+
+O safe point repete o preflight antes de qualquer mutação: identidade do
+artefato, players, `RecipeManager`, `RegistryAccess`, fingerprint de
+compatibilidade e hashes de tags/recipes são comparados. O escopo é derivado
+dos recursos de tags realmente modificados; registries fora da allowlist
+falham com `TAG_REGISTRY_COMMIT_UNSUPPORTED`. A geração anterior captura
+somente esse escopo, incluindo mapas vazios, e o rollback só rebinds registries
+que tiveram `bindTags` concluído. A transação registra registries mutados,
+publicação de recipes, invalidação de Ingredient e despacho do evento.
+
+Fault injection é userdev-only e permite testar falhas antes/depois de cada
+etapa sem expor comando de produção. O relatório distingue core state
+verificado de efeitos externos de listeners, que não são genericamente
+reversíveis.

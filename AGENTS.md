@@ -42,13 +42,14 @@ A fase 3B continua somente preparação conjunta e passiva de predicates, item
 modifiers e loot tables; `VanillaLootDataProvider` nunca publica no
 `LootDataManager`. GLM permanece separado conforme ADR-007.
 
-A Fase 4E implementa commit conjunto server-only de tags + recipes somente em
-servidor dedicado sem jogadores conectados. O safe point usa o fim do tick da
-server thread; bindings usam `Registry.bindTags`, recipes usam
+A Fase 4E implementa o caminho server-only de commit conjunto de tags + recipes
+somente em servidor dedicado sem jogadores conectados. O safe point usa o fim
+do tick da server thread; bindings usam `Registry.bindTags`, recipes usam
 `RecipeManager.replaceRecipes`, `Ingredient.invalidateAll()` é chamado e
 `TagsUpdatedEvent` é emitido. Uma geração conjunta anterior fica retida em
-memória para rollback único. Sincronização de clientes, menus e jogadores
-permanecem bloqueados para a fase 4F.
+memória para rollback único. A implementação permanece em endurecimento de
+segurança até que preflight stale, fault injection, player race, registry vazio
+e a regressão dedicada completa tenham cobertura explícita.
 
 A Fase 4A prepara recipes vanilla/Forge read-only. A Fase 4B possui apenas
 pesquisa e snapshot/classificação segura de KubeJS até existir um runtime Forge

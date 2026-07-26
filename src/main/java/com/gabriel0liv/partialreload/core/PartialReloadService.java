@@ -36,12 +36,16 @@ import com.gabriel0liv.partialreload.joint.ActiveTagRecipeGeneration;
 import com.gabriel0liv.partialreload.joint.TagRecipeCommitTransaction;
 import com.gabriel0liv.partialreload.joint.TagRecipeTransactionStatus;
 import com.gabriel0liv.partialreload.joint.TagRecipeCommitCompatibility;
+import com.gabriel0liv.partialreload.joint.TagRecipeFaultInjection;
+import com.gabriel0liv.partialreload.joint.TagRecipeFaultPoint;
 import com.gabriel0liv.partialreload.tags.ActiveTagGeneration;
 import com.gabriel0liv.partialreload.recipe.ActiveRecipeGeneration;
 import com.gabriel0liv.partialreload.validation.ValidationIssue;
 import com.gabriel0liv.partialreload.validation.ValidationReport;
 import com.gabriel0liv.partialreload.config.PartialReloadConfig;
 import com.gabriel0liv.partialreload.resource.ResourceSnapshot;
+import com.gabriel0liv.partialreload.resource.ResourceScanner;
+import com.gabriel0liv.partialreload.resource.ResourceScanException;
 
 import javax.annotation.Nullable;
 import java.util.Objects;
@@ -54,6 +58,7 @@ import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.time.Instant;
+import java.time.Clock;
 import net.minecraft.commands.CommandFunction;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.MinecraftServer;
@@ -459,6 +464,9 @@ public final class PartialReloadService {
         TagRecipeCommitCompatibility compatibility = TagRecipeCommitCompatibility.inspect(server);
         if (!compatibility.compatible()) throw new IllegalStateException("TAG_RECIPE_COMMIT_NOT_COMPATIBLE: " + compatibility.detail());
         TagRecipeCommitTransaction tx = new TagRecipeCommitTransaction(UUID.randomUUID(), joint.preparationId(), Instant.now(), requester);
+        tx.recipeManagerIdentity(compatibility.recipeManagerIdentity());
+        tx.registryAccessIdentity(compatibility.registryAccessIdentity());
+        tx.compatibilityFingerprint(compatibility.fingerprint());
         tx.status(TagRecipeTransactionStatus.PREFLIGHT); tx.status(TagRecipeTransactionStatus.QUIESCING);
         tagRecipeTransaction = tx; stateMachine.transitionTo(PartialReloadState.QUIESCING); return tx;
     }
@@ -467,28 +475,30 @@ public final class PartialReloadService {
         if (retainedTagRecipeGeneration == null) throw new IllegalStateException("TAG_RECIPE_ROLLBACK_UNAVAILABLE");
         if (stateMachine.state() != PartialReloadState.SUCCESS && stateMachine.state() != PartialReloadState.IDLE) throw new IllegalStateException("TAG_RECIPE_COMMIT_TRANSACTION_RUNNING");
         TagRecipeCommitTransaction tx = new TagRecipeCommitTransaction(UUID.randomUUID(), null, Instant.now(), requester);
-        tx.previousGeneration(retainedTagRecipeGeneration); tx.status(TagRecipeTransactionStatus.QUIESCING); tagRecipeTransaction=tx; stateMachine.transitionTo(PartialReloadState.QUIESCING); return tx;
+        tx.previousGeneration(retainedTagRecipeGeneration); tx.registriesToMutate(retainedTagRecipeGeneration.tags().registries().keySet()); for (var key:retainedTagRecipeGeneration.tags().registries().keySet()) tx.tagRegistryMutated(key); tx.status(TagRecipeTransactionStatus.QUIESCING); tagRecipeTransaction=tx; stateMachine.transitionTo(PartialReloadState.QUIESCING); return tx;
     }
 
     public synchronized void processTagRecipeSafePoint(MinecraftServer server) {
         TagRecipeCommitTransaction tx=tagRecipeTransaction; if(tx==null || tx.status()!=TagRecipeTransactionStatus.QUIESCING) return;
-        stateMachine.transitionTo(PartialReloadState.COMMITTING);
         try {
-            if (tx.preparationId()==null) { restoreTagRecipeGeneration(server, tx.previousGeneration(), tx); return; }
+            if (tx.preparationId()==null) { stateMachine.transitionTo(PartialReloadState.COMMITTING); restoreTagRecipeGeneration(server, tx.previousGeneration(), tx); return; }
             PreparedTagsAndRecipes artifact=preparedArtifact instanceof PreparedTagsAndRecipes j ? j : null;
-            if (artifact==null || !artifact.preparationId().equals(tx.preparationId())) throw new IllegalStateException("TAG_RECIPE_COMMIT_SNAPSHOT_STALE");
-            if (unsupportedTagResourcesChanged(artifact)) throw new IllegalStateException("TAG_REGISTRY_COMMIT_UNSUPPORTED: " + (lastError == null ? "changed unsupported registry" : lastError));
-            ActiveTagRecipeGeneration previous=captureTagRecipeGeneration(server); tx.previousGeneration(previous); retainedTagRecipeGeneration=previous;
-            Map<ResourceKey<? extends Registry<?>>, Map<TagKey<?>, List<Holder<?>>>> candidate=buildCandidateBindings(server.registryAccess(), artifact.preparedTags());
+            preflightTagRecipeCommit(server, tx, artifact);
+            Set<ResourceKey<? extends Registry<?>>> registriesToMutate=deriveRegistriesToMutate(artifact);
+            tx.registriesToMutate(registriesToMutate);
+            Map<ResourceKey<? extends Registry<?>>, Map<TagKey<?>, List<Holder<?>>>> candidate=buildCandidateBindings(server.registryAccess(), artifact.preparedTags(), registriesToMutate);
+            List<Recipe<?>> candidateRecipes=artifact.preparedRecipes().recipesById().values().stream().map(PreparedRecipe::recipe).toList();
+            ActiveTagRecipeGeneration previous=captureTagRecipeGeneration(server, registriesToMutate); tx.previousGeneration(previous); retainedTagRecipeGeneration=previous;
+            stateMachine.transitionTo(PartialReloadState.COMMITTING);
             tx.status(TagRecipeTransactionStatus.BINDING_TAGS);
-            for (var e:candidate.entrySet()) bind(server.registryAccess(),e.getKey(),e.getValue());
-            tx.tagMutationOccurred(true);
+            int bindIndex=0; for (var e:candidate.entrySet()) { if(bindIndex==0) TagRecipeFaultInjection.hit(TagRecipeFaultPoint.BEFORE_FIRST_TAG_BIND); if(bindIndex==1) TagRecipeFaultInjection.hit(TagRecipeFaultPoint.BEFORE_SECOND_TAG_BIND); bind(server.registryAccess(),e.getKey(),e.getValue()); tx.tagRegistryMutated(e.getKey()); if(bindIndex==0) TagRecipeFaultInjection.hit(TagRecipeFaultPoint.AFTER_FIRST_TAG_BIND); bindIndex++; }
+            TagRecipeFaultInjection.hit(TagRecipeFaultPoint.AFTER_ALL_TAG_BINDS);
             tx.status(TagRecipeTransactionStatus.PUBLISHING_RECIPES);
-            server.getRecipeManager().replaceRecipes(artifact.preparedRecipes().recipesById().values().stream().map(PreparedRecipe::recipe).toList()); tx.recipeMutationOccurred(true);
-            tx.status(TagRecipeTransactionStatus.INVALIDATING_CACHES); Ingredient.invalidateAll();
-            tx.status(TagRecipeTransactionStatus.DISPATCHING_EVENTS); if (MinecraftForge.EVENT_BUS.post(new TagsUpdatedEvent(server.registryAccess(), false, false))) throw new IllegalStateException("TAG_UPDATE_EVENT_FAILED");
-            tx.status(TagRecipeTransactionStatus.VERIFYING_SERVER); stateMachine.transitionTo(PartialReloadState.VERIFYING); verifyTagRecipe(server, candidate, artifact);
-            tx.candidateGeneration(new ActiveTagRecipeGeneration(UUID.randomUUID(),Instant.now(),new ActiveTagGeneration(UUID.randomUUID(),Instant.now(),captureTags(server.registryAccess())),new ActiveRecipeGeneration(UUID.randomUUID(),Instant.now(),server.getRecipeManager().getRecipes()),artifact.sourceSnapshot())); tx.verificationPassed(true); tx.status(TagRecipeTransactionStatus.SUCCESS); activeTagRecipeGeneration=tx.candidateGeneration(); promoteTagRecipeBaseline(artifact); preparedArtifact=null; stateMachine.transitionTo(PartialReloadState.SUCCESS);
+            TagRecipeFaultInjection.hit(TagRecipeFaultPoint.BEFORE_RECIPE_PUBLICATION); server.getRecipeManager().replaceRecipes(candidateRecipes); tx.recipeMutationOccurred(true); TagRecipeFaultInjection.hit(TagRecipeFaultPoint.AFTER_RECIPE_PUBLICATION);
+            tx.status(TagRecipeTransactionStatus.INVALIDATING_CACHES); Ingredient.invalidateAll(); tx.ingredientInvalidationOccurred(true); TagRecipeFaultInjection.hit(TagRecipeFaultPoint.AFTER_INGREDIENT_INVALIDATION);
+            tx.status(TagRecipeTransactionStatus.DISPATCHING_EVENTS); if (MinecraftForge.EVENT_BUS.post(new TagsUpdatedEvent(server.registryAccess(), false, false))) throw new IllegalStateException("TAG_UPDATE_EVENT_FAILED"); tx.tagsUpdatedEventDispatched(true); TagRecipeFaultInjection.hit(TagRecipeFaultPoint.AFTER_TAGS_UPDATED_EVENT);
+            tx.status(TagRecipeTransactionStatus.VERIFYING_SERVER); stateMachine.transitionTo(PartialReloadState.VERIFYING); TagRecipeFaultInjection.hit(TagRecipeFaultPoint.BEFORE_VERIFICATION); verifyTagRecipe(server, candidate, artifact);
+            tx.candidateGeneration(new ActiveTagRecipeGeneration(UUID.randomUUID(),Instant.now(),new ActiveTagGeneration(UUID.randomUUID(),Instant.now(),captureTags(server.registryAccess(),tx.registriesToMutate())),new ActiveRecipeGeneration(UUID.randomUUID(),Instant.now(),server.getRecipeManager().getRecipes()),artifact.sourceSnapshot())); tx.verificationPassed(true); tx.status(TagRecipeTransactionStatus.SUCCESS); activeTagRecipeGeneration=tx.candidateGeneration(); promoteTagRecipeBaseline(artifact, tx.registriesToMutate()); preparedArtifact=null; stateMachine.transitionTo(PartialReloadState.SUCCESS);
         } catch (RuntimeException failure) {
             lastError = failure.getMessage() == null ? failure.getClass().getSimpleName() : failure.getMessage();
             tx.failure(lastError);
@@ -498,7 +508,8 @@ public final class PartialReloadService {
                 return;
             }
             tx.status(TagRecipeTransactionStatus.ROLLBACK_REQUESTED);
-            try { restoreTagRecipeGeneration(server,tx.previousGeneration(),tx); }
+            if (tx.mutatedTagRegistries().isEmpty() && !tx.recipePublicationOccurred() && !tx.ingredientInvalidationOccurred() && !tx.tagsUpdatedEventDispatched()) { tx.status(TagRecipeTransactionStatus.FAILED_SAFE); stateMachine.transitionTo(PartialReloadState.FAILED_SAFE); return; }
+            try { TagRecipeFaultInjection.hit(TagRecipeFaultPoint.DURING_ROLLBACK); restoreTagRecipeGeneration(server,tx.previousGeneration(),tx); }
             catch(RuntimeException rollback){
                 lastError = "TAG_RECIPE_ROLLBACK_FAILED: " + (rollback.getMessage() == null ? rollback.getClass().getSimpleName() : rollback.getMessage());
                 tx.failure(lastError);
@@ -508,30 +519,59 @@ public final class PartialReloadService {
     }
 
     @SuppressWarnings({"unchecked","rawtypes"}) private static void bind(RegistryAccess access, ResourceKey<? extends Registry<?>> key, Map<TagKey<?>, List<Holder<?>>> map) { Registry registry=access.registryOrThrow((ResourceKey)key); registry.bindTags((Map)map); }
-    @SuppressWarnings({"unchecked","rawtypes"}) private static Map<ResourceKey<? extends Registry<?>>, Map<TagKey<?>, List<Holder<?>>>> buildCandidateBindings(RegistryAccess access, PreparedTags prepared) {
+    private void preflightTagRecipeCommit(MinecraftServer server, TagRecipeCommitTransaction tx, PreparedTagsAndRecipes artifact) {
+        if (stateMachine.state()!=PartialReloadState.QUIESCING || tagRecipeTransaction!=tx) throw new IllegalStateException("TAG_RECIPE_COMMIT_STATE_CHANGED");
+        if (artifact==null || preparedArtifact!=artifact || !artifact.preparationId().equals(tx.preparationId()) || !artifact.isApplicable()) throw new IllegalStateException("TAG_RECIPE_COMMIT_SNAPSHOT_STALE");
+        if (server.getPlayerList().getPlayerCount()>0) throw new IllegalStateException("TAG_RECIPE_COMMIT_PLAYERS_CONNECTED");
+        if (System.identityHashCode(server.getRecipeManager())!=tx.recipeManagerIdentity() || System.identityHashCode(server.registryAccess())!=tx.registryAccessIdentity()) throw new IllegalStateException("TAG_RECIPE_COMMIT_STATE_CHANGED");
+        TagRecipeCommitCompatibility compatibility=TagRecipeCommitCompatibility.inspect(server);
+        if (!compatibility.compatible() || !compatibility.fingerprint().equals(tx.compatibilityFingerprint())) throw new IllegalStateException("TAG_RECIPE_COMMIT_NOT_COMPATIBLE");
+        if (!currentResourcesMatch(server, artifact.sourceSnapshot())) throw new IllegalStateException("TAG_RECIPE_COMMIT_SNAPSHOT_STALE");
+        deriveRegistriesToMutate(artifact); // validates unsupported changes before mutation
+    }
+
+    private boolean currentResourcesMatch(MinecraftServer server, ResourceSnapshot expected) {
+        try {
+            ResourceSnapshot current=new ResourceScanner(Clock.systemUTC()).scan(new ScanContext(server.getResourceManager(), PartialReloadConfig.maxScannedResources(), java.time.Duration.ofSeconds(PartialReloadConfig.scanTimeoutSeconds()), true));
+            for (var entry:expected.resources().entrySet()) if ((entry.getValue().category()==ReloadCategory.TAGS || entry.getValue().category()==ReloadCategory.RECIPES)) { var now=current.resources().get(entry.getKey()); if(now==null || !now.fingerprint().hash().equals(entry.getValue().fingerprint().hash()) || !now.sourcePack().equals(entry.getValue().sourcePack())) return false; }
+            for (var entry:current.resources().entrySet()) if ((entry.getValue().category()==ReloadCategory.TAGS || entry.getValue().category()==ReloadCategory.RECIPES) && !expected.resources().containsKey(entry.getKey())) return false;
+            return true;
+        } catch (Exception ex) { lastError="TAG_RECIPE_COMMIT_SNAPSHOT_STALE: "+ex.getMessage(); return false; }
+    }
+
+    private Set<ResourceKey<? extends Registry<?>>> deriveRegistriesToMutate(PreparedTagsAndRecipes artifact) {
+        Set<ResourceKey<? extends Registry<?>>> result=new LinkedHashSet<>();
+        if (activeReference==null) return Set.of();
+        Set<ResourceLocation> resources=new LinkedHashSet<>(activeReference.resources().keySet()); resources.addAll(artifact.sourceSnapshot().resources().keySet());
+        for (ResourceLocation resource:resources) {
+            var before=activeReference.resources().get(resource); var after=artifact.sourceSnapshot().resources().get(resource);
+            if ((before!=null && before.category()!=ReloadCategory.TAGS) || (after!=null && after.category()!=ReloadCategory.TAGS)) continue;
+            if (before!=null && after!=null && before.fingerprint().hash().equals(after.fingerprint().hash()) && before.sourcePack().equals(after.sourcePack())) continue;
+            String path=resource.getPath(); if(!path.startsWith("tags/")) continue; String rest=path.substring(5); int slash=rest.indexOf('/'); if(slash<0) continue; String registry=rest.substring(0,slash);
+            if (registry.equals("worldgen")) { String tail=rest.substring(slash+1); int second=tail.indexOf('/'); if(second<0) continue; registry="worldgen/"+tail.substring(0,second); }
+            String canonical=canonicalRegistry(registry); if(canonical==null) throw new IllegalStateException("TAG_REGISTRY_COMMIT_UNSUPPORTED: "+registry); result.add(registryKey(canonical));
+        }
+        return Set.copyOf(result);
+    }
+
+    @SuppressWarnings("unchecked") private static ResourceKey<Registry<Object>> registryKey(String canonical){return (ResourceKey<Registry<Object>>)(ResourceKey<?>)ResourceKey.createRegistryKey(ResourceLocation.fromNamespaceAndPath("minecraft",canonical));}
+
+    @SuppressWarnings({"unchecked","rawtypes"}) private static Map<ResourceKey<? extends Registry<?>>, Map<TagKey<?>, List<Holder<?>>>> buildCandidateBindings(RegistryAccess access, PreparedTags prepared, Set<ResourceKey<? extends Registry<?>>> scope) {
         Map<ResourceKey<? extends Registry<?>>, Map<TagKey<?>, List<Holder<?>>>> out=new LinkedHashMap<>();
-        for (var entry:prepared.registries().entrySet()) { String path=entry.getKey(); String canonical=canonicalRegistry(path); if (canonical==null) continue; ResourceKey<Registry<Object>> key=(ResourceKey)ResourceKey.createRegistryKey(ResourceLocation.fromNamespaceAndPath("minecraft",canonical)); Registry<Object> registry=access.registryOrThrow(key); Map<TagKey<?>,List<Holder<?>>> tags=new LinkedHashMap<>();
+        for (var entry:prepared.registries().entrySet()) { String path=entry.getKey(); String canonical=canonicalRegistry(path); if (canonical==null) continue; ResourceKey<Registry<Object>> key=registryKey(canonical); if(!scope.contains(key)) continue; Registry<Object> registry=access.registryOrThrow(key); Map<TagKey<?>,List<Holder<?>>> tags=new LinkedHashMap<>();
             for (var tagEntry:entry.getValue().tags().entrySet()) { List<Holder<?>> holders=new ArrayList<>(); for(String value:expandTag(entry.getValue().tags(),tagEntry.getKey(),new HashSet<>())) { ResourceKey<Object> memberKey=ResourceKey.create(key,ResourceLocation.parse(value)); Holder<Object> holder=registry.getHolder(memberKey).orElseThrow(()->new IllegalStateException("TAG_COMMIT_MEMBER_MISSING: "+value)); holders.add(holder); } tags.put(TagKey.create(key,tagEntry.getKey()),holders); } out.put(key,tags); }
+        for (var key:scope) out.putIfAbsent(key, new LinkedHashMap<>());
         return out;
     }
     private static Set<String> expandTag(Map<ResourceLocation, com.gabriel0liv.partialreload.tags.PreparedTag> tags, ResourceLocation id, Set<ResourceLocation> visiting){ if(!visiting.add(id)) throw new IllegalStateException("TAG_COMMIT_BINDING_BUILD_FAILED: cycle"); var tag=tags.get(id); if(tag==null) throw new IllegalStateException("TAG_COMMIT_BINDING_BUILD_FAILED: missing nested tag"); Set<String> out=new LinkedHashSet<>(); for(String v:tag.orderedEntries()){if(v.startsWith("#")) out.addAll(expandTag(tags,ResourceLocation.parse(v.substring(1)),visiting)); else if(!tag.missingOptionalEntries().contains(v)) out.add(v);} visiting.remove(id); return out; }
     private static String canonicalRegistry(String path){return switch(path){case "items"->"item";case "blocks"->"block";case "fluids"->"fluid";case "entity_types"->"entity_type";case "game_events"->"game_event";case "mob_effects"->"mob_effect";case "enchantments"->"enchantment";default->null;};}
-    private boolean unsupportedTagResourcesChanged(PreparedTagsAndRecipes artifact){
-        if(activeReference==null) return false;
-        Set<String> supported=Set.of("items","blocks","fluids","entity_types","game_events","mob_effects","enchantments");
-        Set<ResourceLocation> changed=new LinkedHashSet<>(artifact.preparedTags().delta().tagsAdded()); changed.addAll(artifact.preparedTags().delta().tagsModified()); changed.addAll(artifact.preparedTags().delta().tagsRemoved());
-        for (var entry : artifact.preparedTags().registries().entrySet()) if(!supported.contains(entry.getKey())) for (ResourceLocation id : entry.getValue().tags().keySet()) if(changed.contains(id) && !Set.of("minecraft","forge").contains(id.getNamespace())) { lastError="unsupported changed registry="+entry.getKey()+" tag="+id; return true; }
-        // Removed tags cannot be safely mapped back to a registry from the
-        // normalized public delta alone; they remain outside this commit scope.
-        return false;
-    }
-    @SuppressWarnings({"unchecked","rawtypes"}) private static Map<ResourceKey<? extends Registry<?>>, Map<TagKey<?>, List<Holder<?>>>> captureTags(RegistryAccess access){Map<ResourceKey<? extends Registry<?>>,Map<TagKey<?>,List<Holder<?>>>> out=new LinkedHashMap<>(); access.registries().forEach(entry->{Registry registry=entry.value(); Map<TagKey<?>,List<Holder<?>>> tags=new LinkedHashMap<>(); registry.getTags().forEach(rawPair->{com.mojang.datafixers.util.Pair pair=(com.mojang.datafixers.util.Pair)rawPair; List<Holder<?>> holders=new ArrayList<>(); for(Object holder:(Iterable)pair.getSecond()) holders.add((Holder<?>)holder); tags.put((TagKey)pair.getFirst(),List.copyOf(holders));}); if(!tags.isEmpty()) out.put(entry.key(),tags);}); return out;}
-    private ActiveTagRecipeGeneration captureTagRecipeGeneration(MinecraftServer server){return new ActiveTagRecipeGeneration(UUID.randomUUID(),Instant.now(),new ActiveTagGeneration(UUID.randomUUID(),Instant.now(),captureTags(server.registryAccess())),new ActiveRecipeGeneration(UUID.randomUUID(),Instant.now(),server.getRecipeManager().getRecipes()),activeReference==null?latestScan:activeReference);}
+    @SuppressWarnings({"unchecked","rawtypes"}) private static Map<ResourceKey<? extends Registry<?>>, Map<TagKey<?>, List<Holder<?>>>> captureTags(RegistryAccess access, Set<ResourceKey<? extends Registry<?>>> scope){Map<ResourceKey<? extends Registry<?>>,Map<TagKey<?>,List<Holder<?>>>> out=new LinkedHashMap<>(); for (ResourceKey<? extends Registry<?>> key:scope) { Registry registry=access.registryOrThrow((ResourceKey)key); Map<TagKey<?>,List<Holder<?>>> tags=new LinkedHashMap<>(); registry.getTags().forEach(rawPair->{com.mojang.datafixers.util.Pair pair=(com.mojang.datafixers.util.Pair)rawPair; List<Holder<?>> holders=new ArrayList<>(); for(Object holder:(Iterable)pair.getSecond()) holders.add((Holder<?>)holder); tags.put((TagKey)pair.getFirst(),List.copyOf(holders));}); out.put(key,tags); } return out;}
+    private ActiveTagRecipeGeneration captureTagRecipeGeneration(MinecraftServer server, Set<ResourceKey<? extends Registry<?>>> scope){return new ActiveTagRecipeGeneration(UUID.randomUUID(),Instant.now(),new ActiveTagGeneration(UUID.randomUUID(),Instant.now(),captureTags(server.registryAccess(),scope)),new ActiveRecipeGeneration(UUID.randomUUID(),Instant.now(),server.getRecipeManager().getRecipes()),activeReference==null?latestScan:activeReference);}
     private void restoreTagRecipeGeneration(MinecraftServer server, ActiveTagRecipeGeneration generation, TagRecipeCommitTransaction tx){
         if(generation==null) throw new IllegalStateException("TAG_RECIPE_ROLLBACK_FAILED");
-        tx.status(TagRecipeTransactionStatus.ROLLING_BACK_RECIPES); server.getRecipeManager().replaceRecipes(generation.recipes().recipes()); tx.recipeMutationOccurred(true);
-        tx.status(TagRecipeTransactionStatus.ROLLING_BACK_TAGS); for(var e:generation.tags().registries().entrySet()) bind(server.registryAccess(),e.getKey(),e.getValue()); tx.tagMutationOccurred(true);
-        Ingredient.invalidateAll(); tx.status(TagRecipeTransactionStatus.ROLLBACK_EVENTS); MinecraftForge.EVENT_BUS.post(new TagsUpdatedEvent(server.registryAccess(),false,false));
+        tx.status(TagRecipeTransactionStatus.ROLLING_BACK_RECIPES); if (tx.preparationId()==null || tx.recipePublicationOccurred()) { server.getRecipeManager().replaceRecipes(generation.recipes().recipes()); tx.recipeMutationOccurred(true); }
+        tx.status(TagRecipeTransactionStatus.ROLLING_BACK_TAGS); for(var e:generation.tags().registries().entrySet()) if(tx.mutatedTagRegistries().contains(e.getKey())) bind(server.registryAccess(),e.getKey(),e.getValue());
+        if (!tx.mutatedTagRegistries().isEmpty() || tx.preparationId()==null || tx.recipePublicationOccurred()) { Ingredient.invalidateAll(); tx.ingredientInvalidationOccurred(true); tx.status(TagRecipeTransactionStatus.ROLLBACK_EVENTS); MinecraftForge.EVENT_BUS.post(new TagsUpdatedEvent(server.registryAccess(),false,false)); tx.tagsUpdatedEventDispatched(true); }
         verifyRestoredTagRecipe(server, generation); tx.verificationPassed(true); tx.status(TagRecipeTransactionStatus.ROLLED_BACK); activeTagRecipeGeneration=generation; retainedTagRecipeGeneration=null;
         if (generation.sourceSnapshot()!=null) { activeReference=generation.sourceSnapshot(); if (latestScan!=null) lastChangeSet=ChangeDetector.diff(activeReference, latestScan); }
         stateMachine.transitionTo(PartialReloadState.ROLLED_BACK);
@@ -540,13 +580,13 @@ public final class PartialReloadService {
         if(server.getPlayerList().getPlayerCount()>0)throw new IllegalStateException("TAG_RECIPE_COMMIT_PLAYERS_CONNECTED");
         Set<ResourceLocation> expected=artifact.preparedRecipes().recipesById().keySet(); Set<ResourceLocation> actual=server.getRecipeManager().getRecipes().stream().map(Recipe::getId).collect(java.util.stream.Collectors.toSet());
         if(!actual.equals(expected))throw new IllegalStateException("RECIPE_COMMIT_VERIFICATION_FAILED");
-        for (var entry : candidate.entrySet()) { Registry registry=server.registryAccess().registryOrThrow((ResourceKey)entry.getKey()); for (var tag : entry.getValue().entrySet()) { java.util.Optional<?> optional=registry.getTag((TagKey)tag.getKey()); if(optional.isEmpty()) throw new IllegalStateException("TAG_COMMIT_VERIFICATION_FAILED: "+tag.getKey()); HolderSet.Named<?> active=(HolderSet.Named<?>)optional.get(); Set<?> observed=active.stream().collect(java.util.stream.Collectors.toSet()); if(observed.size()!=tag.getValue().size() || !observed.containsAll(tag.getValue())) throw new IllegalStateException("TAG_COMMIT_VERIFICATION_FAILED: "+tag.getKey()); } }
+        for (var entry : candidate.entrySet()) { Registry registry=server.registryAccess().registryOrThrow((ResourceKey)entry.getKey()); Map<TagKey<?>, List<Holder<?>>> expectedTags=entry.getValue(); Map<TagKey<?>, List<Holder<?>>> observedTags=new LinkedHashMap<>(); registry.getTags().forEach(rawPair->{com.mojang.datafixers.util.Pair pair=(com.mojang.datafixers.util.Pair)rawPair; List<Holder<?>> values=new ArrayList<>(); for(Object holder:(Iterable)pair.getSecond()) values.add((Holder<?>)holder); observedTags.put((TagKey)pair.getFirst(),values);}); if(!observedTags.keySet().equals(expectedTags.keySet())) throw new IllegalStateException("TAG_COMMIT_VERIFICATION_FAILED: tag ids"); for (var tag:expectedTags.entrySet()) { if(!observedTags.get(tag.getKey()).equals(tag.getValue())) throw new IllegalStateException("TAG_COMMIT_VERIFICATION_FAILED: "+tag.getKey()); } }
     }
     private void verifyRestoredTagRecipe(MinecraftServer server, ActiveTagRecipeGeneration generation){
         Set<ResourceLocation> expected=generation.recipes().recipes().stream().map(Recipe::getId).collect(java.util.stream.Collectors.toSet()); Set<ResourceLocation> actual=server.getRecipeManager().getRecipes().stream().map(Recipe::getId).collect(java.util.stream.Collectors.toSet());
         if(!actual.equals(expected)) throw new IllegalStateException("TAG_RECIPE_ROLLBACK_VERIFICATION_FAILED");
     }
-    private void promoteTagRecipeBaseline(PreparedTagsAndRecipes artifact){if(activeReference==null)return; Map<ResourceLocation,com.gabriel0liv.partialreload.resource.ResourceDescriptor> merged=new LinkedHashMap<>(activeReference.resources()); merged.entrySet().removeIf(e->e.getValue().category()==ReloadCategory.TAGS||e.getValue().category()==ReloadCategory.RECIPES); artifact.sourceSnapshot().resources().forEach((id,d)->{if(d.category()==ReloadCategory.TAGS||d.category()==ReloadCategory.RECIPES)merged.put(id,d);}); activeReference=new ResourceSnapshot(Instant.now(),merged); if(latestScan!=null)lastChangeSet=ChangeDetector.diff(activeReference,latestScan);}
+    private void promoteTagRecipeBaseline(PreparedTagsAndRecipes artifact, Set<ResourceKey<? extends Registry<?>>> scope){if(activeReference==null)return; Map<ResourceLocation,com.gabriel0liv.partialreload.resource.ResourceDescriptor> merged=new LinkedHashMap<>(activeReference.resources()); Set<String> paths=scope.stream().map(ResourceKey::location).map(ResourceLocation::getPath).collect(java.util.stream.Collectors.toSet()); merged.entrySet().removeIf(e->{var d=e.getValue(); if(d.category()==ReloadCategory.RECIPES)return true; if(d.category()!=ReloadCategory.TAGS)return false; String p=d.location().getPath(); if(!p.startsWith("tags/"))return false; String rest=p.substring(5); int slash=rest.indexOf('/'); if(slash<0)return false; String registry=rest.substring(0,slash); if(registry.equals("worldgen")){int second=rest.indexOf('/',slash+1); if(second>0)registry=rest.substring(0,second);} String canonical=canonicalRegistry(registry); return canonical!=null && paths.contains(canonical);}); artifact.sourceSnapshot().resources().forEach((id,d)->{if(d.category()==ReloadCategory.RECIPES)merged.put(id,d); else if(d.category()==ReloadCategory.TAGS){String p=d.location().getPath(); String rest=p.startsWith("tags/")?p.substring(5):""; int slash=rest.indexOf('/'); if(slash>0){String registry=rest.substring(0,slash); String canonical=canonicalRegistry(registry); if(canonical!=null && paths.contains(canonical)) merged.put(id,d);}}}); activeReference=new ResourceSnapshot(Instant.now(),merged); if(latestScan!=null)lastChangeSet=ChangeDetector.diff(activeReference,latestScan);}
 
     public synchronized void processFunctionSafePoint(MinecraftServer server) {
         if (transaction == null || transaction.status() != FunctionTransactionStatus.QUIESCING) return;

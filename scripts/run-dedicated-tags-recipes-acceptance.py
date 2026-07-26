@@ -52,9 +52,12 @@ def main() -> int:
         after = acceptance.fingerprints()
         if before != after: raise AssertionError("active managers changed during preparation")
         results.update({"registry_bindings_unchanged":{"status":"passed", "observed":before}, "recipe_manager_unchanged":{"status":"passed", "observed":before}})
-        refusal = acceptance.expect("apply_rejected", "partialreload apply prepared", r"Commit is not implemented for joint tag and recipe candidates", 30)
-        if acceptance.fingerprints() != before: raise AssertionError("apply refusal mutated active managers")
-        results.update({"apply_rejected":{"status":"passed", "observed":refusal.strip()}, "artifact_preserved":{"status":"passed", "observed":"prepared artifact remained available until discard"}})
+        # Commit is implemented by the separate 4E commit acceptance.  This
+        # suite is intentionally preparation-only and must not mutate the
+        # active server generation while proving that the candidate is
+        # observable and isolated.
+        if acceptance.fingerprints() != before: raise AssertionError("preparation mutated active managers")
+        results.update({"apply_not_exercised":{"status":"passed", "observed":"commit covered by dedicated commit acceptance"}, "artifact_preserved":{"status":"passed", "observed":"prepared artifact remained available until discard"}})
         acceptance.expect("discard", "partialreload discard", r"discarded", 30)
         results["shutdown"] = "passed"
     finally:

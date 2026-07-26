@@ -133,12 +133,18 @@ class Acceptance:
         self.owned_pid: int | None = None
 
     def assert_test_world_unlocked(self) -> None:
-        """Remove a stale disposable-world lock only when the OS permits it."""
+        """Remove a stale disposable-world lock only after ownership checks."""
         lock = ROOT / "run" / "world" / "session.lock"
         if not lock.exists():
             return
         if self.owned_pid is not None:
             raise RuntimeError("owned server process is still registered")
+        probe = subprocess.run(
+            ["powershell", "-NoProfile", "-Command",
+             "Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match 'Partial Reload.*(runServer|forgeserveruserdev)' } | Select-Object -Expand ProcessId"],
+            cwd=ROOT, capture_output=True, text=True, check=False)
+        if any(line.strip().isdigit() for line in probe.stdout.splitlines()):
+            raise RuntimeError("test world lock persists while an owned server process is alive")
         try:
             lock.unlink()
         except OSError as exc:
