@@ -102,10 +102,12 @@ entra em DEGRADED. A política de load implementada é sempre `DO_NOT_RUN`.
 `VanillaRecipesProvider` enumera a visão vencedora de `recipes/**/*.json`,
 avalia condições Forge, desserializa com `RecipeManager.fromJson` e produz
 `PreparedRecipes` imutável, com índices por ID/tipo, hashes e grafo de itens e
-tags. A preparação é `PREPARE_ONLY`: `RecipeManager.apply`, substituição do
-manager e sincronização nunca são chamados. Tags relevantes alteradas geram
-`RECIPE_TAG_DEPENDENCY_CHANGED` (BLOCKER), preservando a semântica segura até
-que uma fase de tags defina um contrato conjunto.
+tags. Isoladamente, recipes permanecem `PREPARE_ONLY`. No artefato conjunto da
+Fase 4E, tags suportadas são vinculadas com `Registry.bindTags` e a coleção
+completa é publicada por `RecipeManager.replaceRecipes` no safe point, sem
+players conectados; Ingredient é invalidado, o evento de tags é emitido e uma
+geração anterior fica retida para rollback. Sincronização de clientes continua
+fora do escopo.
 
 ## KubeJS recipes (Fase 4B)
 

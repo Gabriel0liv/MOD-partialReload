@@ -290,6 +290,13 @@ class Acceptance:
                 self.reader_thread.join(timeout=5)
                 if self.reader_thread.is_alive():
                     raise RuntimeError("owned output reader thread did not terminate")
+            # DedicatedServer can leave the disposable userdev lock file after
+            # a graceful stop.  The wrapper and its reader are already known
+            # to be terminated here, so remove only this explicit test-world
+            # lock; never touch a user world or a live server's lock.
+            lock = ROOT / "run" / "world" / "session.lock"
+            if lock.exists() and self.proc.poll() is not None:
+                lock.unlink()
         self.results["shutdown"] = "passed"
 
     def run(self) -> None:

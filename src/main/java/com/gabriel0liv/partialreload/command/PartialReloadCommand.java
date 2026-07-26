@@ -97,10 +97,17 @@ public final class PartialReloadCommand {
                         .executes(context -> transaction(context.getSource(), service)))
                 .then(Commands.literal("rollback")
                         .then(Commands.literal("functions")
-                                .executes(context -> rollbackFunctions(context.getSource(), service))))
+                                .executes(context -> rollbackFunctions(context.getSource(), service)))
+                        .then(Commands.literal("tags_recipes")
+                                .executes(context -> rollbackTagsRecipes(context.getSource(), service))))
                 .then(Commands.literal("active")
                         .then(Commands.literal("functions")
-                                .executes(context -> activeFunctions(context.getSource()))))
+                                .executes(context -> activeFunctions(context.getSource())))
+                        .then(Commands.literal("tags_recipes")
+                                .executes(context -> activeTagsRecipes(context.getSource(), service))))
+                .then(Commands.literal("compatibility")
+                        .then(Commands.literal("tags_recipes")
+                                .executes(context -> compatibilityTagsRecipes(context.getSource(), service))))
                 .then(Commands.literal("debug")
                         .then(Commands.literal("manager_fingerprints")
                                 .requires(source -> !net.minecraftforge.fml.loading.FMLEnvironment.production)
@@ -132,8 +139,12 @@ public final class PartialReloadCommand {
     private static int status(CommandSourceStack source, PartialReloadService service) {
         PartialReloadStatus status = service.status();
         source.sendSuccess(() -> Component.literal("Partial Reload " + PartialReloadMod.VERSION), false);
-        String mode = service.functionCommitCompatibility(source.getServer()).compatible()
+        String modeValue = service.functionCommitCompatibility(source.getServer()).compatible()
                 ? "FUNCTION_COMMIT_SUPPORTED" : "PREPARE_ONLY";
+        if (service.tagRecipeCommitCompatibility(source.getServer()).compatible()) {
+            modeValue += " + TAG_RECIPE_SERVER_ONLY_NO_PLAYERS";
+        }
+        final String mode = modeValue;
         source.sendSuccess(() -> Component.literal("Mode: " + mode), false);
         source.sendSuccess(() -> Component.literal("State: " + status.state()), false);
         source.sendSuccess(() -> Component.literal(
@@ -145,8 +156,8 @@ public final class PartialReloadCommand {
         ), false);
         source.sendSuccess(() -> Component.literal("Changed resources: " + status.changedResources()), false);
         source.sendSuccess(() -> Component.literal("Loot data commit: not implemented"), false);
-        source.sendSuccess(() -> Component.literal("Recipe commit: not implemented"), false);
-        source.sendSuccess(() -> Component.literal("Tag commit: not implemented"), false);
+        source.sendSuccess(() -> Component.literal("Recipe commit: server-only joint mode (no connected players)"), false);
+        source.sendSuccess(() -> Component.literal("Tag commit: server-only joint mode (no connected players)"), false);
         source.sendSuccess(() -> Component.literal("KubeJS recipe preparation: blocked"), false);
         source.sendSuccess(() -> Component.literal(
                 "Prepared artifact: " + (status.preparedId() == null
@@ -718,6 +729,11 @@ public final class PartialReloadCommand {
 
     private static int applyPrepared(CommandSourceStack source, PartialReloadService service) {
         try {
+            if (service.preparedArtifact() instanceof PreparedTagsAndRecipes) {
+                var tx = service.requestTagRecipeCommit(source.getServer(), source.getTextName());
+                source.sendSuccess(() -> Component.literal("Tag/recipe transaction " + tx.transactionId() + " queued for the next safe point."), false);
+                return 1;
+            }
             var tx = service.requestFunctionCommit(source.getServer(), source.getTextName());
             source.sendSuccess(() -> Component.literal(
                     "Function transaction " + tx.transactionId() + " queued for the next safe point."), false);
@@ -729,6 +745,19 @@ public final class PartialReloadCommand {
     }
 
     private static int transaction(CommandSourceStack source, PartialReloadService service) {
+        var joint = service.tagRecipeTransaction();
+        if (joint != null) {
+            source.sendSuccess(() -> Component.literal("Transaction: " + joint.transactionId()), false);
+            source.sendSuccess(() -> Component.literal("Preparation: " + joint.preparationId()), false);
+            source.sendSuccess(() -> Component.literal("Status: " + joint.status()), false);
+            source.sendSuccess(() -> Component.literal("Tag mutation: " + joint.tagMutationOccurred()), false);
+            source.sendSuccess(() -> Component.literal("Recipe mutation: " + joint.recipeMutationOccurred()), false);
+            source.sendSuccess(() -> Component.literal("Verification: " + joint.verificationPassed()), false);
+            source.sendSuccess(() -> Component.literal("Client sync: not implemented (no players permitted)"), false);
+            if (joint.failure() != null) source.sendFailure(Component.literal("Failure: " + joint.failure()));
+            source.sendSuccess(() -> Component.literal("Rollback retained: " + (service.retainedTagRecipeGeneration() != null)), false);
+            return 1;
+        }
         var tx = service.transaction();
         if (tx == null) {
             source.sendFailure(Component.literal("No function transaction recorded."));
@@ -756,6 +785,26 @@ public final class PartialReloadCommand {
             source.sendFailure(Component.literal(exception.getMessage()));
             return 0;
         }
+    }
+
+    private static int rollbackTagsRecipes(CommandSourceStack source, PartialReloadService service) {
+        try { var tx=service.requestTagRecipeRollback(source.getTextName()); source.sendSuccess(() -> Component.literal("Tag/recipe rollback " + tx.transactionId() + " queued for the next safe point."), false); return 1; }
+        catch(RuntimeException exception){source.sendFailure(Component.literal(exception.getMessage())); return 0;}
+    }
+
+    private static int activeTagsRecipes(CommandSourceStack source, PartialReloadService service) {
+        var generation=service.retainedTagRecipeGeneration();
+        source.sendSuccess(() -> Component.literal("Joint tag/recipe commit mode: SERVER_ONLY_NO_PLAYERS"), false);
+        source.sendSuccess(() -> Component.literal("Retained rollback generation: " + (generation == null ? "none" : generation.generationId())), false);
+        source.sendSuccess(() -> Component.literal("Active tag/recipe generation: " + (service.tagRecipeTransaction() == null || service.tagRecipeTransaction().candidateGeneration() == null ? "unknown" : service.tagRecipeTransaction().candidateGeneration().generationId())), false);
+        return 1;
+    }
+
+    private static int compatibilityTagsRecipes(CommandSourceStack source, PartialReloadService service) {
+        var c=service.tagRecipeCommitCompatibility(source.getServer());
+        source.sendSuccess(() -> Component.literal("Joint tag/recipe commit: " + (c.compatible() ? "compatible" : "blocked")), false);
+        source.sendSuccess(() -> Component.literal("Support level: SERVER_ONLY_NO_PLAYERS"), false);
+        source.sendSuccess(() -> Component.literal("Detail: " + c.detail()), false); return c.compatible() ? 1 : 0;
     }
 
     private static int activeFunctions(CommandSourceStack source) {

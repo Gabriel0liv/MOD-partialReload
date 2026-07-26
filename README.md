@@ -3,7 +3,7 @@
 Framework estritamente server-side para reloads parciais seguros, categorizados
 e transacionais em servidores Forge 1.20.1.
 
-Versão atual: `0.2.0-SNAPSHOT` — preparação de recipes adicionada; commit de functions vanilla suportado no alvo
+Versão atual: `0.3.0-SNAPSHOT` — preparação conjunta e commit server-only de tags/recipes adicionados; commit de functions vanilla suportado no alvo
 exato Forge 47.4.10.
 
 ## Implementado
@@ -28,12 +28,14 @@ exato Forge 47.4.10.
   `replace`, entries opcionais, nested tags, grafo e delta imutável.
 - preparação conjunta read-only de tags + recipes com snapshot compartilhado,
   resolução candidata, revalidação cross-provider, grafo e delta combinados.
+- commit transacional conjunto server-only de tags + recipes sem jogadores,
+  com bind por registry, publicação completa de recipes, invalidação de
+  Ingredient, evento de tags, verificação e rollback em memória.
 
 ## Não implementado
 
 - commit de loot/predicates/item modifiers;
-- commit de tags, recipes ou do artefato conjunto tags + recipes;
-- commit ou sincronização de recipes;
+- sincronização de recipes para clientes, suporte a jogadores ou menus abertos;
 - políticas de load diferentes de `DO_NOT_RUN`;
 - rollback após restart ou histórico de gerações;
 - Global Loot Modifiers (provider separado, planejado);
@@ -42,9 +44,9 @@ exato Forge 47.4.10.
 
 O commit transacional de functions vanilla foi validado em servidor dedicado
 headless no alvo exato Forge 47.4.10. Loot continua apenas em preparação.
-Recipes agora possuem preparação read-only completa (serializers reais,
-conditions, índices, dependências e delta); commit/sync de recipes continuam
-não implementados.
+Recipes agora possuem preparação completa para o contrato server-only
+(serializers reais, conditions, índices, dependências e delta); sincronização
+de clientes permanece não implementada.
 
 ## Comandos
 
@@ -110,11 +112,13 @@ python scripts/run-dedicated-function-acceptance.py
 python scripts/run-dedicated-recipe-acceptance.py
 python scripts/run-dedicated-tag-acceptance.py
 python scripts/run-dedicated-tags-recipes-acceptance.py
+python scripts/run-dedicated-tags-recipes-commit-acceptance.py
 python scripts/run-dedicated-kubejs-recipe-acceptance.py
 python scripts/run-all-acceptance.py
 ```
 
-O teste dedicado usa RCON temporário em `127.0.0.1`, com senha/porta efêmeras,
+O teste dedicado de functions e o harness conjunto usam RCON temporário em
+`127.0.0.1`, com senha/porta efêmeras,
 backup e restauração de `run/server.properties`. O servidor chegou a `Done`,
 publicou a geração B, voltou à geração A por rollback e encerrou normalmente.
 O relatório também cobre deltas de tick, schedules por ID/tag, target removido
@@ -127,7 +131,10 @@ Os harnesses controlam o PID do wrapper Gradle e sua árvore (`taskkill /PID /T`
 somente em caso de timeout, aguardam a thread de captura e removem apenas locks
 stale do mundo userdev quando nenhum processo próprio está vivo. O runner
 consolidado executa as suítes sequencialmente e grava
-`build/reports/all-acceptance.json`.
+`build/reports/all-acceptance.json`. O relatório específico do commit conjunto
+fica em `build/reports/dedicated-tags-recipes-commit-acceptance.json` e comprova
+`SUCCESS`, troca da tag candidata, `ROLLED_BACK`, e preservação das identidades
+de LootDataManager, RecipeManager e AdvancementManager.
 
 O projeto segue Spec-Driven Development. Leia `AGENTS.md`,
 `docs/specs/010-loot-data-prepare.md` e as ADRs antes de alterar

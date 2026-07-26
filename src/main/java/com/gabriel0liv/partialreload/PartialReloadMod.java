@@ -25,7 +25,7 @@ import java.util.UUID;
 @Mod(PartialReloadMod.MOD_ID)
 public final class PartialReloadMod {
     public static final String MOD_ID = "partialreload";
-    public static final String VERSION = "0.2.0-SNAPSHOT";
+    public static final String VERSION = "0.3.0-SNAPSHOT";
     public static final Logger LOGGER = LogUtils.getLogger();
 
     private final PartialReloadService service;
@@ -61,6 +61,7 @@ public final class PartialReloadMod {
     private void serverTick(TickEvent.ServerTickEvent event) {
         if (event.phase == TickEvent.Phase.END) {
             service.processFunctionSafePoint(event.getServer());
+            service.processTagRecipeSafePoint(event.getServer());
         }
     }
 

@@ -42,6 +42,14 @@ A fase 3B continua somente preparação conjunta e passiva de predicates, item
 modifiers e loot tables; `VanillaLootDataProvider` nunca publica no
 `LootDataManager`. GLM permanece separado conforme ADR-007.
 
+A Fase 4E implementa commit conjunto server-only de tags + recipes somente em
+servidor dedicado sem jogadores conectados. O safe point usa o fim do tick da
+server thread; bindings usam `Registry.bindTags`, recipes usam
+`RecipeManager.replaceRecipes`, `Ingredient.invalidateAll()` é chamado e
+`TagsUpdatedEvent` é emitido. Uma geração conjunta anterior fica retida em
+memória para rollback único. Sincronização de clientes, menus e jogadores
+permanecem bloqueados para a fase 4F.
+
 A Fase 4A prepara recipes vanilla/Forge read-only. A Fase 4B possui apenas
 pesquisa e snapshot/classificação segura de KubeJS até existir um runtime Forge
 1.20.1 exato e uma API de staging isolada; nunca execute `ServerScriptManager`
@@ -58,9 +66,9 @@ escreva os maps privados do `LootDataManager`.
 
 A Fase 4D prepara `PreparedTagsAndRecipes` somente quando tags e recipes são
 solicitadas juntas. O artefato usa um snapshot compartilhado e
-`PreparedTagsResolutionView`; não binda tags, não muta `RecipeManager` e
-`apply` deve ser recusado. Serializers ou conditions que dependam de holders
-ativos falham fechado.
+`PreparedTagsResolutionView`; a publicação é limitada ao contrato server-only
+da Fase 4E. Serializers ou conditions que dependam de holders ativos falham
+fechado.
 
 A Fase 4A prepara recipes com serializers reais, mas continua PREPARE_ONLY:
 não trocar `RecipeManager`, sincronizar clientes ou executar KubeJS.

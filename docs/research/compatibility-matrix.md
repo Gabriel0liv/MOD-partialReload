@@ -58,3 +58,14 @@ No Forge 47.4.10/Minecraft 1.20.1, o commit vanilla de functions foi validado
 com ticks, schedules por ID/tag e fingerprints dos managers laterais. Schedules
 resolvem os IDs/tags no disparo; targets removidos são ignorados sem crash.
 Loot, recipes e advancements permaneceram sem mutação.
+
+## Fase 4E — commit conjunto server-only
+
+`Registry.bindTags`, `RecipeManager.replaceRecipes`, `Ingredient.invalidateAll`
+e `TagsUpdatedEvent` foram exercitados no Forge 47.4.10 sem players. O harness
+`run-dedicated-tags-recipes-commit-acceptance.py` observou a tag A como
+`minecraft:stone`, publicou B como `minecraft:dirt` em `SUCCESS`, preservou as
+identidades de LootDataManager, RecipeManager e AdvancementManager e restaurou
+A em `ROLLED_BACK`. Registries fora da allowlist estática permanecem fora da
+publicação e alterações custom nesses registries falham fechado. Client sync,
+menus e players continuam não suportados.
