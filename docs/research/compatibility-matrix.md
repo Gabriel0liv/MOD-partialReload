@@ -76,3 +76,6 @@ recaptura hashes de tags/recipes para detectar TOCTOU sem depender de novo scan.
 A aceitação dedicada básica passou, mas fault injection, race de player e
 restauração de registry inicialmente vazio ainda são cobertura pendente; o
 estado permanece `PENDING_SAFETY_HARDENING`.
+
+Consequentemente, a Fase 4F não pode iniciar sobre esta base: não há ainda
+aceitação de `DEGRADED`, player race ou cliente Forge real.

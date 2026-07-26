@@ -42,6 +42,12 @@ A fase 3B continua somente preparação conjunta e passiva de predicates, item
 modifiers e loot tables; `VanillaLootDataProvider` nunca publica no
 `LootDataManager`. GLM permanece separado conforme ADR-007.
 
+A Fase 4F está especificada, mas bloqueada pelo gate de segurança da Fase 4E:
+clientes conectados continuam recusados até existirem fault injection crítica,
+player race, registry vazio, registries não suportados, `DEGRADED` e GameTests
+dedicados correspondentes. Não adicionar networking ou classes client-side antes
+desse gate.
+
 A Fase 4E implementa o caminho server-only de commit conjunto de tags + recipes
 somente em servidor dedicado sem jogadores conectados. O safe point usa o fim
 do tick da server thread; bindings usam `Registry.bindTags`, recipes usam

@@ -6,6 +6,10 @@ e transacionais em servidores Forge 1.20.1.
 Versão atual: `0.3.0-SNAPSHOT` — preparação conjunta e commit server-only de tags/recipes adicionados; commit de functions vanilla suportado no alvo
 exato Forge 47.4.10.
 
+Sincronização com jogadores conectados ainda está bloqueada pelo gate de
+segurança server-only (`CLIENT_SYNC_BLOCKED_BY_SERVER_SAFETY_GATE`). Nenhum
+packet customizado ou código client-side de sincronização foi introduzido.
+
 ## Implementado
 
 - scan read-only de recursos de datapacks;
