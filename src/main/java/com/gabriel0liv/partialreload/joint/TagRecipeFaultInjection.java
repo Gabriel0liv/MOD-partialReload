@@ -1,6 +1,7 @@
 package com.gabriel0liv.partialreload.joint;
 
 import net.minecraftforge.fml.loading.FMLEnvironment;
+import java.util.Optional;
 
 /** Userdev-only deterministic fault seam; never active in production. */
 public final class TagRecipeFaultInjection {
@@ -11,6 +12,7 @@ public final class TagRecipeFaultInjection {
         point = value;
     }
     public static void clear() { point = null; }
+    public static Optional<TagRecipeFaultPoint> current() { return Optional.ofNullable(point); }
     public static void hit(TagRecipeFaultPoint value) {
         if (point == value) { point = null; throw new IllegalStateException("FAULT_INJECTED:" + value); }
     }

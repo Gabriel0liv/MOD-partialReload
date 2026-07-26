@@ -116,3 +116,14 @@ Fault injection é userdev-only e permite testar falhas antes/depois de cada
 etapa sem expor comando de produção. O relatório distingue core state
 verificado de efeitos externos de listeners, que não são genericamente
 reversíveis.
+
+## Safety gate closure
+
+Os hooks `TagRecipeFaultPoint` são armáveis somente em userdev por
+`/partialreload debug fault tags_recipes`, consumidos uma vez e limpos no
+startup/shutdown. Isso fornece o mecanismo de teste, mas não substitui a
+aceitação: fault injection crítica, player race, registry inicialmente vazio,
+registries não suportados e `DEGRADED` ainda precisam de GameTests e dedicated
+acceptance com observação direta. A política continua `SERVER_ONLY_NO_PLAYERS`.
+O plano `phase-four-e-s-safety-gate-tasks.md` mantém a matriz pendente e impede
+a promoção do estado ou o início da Fase 4F até todas as linhas passarem.

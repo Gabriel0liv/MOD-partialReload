@@ -9,10 +9,12 @@ import com.gabriel0liv.partialreload.plan.ReloadPlanner;
 import com.gabriel0liv.partialreload.resource.ResourceScanner;
 import com.gabriel0liv.partialreload.function.VanillaFunctionsProvider;
 import com.gabriel0liv.partialreload.loot.VanillaLootDataProvider;
+import com.gabriel0liv.partialreload.joint.TagRecipeFaultInjection;
 import com.mojang.logging.LogUtils;
 import net.minecraftforge.common.MinecraftForge;
 import net.minecraftforge.event.RegisterCommandsEvent;
 import net.minecraftforge.event.TickEvent;
+import net.minecraftforge.event.server.ServerStoppingEvent;
 import net.minecraftforge.eventbus.api.EventPriority;
 import net.minecraftforge.fml.common.Mod;
 import net.minecraftforge.fml.config.ModConfig;
@@ -31,6 +33,7 @@ public final class PartialReloadMod {
     private final PartialReloadService service;
 
     public PartialReloadMod(FMLJavaModLoadingContext context) {
+        TagRecipeFaultInjection.clear();
         context.registerConfig(ModConfig.Type.COMMON, PartialReloadConfig.SPEC);
 
         Clock clock = Clock.systemUTC();
@@ -51,7 +54,12 @@ public final class PartialReloadMod {
         );
 
         MinecraftForge.EVENT_BUS.addListener(this::registerCommands);
+        MinecraftForge.EVENT_BUS.addListener(this::serverStopping);
         MinecraftForge.EVENT_BUS.addListener(EventPriority.LOWEST, this::serverTick);
+    }
+
+    private void serverStopping(ServerStoppingEvent event) {
+        TagRecipeFaultInjection.clear();
     }
 
     private void registerCommands(RegisterCommandsEvent event) {

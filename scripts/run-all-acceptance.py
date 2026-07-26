@@ -10,6 +10,7 @@ SUITES = [
     ("tag_acceptance", "run-dedicated-tag-acceptance.py", []),
     ("joint_acceptance", "run-dedicated-tags-recipes-acceptance.py", []),
     ("tag_recipe_commit_acceptance", "run-dedicated-tags-recipes-commit-acceptance.py", []),
+    ("joint_safety_acceptance", "run-dedicated-tags-recipes-safety-acceptance.py", []),
     ("kubejs_expected_block", "run-dedicated-kubejs-recipe-acceptance.py", []),
 ]
 

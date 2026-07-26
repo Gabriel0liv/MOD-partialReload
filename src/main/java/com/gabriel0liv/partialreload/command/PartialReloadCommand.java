@@ -20,6 +20,8 @@ import com.gabriel0liv.partialreload.recipe.PreparedRecipes;
 import com.gabriel0liv.partialreload.recipe.PreparedRecipe;
 import com.gabriel0liv.partialreload.tags.PreparedTags;
 import com.gabriel0liv.partialreload.joint.PreparedTagsAndRecipes;
+import com.gabriel0liv.partialreload.joint.TagRecipeFaultInjection;
+import com.gabriel0liv.partialreload.joint.TagRecipeFaultPoint;
 import com.gabriel0liv.partialreload.validation.ValidationSeverity;
 import com.mojang.brigadier.CommandDispatcher;
 import com.mojang.brigadier.arguments.StringArgumentType;
@@ -131,9 +133,44 @@ public final class PartialReloadCommand {
                                 .requires(source -> !net.minecraftforge.fml.loading.FMLEnvironment.production)
                                 .then(Commands.argument("recipe", ResourceLocationArgument.id())
                                         .executes(context -> debugActiveRecipe(context.getSource(), ResourceLocationArgument.getId(context, "recipe")))))
+                        .then(Commands.literal("fault")
+                                .requires(source -> !net.minecraftforge.fml.loading.FMLEnvironment.production)
+                                .then(Commands.literal("tags_recipes")
+                                        .then(Commands.literal("set")
+                                                .then(Commands.argument("point", StringArgumentType.word())
+                                                        .executes(context -> debugFaultSet(context.getSource(), StringArgumentType.getString(context, "point")))))
+                                        .then(Commands.literal("clear").executes(context -> { TagRecipeFaultInjection.clear(); context.getSource().sendSuccess(() -> Component.literal("Tag/recipe fault cleared"), false); return 1; }))
+                                        .then(Commands.literal("status").executes(context -> debugFaultStatus(context.getSource())))))
+                        .then(Commands.literal("tag_recipe_journal")
+                                .requires(source -> !net.minecraftforge.fml.loading.FMLEnvironment.production)
+                                .executes(context -> debugTagRecipeJournal(context.getSource(), service)))
                 )
                 .then(unsupported("reload"))
                 );
+    }
+
+    private static int debugFaultSet(CommandSourceStack source, String name) {
+        try {
+            TagRecipeFaultInjection.failAt(TagRecipeFaultPoint.valueOf(name.toUpperCase(java.util.Locale.ROOT)));
+            source.sendSuccess(() -> Component.literal("Tag/recipe fault armed: " + name), false);
+            return 1;
+        } catch (IllegalArgumentException ex) {
+            source.sendFailure(Component.literal("Unknown fault point: " + name));
+            return 0;
+        }
+    }
+
+    private static int debugFaultStatus(CommandSourceStack source) {
+        source.sendSuccess(() -> Component.literal("Tag/recipe fault: " + TagRecipeFaultInjection.current().map(Enum::name).orElse("none")), false);
+        return 1;
+    }
+
+    private static int debugTagRecipeJournal(CommandSourceStack source, PartialReloadService service) {
+        var tx = service.tagRecipeTransaction();
+        if (tx == null) { source.sendSuccess(() -> Component.literal("No tag/recipe transaction"), false); return 1; }
+        source.sendSuccess(() -> Component.literal("Transaction " + tx.transactionId() + " status=" + tx.status()), false);
+        tx.events().forEach(event -> source.sendSuccess(() -> Component.literal(event.at() + " " + event.status() + (event.detail() == null ? "" : " " + event.detail())), false));
+        return 1;
     }
 
     private static int status(CommandSourceStack source, PartialReloadService service) {
