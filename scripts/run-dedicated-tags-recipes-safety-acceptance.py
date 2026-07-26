@@ -11,7 +11,8 @@ LOG = ROOT / "build" / "reports" / "dedicated-tags-recipes-safety-acceptance.log
 
 FAULTS = ["BEFORE_FIRST_TAG_BIND", "AFTER_FIRST_TAG_BIND", "BEFORE_SECOND_TAG_BIND",
           "AFTER_ALL_TAG_BINDS", "BEFORE_RECIPE_PUBLICATION", "AFTER_RECIPE_PUBLICATION",
-          "AFTER_INGREDIENT_INVALIDATION", "AFTER_TAGS_UPDATED_EVENT", "BEFORE_VERIFICATION"]
+          "AFTER_INGREDIENT_INVALIDATION", "AFTER_TAGS_UPDATED_EVENT", "BEFORE_VERIFICATION",
+          "BEFORE_ROLLBACK_VERIFICATION"]
 
 def structured(letter: str, initial: bool = False) -> None:
     install_generation(letter, initial=initial)
@@ -36,8 +37,8 @@ def main() -> int:
             acceptance.expect("prepare", "partialreload prepare tags_recipes", r"preparation started", 30); acceptance.wait_state(r"State:\s*READY", 120)
             acceptance.expect("arm", f"partialreload debug fault tags_recipes set {fault}", r"fault armed", 30)
             acceptance.expect("apply", "partialreload apply prepared", r"queued", 30)
-            terminal = acceptance.expect("terminal", "partialreload transaction", r"Status: (FAILED_SAFE|ROLLED_BACK)", 60)
-            expected = "FAILED_SAFE" if fault == "BEFORE_FIRST_TAG_BIND" else "ROLLED_BACK"
+            terminal = acceptance.expect("terminal", "partialreload transaction", r"Status: (FAILED_SAFE|ROLLED_BACK|DEGRADED)", 60)
+            expected = "FAILED_SAFE" if fault == "BEFORE_FIRST_TAG_BIND" else ("DEGRADED" if fault == "BEFORE_ROLLBACK_VERIFICATION" else "ROLLED_BACK")
             if f"Status: {expected}" not in terminal:
                 raise AssertionError(f"{fault}: expected {expected}, observed {terminal}")
             journal = acceptance.expect("journal", "partialreload debug tag_recipe_journal", r"Transaction", 30)

@@ -23,6 +23,9 @@ public final class TagRecipeCommitTransaction {
                 ? TagRecipeTransactionEventType.FAILURE : TagRecipeTransactionEventType.STATUS_CHANGED;
         events.add(new TagRecipeTransactionEvent(Instant.now(), transactionId, s, type, detail));
     }
+    public void event(TagRecipeTransactionEventType type, TagRecipeTransactionStatus s, String detail){
+        events.add(new TagRecipeTransactionEvent(Instant.now(), transactionId, s, Objects.requireNonNull(type), detail));
+    }
     public List<TagRecipeTransactionEvent> events(){return List.copyOf(events);}
     public boolean tagMutationOccurred(){return tagMutationOccurred;} public void tagMutationOccurred(boolean v){tagMutationOccurred=v;}
     public boolean recipeMutationOccurred(){return recipeMutationOccurred;} public void recipeMutationOccurred(boolean v){recipeMutationOccurred=v;}

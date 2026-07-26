@@ -9,6 +9,7 @@
 | ingredient | tags/recipe A | tags/recipe B | AFTER_INGREDIENT_INVALIDATION | tags+recipes+cache | passed | completa | ROLLED_BACK | dedicated-tags-recipes-safety-acceptance.json | dedicated |
 | evento | tags/recipe A | tags/recipe B | AFTER_TAGS_UPDATED_EVENT | tags+recipes+evento | passed | completa | ROLLED_BACK | dedicated-tags-recipes-safety-acceptance.json | dedicated |
 | rollback impossível | geração A | geração B | DURING_ROLLBACK | parcial | passed | DEGRADED | DEGRADED | dedicated-tags-recipes-safety-acceptance.json + transcript | dedicated |
+| rollback verification fault | geração A | geração B | BEFORE_ROLLBACK_VERIFICATION | restaurada antes da verificação | pending | DEGRADED | FAILURE + DEGRADED | harness atualizado, execução pendente | dedicated |
 | player request | sem player | com player | — | nenhuma | pendente | não aplicável | FAILED_SAFE | race não automatizada | GameTest |
 | player safe point | 0 players | player entre fases | — | nenhuma | pendente | não aplicável | FAILED_SAFE | probe ausente | GameTest |
 | tag ausente | missing | dirt | — | tag nova | pendente | missing | ROLLED_BACK | fixture ausente | dedicated |

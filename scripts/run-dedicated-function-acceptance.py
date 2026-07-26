@@ -128,6 +128,10 @@ class Acceptance:
         self.rcon: RconClient | None = None
         self.server_properties = ROOT / "run" / "server.properties"
         self.properties_backup = self.server_properties.with_suffix(".properties.partialreload.bak")
+        self.properties_existed_before = self.server_properties.exists()
+        self.original_properties_bytes: bytes | None = self.server_properties.read_bytes() if self.properties_existed_before else None
+        self.temporary_properties_written = False
+        self.properties_configured = False
         self.port = free_port()
         self.password = secrets.token_urlsafe(32)
         self.owned_pid: int | None = None
@@ -177,13 +181,22 @@ class Acceptance:
                 out.append(line)
         out.extend(k + "=" + v for k, v in values.items() if k not in seen)
         self.server_properties.write_text("\n".join(out) + "\n", encoding="utf-8")
+        self.temporary_properties_written = True
+        self.properties_configured = True
 
     def restore_properties(self) -> None:
-        if not self.properties_backup.exists():
-            return
-        os.replace(self.properties_backup, self.server_properties)
+        if self.properties_backup.exists():
+            os.replace(self.properties_backup, self.server_properties)
+        elif self.temporary_properties_written and not self.properties_existed_before and self.server_properties.exists():
+            self.server_properties.unlink()
         if self.properties_backup.exists():
             raise RuntimeError("server.properties backup was not consumed")
+        if self.properties_existed_before:
+            if not self.server_properties.exists() or self.server_properties.read_bytes() != self.original_properties_bytes:
+                raise RuntimeError("server.properties was not restored byte-for-byte")
+        elif self.server_properties.exists():
+            raise RuntimeError("temporary server.properties was not removed")
+        self.properties_configured = False
 
     def start(self) -> None:
         self.assert_test_world_unlocked()

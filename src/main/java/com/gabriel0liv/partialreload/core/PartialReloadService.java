@@ -86,6 +86,15 @@ public final class PartialReloadService {
     private final VanillaRecipesProvider recipesProvider = new VanillaRecipesProvider();
     private final VanillaTagsProvider tagsProvider = new VanillaTagsProvider();
     private final PartialReloadStateMachine stateMachine = new PartialReloadStateMachine();
+    private volatile ConnectedPlayerProbe connectedPlayerProbe = ConnectedPlayerProbe.DEFAULT;
+
+    public void connectedPlayerProbe(ConnectedPlayerProbe probe) {
+        connectedPlayerProbe = Objects.requireNonNull(probe, "probe");
+    }
+
+    public void resetConnectedPlayerProbe() {
+        connectedPlayerProbe = ConnectedPlayerProbe.DEFAULT;
+    }
 
     @Nullable
     private ResourceSnapshot activeReference;
@@ -459,7 +468,7 @@ public final class PartialReloadService {
         if (stateMachine.state() == PartialReloadState.DEGRADED) throw new IllegalStateException("TAG_RECIPE_TRANSACTION_DEGRADED: restart is required");
         if (stateMachine.state() != PartialReloadState.READY) throw new IllegalStateException("TAG_RECIPE_COMMIT_ARTIFACT_REQUIRED");
         if (!(preparedArtifact instanceof PreparedTagsAndRecipes joint) || !joint.isApplicable()) throw new IllegalStateException("TAG_RECIPE_COMMIT_ARTIFACT_INVALID");
-        if (server.getPlayerList().getPlayerCount() > 0) throw new IllegalStateException("TAG_RECIPE_COMMIT_PLAYERS_CONNECTED");
+        if (connectedPlayerProbe.playerCount(server) > 0) throw new IllegalStateException("TAG_RECIPE_COMMIT_PLAYERS_CONNECTED");
         if (tagRecipeTransaction != null && tagRecipeTransaction.status() != TagRecipeTransactionStatus.SUCCESS && tagRecipeTransaction.status() != TagRecipeTransactionStatus.ROLLED_BACK && tagRecipeTransaction.status() != TagRecipeTransactionStatus.FAILED_SAFE && tagRecipeTransaction.status() != TagRecipeTransactionStatus.DEGRADED)
             throw new IllegalStateException("TAG_RECIPE_COMMIT_TRANSACTION_RUNNING");
         TagRecipeCommitCompatibility compatibility = TagRecipeCommitCompatibility.inspect(server);
@@ -504,7 +513,8 @@ public final class PartialReloadService {
         } catch (RuntimeException failure) {
             lastError = failure.getMessage() == null ? failure.getClass().getSimpleName() : failure.getMessage();
             tx.failure(lastError);
-            tx.event(TagRecipeTransactionStatus.FAILED_SAFE, "FAILURE:" + lastError);
+            tx.event(com.gabriel0liv.partialreload.joint.TagRecipeTransactionEventType.FAILURE,
+                    TagRecipeTransactionStatus.FAILED_SAFE, lastError);
             if (!tx.tagMutationOccurred() && !tx.recipeMutationOccurred() && !tx.ingredientInvalidationOccurred() && !tx.tagsUpdatedEventDispatched()) {
                 tx.status(TagRecipeTransactionStatus.FAILED_SAFE);
                 stateMachine.transitionTo(PartialReloadState.FAILED_SAFE);
@@ -524,7 +534,7 @@ public final class PartialReloadService {
     private void preflightTagRecipeCommit(MinecraftServer server, TagRecipeCommitTransaction tx, PreparedTagsAndRecipes artifact) {
         if (stateMachine.state()!=PartialReloadState.QUIESCING || tagRecipeTransaction!=tx) throw new IllegalStateException("TAG_RECIPE_COMMIT_STATE_CHANGED");
         if (artifact==null || preparedArtifact!=artifact || !artifact.preparationId().equals(tx.preparationId()) || !artifact.isApplicable()) throw new IllegalStateException("TAG_RECIPE_COMMIT_SNAPSHOT_STALE");
-        if (server.getPlayerList().getPlayerCount()>0) throw new IllegalStateException("TAG_RECIPE_COMMIT_PLAYERS_CONNECTED");
+        if (connectedPlayerProbe.playerCount(server)>0) throw new IllegalStateException("TAG_RECIPE_COMMIT_PLAYERS_CONNECTED");
         if (System.identityHashCode(server.getRecipeManager())!=tx.recipeManagerIdentity() || System.identityHashCode(server.registryAccess())!=tx.registryAccessIdentity()) throw new IllegalStateException("TAG_RECIPE_COMMIT_STATE_CHANGED");
         TagRecipeCommitCompatibility compatibility=TagRecipeCommitCompatibility.inspect(server);
         if (!compatibility.compatible() || !compatibility.fingerprint().equals(tx.compatibilityFingerprint())) throw new IllegalStateException("TAG_RECIPE_COMMIT_NOT_COMPATIBLE");
@@ -574,12 +584,14 @@ public final class PartialReloadService {
         tx.status(TagRecipeTransactionStatus.ROLLING_BACK_RECIPES); tx.event(TagRecipeTransactionStatus.ROLLING_BACK_RECIPES,"ROLLBACK_STARTED"); if (tx.preparationId()==null || tx.recipePublicationOccurred()) { server.getRecipeManager().replaceRecipes(generation.recipes().recipes()); tx.recipeMutationOccurred(true); tx.event(TagRecipeTransactionStatus.ROLLING_BACK_RECIPES,"ROLLBACK_RECIPES_RESTORED"); }
         tx.status(TagRecipeTransactionStatus.ROLLING_BACK_TAGS); for(var e:generation.tags().registries().entrySet()) if(tx.mutatedTagRegistries().contains(e.getKey())) { bind(server.registryAccess(),e.getKey(),e.getValue()); tx.event(TagRecipeTransactionStatus.ROLLING_BACK_TAGS,"ROLLBACK_TAG_REGISTRY_RESTORED:" + e.getKey().location()); }
         if (!tx.mutatedTagRegistries().isEmpty() || tx.preparationId()==null || tx.recipePublicationOccurred()) { Ingredient.invalidateAll(); tx.ingredientInvalidationOccurred(true); tx.ingredientRollbackInvalidations(tx.ingredientRollbackInvalidations()+1); tx.event(TagRecipeTransactionStatus.ROLLBACK_EVENTS,"ROLLBACK_INGREDIENTS_INVALIDATED"); tx.status(TagRecipeTransactionStatus.ROLLBACK_EVENTS); MinecraftForge.EVENT_BUS.post(new TagsUpdatedEvent(server.registryAccess(),false,false)); tx.tagsUpdatedEventDispatched(true); tx.rollbackTagEvents(tx.rollbackTagEvents()+1); tx.event(TagRecipeTransactionStatus.ROLLBACK_EVENTS,"ROLLBACK_TAGS_EVENT_DISPATCHED"); }
-        tx.event(TagRecipeTransactionStatus.VERIFYING_SERVER,"ROLLBACK_VERIFICATION_STARTED"); verifyRestoredTagRecipe(server, generation); tx.verificationPassed(true); tx.event(TagRecipeTransactionStatus.VERIFYING_SERVER,"ROLLBACK_VERIFICATION_PASSED"); tx.status(TagRecipeTransactionStatus.ROLLED_BACK); activeTagRecipeGeneration=generation; retainedTagRecipeGeneration=null;
+        tx.event(TagRecipeTransactionStatus.VERIFYING_SERVER,"ROLLBACK_VERIFICATION_STARTED");
+        TagRecipeFaultInjection.hit(TagRecipeFaultPoint.BEFORE_ROLLBACK_VERIFICATION);
+        verifyRestoredTagRecipe(server, generation); tx.verificationPassed(true); tx.event(TagRecipeTransactionStatus.VERIFYING_SERVER,"ROLLBACK_VERIFICATION_PASSED"); tx.status(TagRecipeTransactionStatus.ROLLED_BACK); activeTagRecipeGeneration=generation; retainedTagRecipeGeneration=null;
         if (generation.sourceSnapshot()!=null) { activeReference=generation.sourceSnapshot(); if (latestScan!=null) lastChangeSet=ChangeDetector.diff(activeReference, latestScan); }
         stateMachine.transitionTo(PartialReloadState.ROLLED_BACK);
     }
     private void verifyTagRecipe(MinecraftServer server, Map<ResourceKey<? extends Registry<?>>,Map<TagKey<?>,List<Holder<?>>>> candidate, PreparedTagsAndRecipes artifact){
-        if(server.getPlayerList().getPlayerCount()>0)throw new IllegalStateException("TAG_RECIPE_COMMIT_PLAYERS_CONNECTED");
+        if(connectedPlayerProbe.playerCount(server)>0)throw new IllegalStateException("TAG_RECIPE_COMMIT_PLAYERS_CONNECTED");
         Set<ResourceLocation> expected=artifact.preparedRecipes().recipesById().keySet(); Set<ResourceLocation> actual=server.getRecipeManager().getRecipes().stream().map(Recipe::getId).collect(java.util.stream.Collectors.toSet());
         if(!actual.equals(expected))throw new IllegalStateException("RECIPE_COMMIT_VERIFICATION_FAILED");
         for (var entry : candidate.entrySet()) { Registry registry=server.registryAccess().registryOrThrow((ResourceKey)entry.getKey()); Map<TagKey<?>, List<Holder<?>>> expectedTags=entry.getValue(); Map<TagKey<?>, List<Holder<?>>> observedTags=new LinkedHashMap<>(); registry.getTags().forEach(rawPair->{com.mojang.datafixers.util.Pair pair=(com.mojang.datafixers.util.Pair)rawPair; List<Holder<?>> values=new ArrayList<>(); for(Object holder:(Iterable)pair.getSecond()) values.add((Holder<?>)holder); observedTags.put((TagKey)pair.getFirst(),values);}); if(!observedTags.keySet().equals(expectedTags.keySet())) throw new IllegalStateException("TAG_COMMIT_VERIFICATION_FAILED: tag ids"); for (var tag:expectedTags.entrySet()) { if(!observedTags.get(tag.getKey()).equals(tag.getValue())) throw new IllegalStateException("TAG_COMMIT_VERIFICATION_FAILED: "+tag.getKey()); } }
