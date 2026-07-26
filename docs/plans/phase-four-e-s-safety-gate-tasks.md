@@ -30,3 +30,10 @@ verificação estrutural de rollback e o índice de recipes usa
 tipos explícitos nos call sites de produção. Os cenários de player, lifecycle
 de tags ausente/vazia/removida, registries não suportados e GameTests dedicados
 continuam pendentes e não foram marcados como aceitos.
+
+Nesta rodada, a verificação por tipo passou a consultar diretamente
+`RecipeManager.getAllRecipesFor`, foi introduzido `TagSnapshotUniverse` para
+capturar IDs A ∪ B, e foi adicionada a matriz unitária de registries não
+suportados. Os grupos dedicados de lifecycle de tags, registries não
+suportados e os GameTests end-to-end continuam bloqueados até execução real;
+nenhum deles é marcado como passed por inferência.

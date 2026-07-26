@@ -16,9 +16,9 @@ FAULTS = ["BEFORE_FIRST_TAG_BIND", "AFTER_FIRST_TAG_BIND", "BEFORE_SECOND_TAG_BI
 GROUPS = {
     "recoverable": FAULTS[:9],
     "rollback_verification": ["BEFORE_ROLLBACK_VERIFICATION"],
-    "degraded": [],
-    "tag-lifecycle": [],
-    "unsupported": [],
+    "degraded": ["AFTER_RECIPE_PUBLICATION+DURING_ROLLBACK"],
+    "tag-lifecycle": ["tag_absent_add_rollback", "tag_empty_modify_rollback", "tag_remove_rollback"],
+    "unsupported": ["biome_add", "damage_type_modify", "damage_type_remove"],
 }
 
 def structured(letter: str, initial: bool = False) -> None:
