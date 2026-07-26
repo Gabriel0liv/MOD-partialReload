@@ -18,6 +18,7 @@ public final class TagRecipeCommitTransaction {
     public TagRecipeCommitTransaction(UUID tx, UUID prep, Instant at, String requester){this.transactionId=tx;this.preparationId=prep;this.requestedAt=at;this.requester=requester;this.status=TagRecipeTransactionStatus.REQUESTED;}
     public UUID transactionId(){return transactionId;} public UUID preparationId(){return preparationId;} public Instant requestedAt(){return requestedAt;} public String requester(){return requester;}
     public TagRecipeTransactionStatus status(){return status;} public void status(TagRecipeTransactionStatus s){status=s; events.add(new TagRecipeTransactionEvent(Instant.now(), transactionId, s, TagRecipeTransactionEventType.STATUS_CHANGED, null));}
+    @Deprecated(forRemoval = false)
     public void event(TagRecipeTransactionStatus s, String detail){
         TagRecipeTransactionEventType type = detail != null && detail.startsWith("FAILURE:")
                 ? TagRecipeTransactionEventType.FAILURE : TagRecipeTransactionEventType.STATUS_CHANGED;

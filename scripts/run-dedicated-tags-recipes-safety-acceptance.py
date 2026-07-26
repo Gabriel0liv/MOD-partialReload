@@ -1,6 +1,6 @@
 """Dedicated Forge acceptance for the recoverable 4E-S fault matrix."""
 from __future__ import annotations
-import importlib.util, json, pathlib, re, shutil
+import argparse, importlib.util, json, pathlib, re, shutil
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location("function_acceptance", pathlib.Path(__file__).with_name("run-dedicated-function-acceptance.py"))
@@ -13,6 +13,13 @@ FAULTS = ["BEFORE_FIRST_TAG_BIND", "AFTER_FIRST_TAG_BIND", "BEFORE_SECOND_TAG_BI
           "AFTER_ALL_TAG_BINDS", "BEFORE_RECIPE_PUBLICATION", "AFTER_RECIPE_PUBLICATION",
           "AFTER_INGREDIENT_INVALIDATION", "AFTER_TAGS_UPDATED_EVENT", "BEFORE_VERIFICATION",
           "BEFORE_ROLLBACK_VERIFICATION"]
+GROUPS = {
+    "recoverable": FAULTS[:9],
+    "rollback_verification": ["BEFORE_ROLLBACK_VERIFICATION"],
+    "degraded": [],
+    "tag-lifecycle": [],
+    "unsupported": [],
+}
 
 def structured(letter: str, initial: bool = False) -> None:
     install_generation(letter, initial=initial)
@@ -23,11 +30,28 @@ def structured(letter: str, initial: bool = False) -> None:
         path.write_text(json.dumps({"replace": True, "values": [value]}) + "\n", encoding="utf-8")
 
 def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--group", choices=sorted(GROUPS))
+    parser.add_argument("--scenario", choices=FAULTS)
+    args_filter = parser.parse_args()
+    if args_filter.group == "degraded": selected_faults = []
+    elif args_filter.group in ("tag-lifecycle", "unsupported"):
+        report = ROOT / "build" / "reports" / "dedicated-tags-recipes-safety-acceptance-filtered.json"
+        report.parent.mkdir(parents=True, exist_ok=True)
+        report.write_text(json.dumps({"status": "failed", "complete_run": False, "selected_group": args_filter.group,
+                                      "error": "scenario group is not implemented"}, indent=2) + "\n", encoding="utf-8")
+        print(f"Filtered group {args_filter.group} is not implemented; report: {report}")
+        return 1
+    elif args_filter.scenario: selected_faults = [args_filter.scenario]
+    elif args_filter.group: selected_faults = GROUPS[args_filter.group]
+    else: selected_faults = FAULTS
+    filtered = bool(args_filter.group or args_filter.scenario)
+    report_path = ROOT / "build" / "reports" / ("dedicated-tags-recipes-safety-acceptance-filtered.json" if filtered else "dedicated-tags-recipes-safety-acceptance.json")
     class Args:
         server_startup_timeout=180; rcon_startup_timeout=30; command_timeout=15; shutdown_timeout=60
     results = {}
     transcript: list[str] = []
-    for fault in FAULTS:
+    for fault in selected_faults:
         acceptance = Acceptance(Args())
         try:
             structured("A", initial=True); acceptance.configure_rcon(); acceptance.start()
@@ -58,7 +82,13 @@ def main() -> int:
             transcript.extend([f"===== {fault} =====", *acceptance.transcript]); structured("A", initial=True)
     # Dedicated isolated DEGRADED scenario: the primary fault is consumed
     # after recipe publication, then rollback itself is faulted.
-    acceptance = Acceptance(Args())
+    acceptance = Acceptance(Args()) if args_filter.group in (None, "degraded") and not args_filter.scenario else None
+    if acceptance is None:
+        REPORT.parent.mkdir(parents=True, exist_ok=True)
+        report_path.write_text(json.dumps({"status": "passed", "complete_run": False, "selected_group": args_filter.group,
+                                           "selected_scenario": args_filter.scenario, "scenarios": results}, indent=2) + "\n", encoding="utf-8")
+        print(f"Filtered acceptance complete: {report_path}")
+        return 0 if all(v.get("status") == "passed" for v in results.values()) else 1
     try:
         structured("A", initial=True); acceptance.configure_rcon(); acceptance.start()
         acceptance.expect("status", "partialreload status", r"FUNCTION_COMMIT_SUPPORTED", 30)
@@ -87,11 +117,13 @@ def main() -> int:
         except Exception as exc: results.setdefault("DEGRADED", {})["properties_error"] = str(exc); results.setdefault("DEGRADED", {})["status"] = "failed"
         transcript.extend(["===== DEGRADED =====", *acceptance.transcript]); structured("A", initial=True)
     REPORT.parent.mkdir(parents=True, exist_ok=True)
-    REPORT.write_text(json.dumps(results, indent=2) + "\n", encoding="utf-8")
+    report_path.write_text(json.dumps({"status": "passed" if all(v.get("status") == "passed" for v in results.values()) else "failed",
+                                      "complete_run": not filtered, "selected_group": args_filter.group,
+                                      "selected_scenario": args_filter.scenario, "scenarios": results}, indent=2) + "\n", encoding="utf-8")
     LOG.write_text("\n".join(transcript) + "\n", encoding="utf-8")
     ok = bool(results) and all(v.get("status") == "passed" for v in results.values())
     print("DEDICATED_TAGS_RECIPES_SAFETY_ACCEPTANCE_PASSED" if ok else "DEDICATED_TAGS_RECIPES_SAFETY_ACCEPTANCE_FAILED")
-    print(f"Report: {REPORT}")
+    print(f"Report: {report_path}")
     return 0 if ok else 1
 
 if __name__ == "__main__":
