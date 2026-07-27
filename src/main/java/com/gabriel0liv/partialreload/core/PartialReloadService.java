@@ -403,23 +403,7 @@ public final class PartialReloadService {
             PreparedRecipes recipes = recipesProvider.prepareWithCandidateTags(resourceManager, shared, baseline,
                     new PreparedTagsResolutionView(tags), changedTagIds, PartialReloadConfig.maxRecipes(), PartialReloadConfig.maxRecipeJsonBytes(),
                     java.time.Duration.ofSeconds(60).toNanos(), UUID.randomUUID());
-            List<ValidationIssue> issues = new java.util.ArrayList<>(tags.validation().issues());
-            issues.addAll(recipes.validation().issues());
-            Map<ResourceLocation, Set<ResourceLocation>> recipeToTags = new java.util.LinkedHashMap<>(recipes.dependencyGraph().dependencies());
-            Map<ResourceLocation, Set<ResourceLocation>> tagToRecipes = new java.util.LinkedHashMap<>();
-            recipeToTags.forEach((recipe, tagIds) -> tagIds.forEach(tag -> tagToRecipes.computeIfAbsent(tag, k -> new java.util.LinkedHashSet<>()).add(recipe)));
-            Set<ResourceLocation> impacted = new java.util.LinkedHashSet<>();
-            Set<ResourceLocation> changedTags = new java.util.LinkedHashSet<>(tags.delta().tagsAdded());
-            changedTags.addAll(tags.delta().tagsModified()); changedTags.addAll(tags.delta().tagsRemoved());
-            recipeToTags.forEach((recipe, tagIds) -> { if (!java.util.Collections.disjoint(tagIds, changedTags)) impacted.add(recipe); });
-            TagRecipeDependencyGraph graph = new TagRecipeDependencyGraph(recipeToTags, tagToRecipes, recipes.revalidatedDueToTagChange(), recipes.invalidatedByTagChange());
-            TagRecipeDelta delta = new TagRecipeDelta(Set.copyOf(changedTags), Set.copyOf(changedTags), tags.delta().membersAdded(), tags.delta().membersRemoved(),
-                    recipes.delta().added(), recipes.delta().modified(), recipes.delta().removed(), impacted,
-                    recipes.revalidatedDueToTagChange(), recipes.invalidatedByTagChange(), recipes.serializerSafety().entrySet().stream()
-                            .filter(e -> e.getValue() != com.gabriel0liv.partialreload.recipe.RecipeSerializerTagSafety.TAG_INDEPENDENT_DURING_PARSE
-                                    && e.getValue() != com.gabriel0liv.partialreload.recipe.RecipeSerializerTagSafety.STORES_TAG_KEY_ONLY)
-                            .map(Map.Entry::getKey).collect(java.util.stream.Collectors.toUnmodifiableSet()));
-            return new PreparedTagsAndRecipes(UUID.randomUUID(), Instant.now(), shared, tags, recipes, graph, delta, new ValidationReport(issues));
+            return com.gabriel0liv.partialreload.joint.PreparedTagsAndRecipesFactory.combine(UUID.randomUUID(), shared, tags, recipes);
         }, background).handleAsync((artifact, throwable) -> {
             synchronized (this) {
                 if (throwable != null) { lastError = rootMessage(throwable); stateMachine.transitionTo(PartialReloadState.FAILED_SAFE); throw new CompletionException(throwable); }
