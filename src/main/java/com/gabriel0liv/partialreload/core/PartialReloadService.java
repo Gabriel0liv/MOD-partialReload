@@ -552,7 +552,11 @@ public final class PartialReloadService {
             Set<ResourceKey<? extends Registry<?>>> registriesToMutate=deriveRegistriesToMutate(artifact);
             tx.registriesToMutate(registriesToMutate); tx.event(com.gabriel0liv.partialreload.joint.TagRecipeTransactionEventType.REGISTRY_SCOPE_DERIVED, TagRecipeTransactionStatus.BUILDING_BINDINGS, "REGISTRY_SCOPE_DERIVED:" + registriesToMutate);
             Map<ResourceKey<? extends Registry<?>>, Map<TagKey<?>, List<Holder<?>>>> candidate=buildCandidateBindings(server.registryAccess(), artifact.preparedTags(), registriesToMutate); tx.event(com.gabriel0liv.partialreload.joint.TagRecipeTransactionEventType.CANDIDATE_BINDINGS_BUILT, TagRecipeTransactionStatus.BUILDING_BINDINGS, "bindings=" + candidate.size());
-            List<Recipe<?>> candidateRecipes=artifact.preparedRecipes().recipesById().values().stream().map(PreparedRecipe::recipe).toList(); tx.event(com.gabriel0liv.partialreload.joint.TagRecipeTransactionEventType.CANDIDATE_RECIPES_BUILT, TagRecipeTransactionStatus.BUILDING_BINDINGS, "recipes=" + candidateRecipes.size());
+            List<Recipe<?>> candidateRecipes = new ArrayList<>();
+            for (PreparedRecipe preparedRecipe : artifact.preparedRecipes().recipesById().values()) {
+                candidateRecipes.add(preparedRecipe.recipe());
+            }
+            tx.event(com.gabriel0liv.partialreload.joint.TagRecipeTransactionEventType.CANDIDATE_RECIPES_BUILT, TagRecipeTransactionStatus.BUILDING_BINDINGS, "recipes=" + candidateRecipes.size());
             ActiveTagRecipeGeneration previous=captureTagRecipeGeneration(server, registriesToMutate, artifact.preparedTags()); tx.previousGeneration(previous); retainedTagRecipeGeneration=previous; tx.event(com.gabriel0liv.partialreload.joint.TagRecipeTransactionEventType.PREVIOUS_GENERATION_CAPTURED, TagRecipeTransactionStatus.READY_TO_COMMIT, previous.generationId().toString());
             stateMachine.transitionTo(PartialReloadState.COMMITTING);
             tx.status(TagRecipeTransactionStatus.BINDING_TAGS);
@@ -624,17 +628,23 @@ public final class PartialReloadService {
 
     @SuppressWarnings("unchecked") private static ResourceKey<Registry<Object>> registryKey(String canonical){return (ResourceKey<Registry<Object>>)(ResourceKey<?>)ResourceKey.createRegistryKey(ResourceLocation.fromNamespaceAndPath("minecraft",canonical));}
 
-    @SuppressWarnings({"unchecked","rawtypes"}) private static Map<ResourceKey<? extends Registry<?>>, Map<TagKey<?>, List<Holder<?>>>> buildCandidateBindings(RegistryAccess access, PreparedTags prepared, Set<ResourceKey<? extends Registry<?>>> scope) {
+    @SuppressWarnings("unchecked") private static Map<ResourceKey<? extends Registry<?>>, Map<TagKey<?>, List<Holder<?>>>> buildCandidateBindings(RegistryAccess access, PreparedTags prepared, Set<ResourceKey<? extends Registry<?>>> scope) {
         Map<ResourceKey<? extends Registry<?>>, Map<TagKey<?>, List<Holder<?>>>> out=new LinkedHashMap<>();
         for (var entry:prepared.registries().entrySet()) { String path=entry.getKey(); String canonical=canonicalRegistry(path); if (canonical==null) continue; ResourceKey<Registry<Object>> key=registryKey(canonical); if(!scope.contains(key)) continue; Registry<Object> registry=access.registryOrThrow(key); Map<TagKey<?>,List<Holder<?>>> tags=new LinkedHashMap<>();
-            registry.getTags().forEach(rawPair->{com.mojang.datafixers.util.Pair pair=(com.mojang.datafixers.util.Pair)rawPair; List<Holder<?>> holders=new ArrayList<>(); for(Object holder:(Iterable)pair.getSecond()) holders.add((Holder<?>)holder); tags.put((TagKey)pair.getFirst(), List.copyOf(holders));});
+            registry.getTags().forEach(pair -> {
+                TagKey<Object> tagKey = pair.getFirst();
+                HolderSet.Named<Object> named = pair.getSecond();
+                List<Holder<?>> holders = new ArrayList<>();
+                named.forEach(holders::add);
+                tags.put(tagKey, List.copyOf(holders));
+            });
             for (var tagEntry:entry.getValue().tags().entrySet()) { List<Holder<?>> holders=new ArrayList<>(); for(String value:expandTag(entry.getValue().tags(),tagEntry.getKey(),new HashSet<>())) { ResourceKey<Object> memberKey=ResourceKey.create(key,ResourceLocation.parse(value)); Holder<Object> holder=registry.getHolder(memberKey).orElseThrow(()->new IllegalStateException("TAG_COMMIT_MEMBER_MISSING: "+value)); holders.add(holder); } tags.put(TagKey.create(key,tagEntry.getKey()),holders); } out.put(key,tags); }
         for (var key:scope) { out.putIfAbsent(key, new LinkedHashMap<>()); out.get(key).entrySet().removeIf(e -> prepared.delta().tagsRemoved().contains(e.getKey().location())); }
         return out;
     }
     private static Set<String> expandTag(Map<ResourceLocation, com.gabriel0liv.partialreload.tags.PreparedTag> tags, ResourceLocation id, Set<ResourceLocation> visiting){ if(!visiting.add(id)) throw new IllegalStateException("TAG_COMMIT_BINDING_BUILD_FAILED: cycle"); var tag=tags.get(id); if(tag==null) throw new IllegalStateException("TAG_COMMIT_BINDING_BUILD_FAILED: missing nested tag"); Set<String> out=new LinkedHashSet<>(); for(String v:tag.orderedEntries()){if(v.startsWith("#")) out.addAll(expandTag(tags,ResourceLocation.parse(v.substring(1)),visiting)); else if(!tag.missingOptionalEntries().contains(v)) out.add(v);} visiting.remove(id); return out; }
     private static String canonicalRegistry(String path){return switch(path){case "items"->"item";case "blocks"->"block";case "fluids"->"fluid";case "entity_types"->"entity_type";case "game_events"->"game_event";case "mob_effects"->"mob_effect";case "enchantments"->"enchantment";default->null;};}
-    @SuppressWarnings({"unchecked","rawtypes"}) private static Map<ResourceKey<? extends Registry<?>>, Map<TagKey<?>, List<Holder<?>>>> captureTags(RegistryAccess access, Set<ResourceKey<? extends Registry<?>>> scope){Map<ResourceKey<? extends Registry<?>>,Map<TagKey<?>,List<Holder<?>>>> out=new LinkedHashMap<>(); for (ResourceKey<? extends Registry<?>> key:scope.stream().sorted(java.util.Comparator.comparing(k -> k.location().toString())).toList()) { Registry registry=access.registryOrThrow((ResourceKey)key); Map<TagKey<?>,List<Holder<?>>> tags=new LinkedHashMap<>(); registry.getTags().forEach(rawPair->{com.mojang.datafixers.util.Pair pair=(com.mojang.datafixers.util.Pair)rawPair; List<Holder<?>> holders=new ArrayList<>(); for(Object holder:(Iterable)pair.getSecond()) holders.add((Holder<?>)holder); tags.put((TagKey)pair.getFirst(),List.copyOf(holders));}); out.put(key,tags); } return out;}
+    private static Map<ResourceKey<? extends Registry<?>>, Map<TagKey<?>, List<Holder<?>>>> captureTags(RegistryAccess access, Set<ResourceKey<? extends Registry<?>>> scope){Map<ResourceKey<? extends Registry<?>>,Map<TagKey<?>,List<Holder<?>>>> out=new LinkedHashMap<>(); for (ResourceKey<? extends Registry<?>> key:scope.stream().sorted(java.util.Comparator.comparing(k -> k.location().toString())).toList()) { Registry<?> registry=access.registryOrThrow(key); Map<TagKey<?>,List<Holder<?>>> tags=new LinkedHashMap<>(); registry.getTags().forEach(pair->{ List<Holder<?>> holders=new ArrayList<>(); pair.getSecond().forEach(holders::add); tags.put(pair.getFirst(),List.copyOf(holders));}); out.put(key,tags); } return out;}
     private ActiveTagRecipeGeneration captureTagRecipeGeneration(MinecraftServer server, Set<ResourceKey<? extends Registry<?>>> scope, PreparedTags candidate){
         Map<ResourceKey<? extends Registry<?>>, Set<ResourceLocation>> universe = new LinkedHashMap<>();
         for (var entry : candidate.registries().entrySet()) { String canonical = canonicalRegistry(entry.getKey()); if (canonical == null) continue; ResourceKey<Registry<Object>> key = registryKey(canonical); universe.put(key, entry.getValue().tags().keySet()); }
@@ -655,7 +665,7 @@ public final class PartialReloadService {
         if(connectedPlayerProbe.playerCount(server)>0)throw new IllegalStateException("TAG_RECIPE_COMMIT_PLAYERS_CONNECTED");
         Set<ResourceLocation> expected=artifact.preparedRecipes().recipesById().keySet(); Set<ResourceLocation> actual=server.getRecipeManager().getRecipes().stream().map(Recipe::getId).collect(java.util.stream.Collectors.toSet());
         if(!actual.equals(expected))throw new IllegalStateException("RECIPE_COMMIT_VERIFICATION_FAILED");
-        for (var entry : candidate.entrySet()) { Registry registry=server.registryAccess().registryOrThrow((ResourceKey)entry.getKey()); Map<TagKey<?>, List<Holder<?>>> expectedTags=entry.getValue(); Map<TagKey<?>, List<Holder<?>>> observedTags=new LinkedHashMap<>(); registry.getTags().forEach(rawPair->{com.mojang.datafixers.util.Pair pair=(com.mojang.datafixers.util.Pair)rawPair; List<Holder<?>> values=new ArrayList<>(); for(Object holder:(Iterable)pair.getSecond()) values.add((Holder<?>)holder); observedTags.put((TagKey)pair.getFirst(),values);}); for (var tag:expectedTags.entrySet()) { if(!observedTags.containsKey(tag.getKey()) || !observedTags.get(tag.getKey()).equals(tag.getValue())) throw new IllegalStateException("TAG_COMMIT_VERIFICATION_FAILED: "+tag.getKey()); } }
+        for (var entry : candidate.entrySet()) { Registry<?> registry=server.registryAccess().registryOrThrow(entry.getKey()); Map<TagKey<?>, List<Holder<?>>> expectedTags=entry.getValue(); Map<TagKey<?>, List<Holder<?>>> observedTags=new LinkedHashMap<>(); registry.getTags().forEach(pair->{ List<Holder<?>> values=new ArrayList<>(); pair.getSecond().forEach(values::add); observedTags.put(pair.getFirst(),values);}); for (var tag:expectedTags.entrySet()) { if(!observedTags.containsKey(tag.getKey()) || !observedTags.get(tag.getKey()).equals(tag.getValue())) throw new IllegalStateException("TAG_COMMIT_VERIFICATION_FAILED: "+tag.getKey()); } }
     }
     @SuppressWarnings({"unchecked", "rawtypes"})
     private void verifyRestoredTagRecipe(MinecraftServer server, ActiveTagRecipeGeneration generation, TagRecipeCommitTransaction tx){
@@ -678,11 +688,11 @@ public final class PartialReloadService {
             }
         }
         for (var generationEntry : generation.tags().registries().entrySet()) {
-            Registry registry = server.registryAccess().registryOrThrow((ResourceKey) generationEntry.getKey());
+            Registry<?> registry = server.registryAccess().registryOrThrow(generationEntry.getKey());
             var structural = generation.tags().snapshots().get(generationEntry.getKey());
             if (structural == null || (structural.registryIdentity() != 0 && structural.registryIdentity() != System.identityHashCode(registry))) throw new IllegalStateException("TAG_RECIPE_ROLLBACK_VERIFICATION_FAILED: registry identity");
             Map<TagKey<?>, List<Holder<?>>> observed = new LinkedHashMap<>();
-            registry.getTags().forEach(raw -> { com.mojang.datafixers.util.Pair pair=(com.mojang.datafixers.util.Pair)raw; List<Holder<?>> values=new ArrayList<>(); for(Object holder:(Iterable)pair.getSecond()) values.add((Holder<?>)holder); observed.put((TagKey)pair.getFirst(), List.copyOf(values)); });
+            registry.getTags().forEach(pair -> { List<Holder<?>> values=new ArrayList<>(); pair.getSecond().forEach(values::add); observed.put(pair.getFirst(), List.copyOf(values)); });
             for (var tag : structural.tags().entrySet()) {
                 TagKey key = TagKey.create((ResourceKey) generationEntry.getKey(), tag.getKey());
                 boolean present = observed.containsKey(key);

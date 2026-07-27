@@ -72,20 +72,25 @@ public final class MappedRegistryTagBridge {
 
     private static <T> void replaceForgeExact(NamespacedWrapper<T> registry,
                                               Map<TagKey<T>, List<Holder<T>>> requested) {
-        Map<TagKey<T>, HolderSet.Named<T>> current = registry.tags;
-        replaceOnMap(registry, current, requested, map -> registry.tags = map);
+        Map<TagKey<T>, HolderSet.Named<T>> current = registry.getTags().collect(Collectors.toMap(
+                pair -> pair.getFirst(), pair -> pair.getSecond(), (a, b) -> { throw new IllegalStateException("duplicate tag"); }, IdentityHashMap::new));
+        replaceOnMap(registry, current, requested, map -> registry.tags = map,
+                registry::getOrCreateTag, null);
     }
 
     private static <T> void replaceVanillaExact(MappedRegistry<T> registry,
                                                 Map<TagKey<T>, List<Holder<T>>> requested) {
         Map<TagKey<T>, HolderSet.Named<T>> current = registry.tags;
-        replaceOnMap(registry, current, requested, map -> registry.tags = map);
+        replaceOnMap(registry, current, requested, map -> registry.tags = map,
+                registry::getOrCreateTag, null);
     }
 
     private static <T> void replaceOnMap(Registry<T> registry,
                                          Map<TagKey<T>, HolderSet.Named<T>> current,
                                          Map<TagKey<T>, List<Holder<T>>> requested,
-                                         Consumer<IdentityHashMap<TagKey<T>, HolderSet.Named<T>>> install) {
+                                         Consumer<IdentityHashMap<TagKey<T>, HolderSet.Named<T>>> install,
+                                         Function<TagKey<T>, HolderSet.Named<T>> createNamed,
+                                         Runnable resetBeforeCreate) {
         Map<ResourceLocation, Map.Entry<TagKey<T>, HolderSet.Named<T>>> oldByLocation =
                 current.entrySet().stream().collect(Collectors.toMap(
                         e -> e.getKey().location(), Function.identity(), (a, b) -> {
@@ -104,6 +109,8 @@ public final class MappedRegistryTagBridge {
             }
         });
 
+        if (resetBeforeCreate != null) resetBeforeCreate.run();
+
         IdentityHashMap<TagKey<T>, HolderSet.Named<T>> seed = new IdentityHashMap<>();
         IdentityHashMap<TagKey<T>, List<Holder<T>>> canonicalTarget = new IdentityHashMap<>();
         targetByLocation.forEach((location, requestedEntry) -> {
@@ -115,9 +122,7 @@ public final class MappedRegistryTagBridge {
                 named = old.getValue();
             } else {
                 canonicalKey = requestedEntry.getKey();
-                named = registry instanceof NamespacedWrapper<T> forge
-                        ? forge.getOrCreateTag(canonicalKey)
-                        : ((MappedRegistry<T>) registry).getOrCreateTag(canonicalKey);
+                named = createNamed.apply(canonicalKey);
             }
             seed.put(canonicalKey, named);
             canonicalTarget.put(canonicalKey, requestedEntry.getValue());

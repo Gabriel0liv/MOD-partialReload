@@ -37,6 +37,51 @@ public final class TagRecipeTransactionGameTests {
         helper.succeed();
     }
 
+    @GameTest(template = "empty", batch = "phase4e-tag-recipe-transaction", timeoutTicks = 1200)
+    public static void manualRollbackRestoresGenerationA(GameTestHelper helper) {
+        TagRecipeGameTestFixture fixture = null; Throwable failure = null;
+        try {
+            fixture = TagRecipeGameTestFixture.create(helper);
+            fixture.installGenerationA();
+            fixture.prepareGenerationB();
+            var commit = fixture.service().requestTagRecipeCommit(fixture.server(), "gametest-commit-b-before-rollback");
+            fixture.service().processTagRecipeSafePoint(fixture.server());
+            helper.assertTrue(commit.status() == com.gabriel0liv.partialreload.joint.TagRecipeTransactionStatus.SUCCESS, "commit did not succeed: " + commit.status());
+            helper.assertTrue(commit.verificationPassed(), "commit verification failed");
+            fixture.assertGenerationB();
+
+            var rollback = fixture.service().requestTagRecipeRollback("gametest-manual-rollback");
+            fixture.service().processTagRecipeSafePoint(fixture.server());
+            helper.assertTrue(rollback != commit, "rollback reused commit transaction");
+            helper.assertTrue(!rollback.transactionId().equals(commit.transactionId()), "rollback UUID reused");
+            helper.assertTrue(rollback.status() == com.gabriel0liv.partialreload.joint.TagRecipeTransactionStatus.ROLLED_BACK, "rollback did not complete: " + rollback.status());
+            helper.assertTrue(rollback.verificationPassed(), "rollback verification failed");
+            helper.assertTrue(rollback.ingredientRollbackInvalidations() == 1, "rollback ingredient invalidations");
+            helper.assertTrue(rollback.rollbackTagEvents() == 1, "rollback tag events");
+            helper.assertTrue(rollback.failure() == null, "rollback failure: " + rollback.failure());
+            fixture.assertGenerationA();
+            var events = rollback.events();
+            var required = java.util.List.of(
+                    com.gabriel0liv.partialreload.joint.TagRecipeTransactionEventType.ROLLBACK_STARTED,
+                    com.gabriel0liv.partialreload.joint.TagRecipeTransactionEventType.ROLLBACK_RECIPES_RESTORED,
+                    com.gabriel0liv.partialreload.joint.TagRecipeTransactionEventType.ROLLBACK_TAG_REGISTRY_REPLACEMENT_STARTED,
+                    com.gabriel0liv.partialreload.joint.TagRecipeTransactionEventType.ROLLBACK_TAG_RESTORED,
+                    com.gabriel0liv.partialreload.joint.TagRecipeTransactionEventType.ROLLBACK_INGREDIENT_INVALIDATION_STARTED,
+                    com.gabriel0liv.partialreload.joint.TagRecipeTransactionEventType.ROLLBACK_INGREDIENTS_INVALIDATED,
+                    com.gabriel0liv.partialreload.joint.TagRecipeTransactionEventType.ROLLBACK_TAGS_EVENT_DISPATCH_STARTED,
+                    com.gabriel0liv.partialreload.joint.TagRecipeTransactionEventType.ROLLBACK_TAGS_EVENT_DISPATCHED,
+                    com.gabriel0liv.partialreload.joint.TagRecipeTransactionEventType.ROLLBACK_VERIFICATION_STARTED,
+                    com.gabriel0liv.partialreload.joint.TagRecipeTransactionEventType.ROLLBACK_VERIFICATION_PASSED);
+            int previous = -1;
+            for (var type : required) { int index = -1; for (int i = previous + 1; i < events.size(); i++) if (events.get(i).type() == type) { index = i; break; } helper.assertTrue(index >= 0, "missing rollback event " + type); helper.assertTrue(events.get(index).transactionId().equals(rollback.transactionId()), "rollback event UUID mismatch"); previous = index; }
+        } catch (Throwable t) { failure = t; }
+        try { if (fixture != null) fixture.close(); if (fixture != null) fixture.assertCleanup(); }
+        catch (Throwable t) { if (failure == null) failure = t; else failure.addSuppressed(t); }
+        if (failure != null) { helper.fail(failure.toString()); return; }
+        PartialReloadMod.LOGGER.info("PHASE4E_GAMETEST_PASSED:manualRollbackRestoresGenerationA");
+        helper.succeed();
+    }
+
     @GameTest(template = "empty", batch = "phase4e-tag-recipe-transaction")
     public static void forgeWrapperIsRecognized(GameTestHelper helper) {
         var server = helper.getLevel().getServer();

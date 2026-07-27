@@ -83,10 +83,50 @@ tasks.named('jar', Jar).configure {
 
 tasks.withType(JavaCompile).configureEach {
     options.encoding = 'UTF-8'
+    // Do not add the mapped Forge source archive as javac's source path: the
+    // AT-transformed binary is the compile-time contract for the bridge.
+    options.sourcepath = files("${project.buildDir}/empty-java-sourcepath")
 }
 
 tasks.named('test', Test).configure {
     useJUnitPlatform()
+}
+
+tasks.named('compileJava', JavaCompile).configure {
+    doFirst {
+        def emptySourcePath = file("${project.buildDir}/empty-java-sourcepath")
+        emptySourcePath.mkdirs()
+        options.sourcepath = files(emptySourcePath)
+
+        // ForgeGradle's mapped source archive declares NamespacedWrapper as
+        // package-private even though the AT-transformed binary contract is
+        // public.  Supply only that compile-time shape, then remove it from
+        // the output so the Forge class remains the runtime implementation.
+        def accessStub = file("${project.buildDir}/generated/forge-access/net/minecraftforge/registries/NamespacedWrapper.java")
+        accessStub.parentFile.mkdirs()
+        accessStub.text = '''package net.minecraftforge.registries;
+
+import com.mojang.serialization.Lifecycle;
+import net.minecraft.core.HolderSet;
+import net.minecraft.core.MappedRegistry;
+import net.minecraft.core.Registry;
+import net.minecraft.resources.ResourceKey;
+import net.minecraft.tags.TagKey;
+import java.util.Map;
+
+public class NamespacedWrapper<T> extends MappedRegistry<T> {
+    public volatile Map<TagKey<T>, HolderSet.Named<T>> tags;
+    public NamespacedWrapper(ResourceKey<? extends Registry<T>> key, Lifecycle lifecycle, boolean intrusive) {
+        super(key, lifecycle, intrusive);
+    }
+}
+'''
+        source accessStub.parentFile.parentFile.parentFile.parentFile
+    }
+    doLast {
+        delete file("${project.buildDir}/classes/java/main/net/minecraftforge/registries/NamespacedWrapper.class")
+        delete file("${project.buildDir}/generated/forge-access")
+    }
 }
 
 tasks.register('prepareGameTestStructures', Copy) {
