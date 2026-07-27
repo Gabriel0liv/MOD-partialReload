@@ -25,6 +25,7 @@ import com.gabriel0liv.partialreload.joint.TagRecipeFaultPoint;
 import com.gabriel0liv.partialreload.validation.ValidationSeverity;
 import com.mojang.brigadier.CommandDispatcher;
 import com.mojang.brigadier.arguments.StringArgumentType;
+import com.mojang.brigadier.arguments.IntegerArgumentType;
 import com.mojang.brigadier.suggestion.SuggestionsBuilder;
 import net.minecraft.Util;
 import net.minecraft.commands.CommandSourceStack;
@@ -153,6 +154,16 @@ public final class PartialReloadCommand {
                         .then(Commands.literal("tag_recipe_transaction")
                                 .requires(source -> !net.minecraftforge.fml.loading.FMLEnvironment.production)
                                 .executes(context -> debugTagRecipeTransaction(context.getSource(), service)))
+                        .then(Commands.literal("player_probe")
+                                .requires(source -> !net.minecraftforge.fml.loading.FMLEnvironment.production && source.hasPermission(4))
+                                .then(Commands.literal("real").executes(context -> { service.resetConnectedPlayerProbe(); context.getSource().sendSuccess(() -> Component.literal("Player probe: real"), false); return 1; }))
+                                .then(Commands.literal("fixed").then(Commands.argument("count", IntegerArgumentType.integer(0))
+                                        .executes(context -> { service.fixedConnectedPlayerProbe(IntegerArgumentType.getInteger(context, "count")); context.getSource().sendSuccess(() -> Component.literal("Player probe fixed"), false); return 1; })))
+                                .then(Commands.literal("status").executes(context -> { context.getSource().sendSuccess(() -> Component.literal("Player probe: userdev seam"), false); return 1; })))
+                        .then(Commands.literal("safe_point")
+                                .requires(source -> !net.minecraftforge.fml.loading.FMLEnvironment.production && source.hasPermission(4))
+                                .then(Commands.literal("hold").executes(context -> { service.holdTagRecipeSafePoint(); context.getSource().sendSuccess(() -> Component.literal("Tag/recipe safe point held"), false); return 1; }))
+                                .then(Commands.literal("release").executes(context -> { service.releaseTagRecipeSafePoint(); context.getSource().sendSuccess(() -> Component.literal("Tag/recipe safe point released"), false); return 1; })))
                 )
                 .then(unsupported("reload"))
                 );

@@ -19,6 +19,7 @@ GROUPS = {
     "degraded": ["AFTER_RECIPE_PUBLICATION+DURING_ROLLBACK"],
     "tag-lifecycle": ["tag_absent_add_rollback", "tag_empty_modify_rollback", "tag_remove_rollback"],
     "unsupported": ["biome_add", "damage_type_modify", "damage_type_remove"],
+    "players": ["player_present_at_request", "player_race_at_safe_point"],
 }
 
 def structured(letter: str, initial: bool = False) -> None:
@@ -106,6 +107,43 @@ def run_unsupported_scenario(name: str, Args) -> dict:
         except Exception as exc: result["properties_error"] = str(exc); result["status"] = "failed"
     return result
 
+def run_player_scenario(name: str, Args) -> dict:
+    acceptance = Acceptance(Args()); result = {"status": "failed", "scenario": name}
+    try:
+        structured("A", initial=True); acceptance.configure_rcon(); acceptance.start()
+        acceptance.expect("status", "partialreload status", r"TAG_RECIPE_SERVER_ONLY", 30)
+        acceptance.expect("scan_a", "partialreload scan", r"scan", 30); acceptance.wait_state(r"Last scan:\s*(?!never)", 120)
+        structured("B"); acceptance.expect("scan_b", "partialreload scan", r"scan", 30); acceptance.wait_state(r"Changed resources:\s*[1-9]", 120)
+        acceptance.expect("prepare", "partialreload prepare tags_recipes", r"preparation started", 30); acceptance.wait_state(r"State:\s*READY", 120)
+        if name == "player_present_at_request":
+            acceptance.expect("probe", "partialreload debug player_probe fixed 1", r"fixed", 30)
+            refused = acceptance.command("partialreload apply prepared")
+            if "TAG_RECIPE_COMMIT_PLAYERS_CONNECTED" not in refused: raise AssertionError(f"request was not refused: {refused}")
+            status = acceptance.command("partialreload status")
+            if "State: READY" not in status: raise AssertionError(f"state changed: {status}")
+        else:
+            acceptance.expect("probe0", "partialreload debug player_probe fixed 0", r"fixed", 30)
+            acceptance.expect("hold", "partialreload debug safe_point hold", r"held", 30)
+            acceptance.expect("apply", "partialreload apply prepared", r"queued", 30)
+            acceptance.expect("probe1", "partialreload debug player_probe fixed 1", r"fixed", 30)
+            acceptance.expect("release", "partialreload debug safe_point release", r"released", 30)
+            tx = acceptance.command("partialreload transaction")
+            if "TAG_RECIPE_COMMIT_PLAYERS_CONNECTED" not in tx: raise AssertionError(f"race was not rejected: {tx}")
+            if "Tag mutation: true" in tx or "Recipe mutation: true" in tx: raise AssertionError(f"race mutated state: {tx}")
+            result["transaction"] = tx.strip()
+        result.update(status="passed", probe_reset=True)
+    except Exception as exc: result["error"] = str(exc)
+    finally:
+        try: acceptance.command("partialreload debug player_probe real")
+        except Exception: pass
+        try: acceptance.command("partialreload debug safe_point release")
+        except Exception: pass
+        try: acceptance.shutdown()
+        except Exception as exc: result["shutdown_error"] = str(exc); result["status"] = "failed"
+        try: acceptance.restore_properties()
+        except Exception as exc: result["properties_error"] = str(exc); result["status"] = "failed"
+    return result
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--group", choices=sorted(GROUPS))
@@ -121,6 +159,12 @@ def main() -> int:
     elif args_filter.group == "unsupported":
         class Args: server_startup_timeout=180; rcon_startup_timeout=30; command_timeout=15; shutdown_timeout=60
         results = {name: run_unsupported_scenario(name, Args) for name in GROUPS["unsupported"]}
+        report_path = ROOT / "build" / "reports" / "dedicated-tags-recipes-safety-acceptance-filtered.json"
+        report_path.parent.mkdir(parents=True, exist_ok=True); report_path.write_text(json.dumps({"status": "passed" if all(v["status"] == "passed" for v in results.values()) else "failed", "complete_run": False, "selected_group": args_filter.group, "scenarios": results}, indent=2) + "\n", encoding="utf-8")
+        print(f"Report: {report_path}"); return 0 if all(v["status"] == "passed" for v in results.values()) else 1
+    elif args_filter.group == "players":
+        class Args: server_startup_timeout=180; rcon_startup_timeout=30; command_timeout=15; shutdown_timeout=60
+        results = {name: run_player_scenario(name, Args) for name in GROUPS["players"]}
         report_path = ROOT / "build" / "reports" / "dedicated-tags-recipes-safety-acceptance-filtered.json"
         report_path.parent.mkdir(parents=True, exist_ok=True); report_path.write_text(json.dumps({"status": "passed" if all(v["status"] == "passed" for v in results.values()) else "failed", "complete_run": False, "selected_group": args_filter.group, "scenarios": results}, indent=2) + "\n", encoding="utf-8")
         print(f"Report: {report_path}"); return 0 if all(v["status"] == "passed" for v in results.values()) else 1
@@ -141,7 +185,10 @@ def main() -> int:
             acceptance.expect("scan_a", "partialreload scan", r"scan", 30); acceptance.wait_state(r"Last scan:\s*(?!never)", 120)
             structured("B"); acceptance.expect("scan_b", "partialreload scan", r"scan", 30); acceptance.wait_state(r"Changed resources:\s*[1-9]", 120)
             acceptance.expect("prepare", "partialreload prepare tags_recipes", r"preparation started", 30); acceptance.wait_state(r"State:\s*READY", 120)
-            acceptance.expect("arm", f"partialreload debug fault tags_recipes set {fault}", r"fault armed", 30)
+            arm_command = ("partialreload debug fault tags_recipes sequence AFTER_RECIPE_PUBLICATION BEFORE_ROLLBACK_VERIFICATION"
+                            if fault == "BEFORE_ROLLBACK_VERIFICATION"
+                            else f"partialreload debug fault tags_recipes set {fault}")
+            acceptance.expect("arm", arm_command, r"armed", 30)
             acceptance.expect("apply", "partialreload apply prepared", r"queued", 30)
             terminal = acceptance.expect("terminal", "partialreload transaction", r"Status: (FAILED_SAFE|ROLLED_BACK|DEGRADED)", 60)
             expected = "FAILED_SAFE" if fault == "BEFORE_FIRST_TAG_BIND" else ("DEGRADED" if fault == "BEFORE_ROLLBACK_VERIFICATION" else "ROLLED_BACK")
@@ -198,10 +245,25 @@ def main() -> int:
         try: acceptance.restore_properties()
         except Exception as exc: results.setdefault("DEGRADED", {})["properties_error"] = str(exc); results.setdefault("DEGRADED", {})["status"] = "failed"
         transcript.extend(["===== DEGRADED =====", *acceptance.transcript]); structured("A", initial=True)
+    if not filtered:
+        class GroupArgs: server_startup_timeout=180; rcon_startup_timeout=30; command_timeout=15; shutdown_timeout=60
+        lifecycle = {name: run_lifecycle_scenario(name, GroupArgs) for name in GROUPS["tag-lifecycle"]}
+        unsupported = {name: run_unsupported_scenario(name, GroupArgs) for name in GROUPS["unsupported"]}
+        players = {name: run_player_scenario(name, GroupArgs) for name in GROUPS["players"]}
+        recoverable = {name: results.get(name, {"status": "failed"}) for name in GROUPS["recoverable"]}
+        rollback_verification = {name: results.get(name, {"status": "failed"}) for name in GROUPS["rollback_verification"]}
+        degraded = {"AFTER_RECIPE_PUBLICATION+DURING_ROLLBACK": results.get("DEGRADED", {"status": "failed"})}
+        results = {"recoverable": {"status": "passed" if all(v.get("status") == "passed" for v in recoverable.values()) else "failed", "scenarios": recoverable},
+                   "rollback_verification": {"status": "passed" if all(v.get("status") == "passed" for v in rollback_verification.values()) else "failed", "scenarios": rollback_verification},
+                   "degraded": {"status": "passed" if all(v.get("status") == "passed" for v in degraded.values()) else "failed", "scenarios": degraded},
+                   "tag-lifecycle": {"status": "passed" if all(v.get("status") == "passed" for v in lifecycle.values()) else "failed", "scenarios": lifecycle},
+                   "unsupported": {"status": "passed" if all(v.get("status") == "passed" for v in unsupported.values()) else "failed", "scenarios": unsupported},
+                   "players": {"status": "passed" if all(v.get("status") == "passed" for v in players.values()) else "failed", "scenarios": players}}
     REPORT.parent.mkdir(parents=True, exist_ok=True)
-    report_path.write_text(json.dumps({"status": "passed" if all(v.get("status") == "passed" for v in results.values()) else "failed",
-                                      "complete_run": not filtered, "selected_group": args_filter.group,
-                                      "selected_scenario": args_filter.scenario, "scenarios": results}, indent=2) + "\n", encoding="utf-8")
+    complete_ok = all(v.get("status") == "passed" for v in results.values())
+    report_path.write_text(json.dumps({"status": "passed" if complete_ok else "failed",
+                                      "complete_run": not filtered and complete_ok, "selected_group": args_filter.group,
+                                      "selected_scenario": args_filter.scenario, "groups": results}, indent=2) + "\n", encoding="utf-8")
     LOG.write_text("\n".join(transcript) + "\n", encoding="utf-8")
     ok = bool(results) and all(v.get("status") == "passed" for v in results.values())
     print("DEDICATED_TAGS_RECIPES_SAFETY_ACCEPTANCE_PASSED" if ok else "DEDICATED_TAGS_RECIPES_SAFETY_ACCEPTANCE_FAILED")
