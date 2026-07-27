@@ -35,8 +35,8 @@ packet customizado ou código client-side de sincronização foi introduzido.
 - commit transacional conjunto server-only de tags + recipes sem jogadores,
   com bind por registry, publicação completa de recipes, invalidação de
   Ingredient, evento de tags, verificação e rollback em memória; o caminho
-  segue marcado como pending safety hardening enquanto a matriz completa de
-  fault injection, player race e registries vazios não estiver automatizada.
+  safety gate 4E-S aprovado após a matriz completa, GameTests e acceptance
+  dedicada.
 
 ## Não implementado
 
@@ -145,3 +145,10 @@ de LootDataManager, RecipeManager e AdvancementManager.
 O projeto segue Spec-Driven Development. Leia `AGENTS.md`,
 `docs/specs/010-loot-data-prepare.md` e as ADRs antes de alterar
 comportamento.
+
+## Safety gate 4E-S
+
+Encerrado em 2026-07-27: 24 GameTests passaram, a safety acceptance completa
+aprovou os seis grupos e o runner consolidado aprovou as sete suítes com
+`ALL_ACCEPTANCE_PASSED`. A sincronização client-side permanece não
+implementada; a Spec 017 está pronta para implementação futura.

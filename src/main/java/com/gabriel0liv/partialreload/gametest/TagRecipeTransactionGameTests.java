@@ -244,6 +244,166 @@ public final class TagRecipeTransactionGameTests {
         });
     }
 
+    @GameTest(template = "empty", batch = "phase4e-tag-recipe-transaction", timeoutTicks = 1200)
+    public static void beforeRollbackVerificationDegrades(GameTestHelper helper) {
+        runTransactionalScenario(helper, "beforeRollbackVerificationDegrades", fixture -> {
+            fixture.installGenerationA();
+            fixture.prepareGenerationB();
+            fixture.armFaultSequence(TagRecipeFaultPoint.AFTER_RECIPE_PUBLICATION,
+                    TagRecipeFaultPoint.BEFORE_ROLLBACK_VERIFICATION);
+            TagRecipeCommitTransaction transaction = fixture.service()
+                    .requestTagRecipeCommit(fixture.server(), "gametest-before-rollback-verification");
+            fixture.service().processTagRecipeSafePoint(fixture.server());
+            helper.assertTrue(transaction.status() == TagRecipeTransactionStatus.DEGRADED,
+                    "wrong terminal: " + transaction.status());
+            helper.assertTrue(fixture.service().state() == PartialReloadState.DEGRADED, "service not degraded");
+            helper.assertTrue(transaction.restartRequired(), "restart was not required");
+            helper.assertTrue(transaction.failure().contains("TAG_RECIPE_ROLLBACK_FAILED"),
+                    "wrong failure: " + transaction.failure());
+            helper.assertTrue(transaction.tagMutationOccurred() && transaction.recipePublicationOccurred(),
+                    "rollback did not observe prior mutations");
+            helper.assertTrue(transaction.ingredientCommitInvalidations() == 0 && transaction.commitTagEvents() == 0,
+                    "commit counters changed unexpectedly");
+            helper.assertTrue(transaction.ingredientRollbackInvalidations() == 1 && transaction.rollbackTagEvents() == 1,
+                    "rollback counters incorrect");
+            helper.assertTrue(!transaction.verificationPassed(), "verification unexpectedly passed");
+            fixture.assertGenerationA();
+            assertLockout(helper, fixture, transaction);
+            assertEventsInOrder(helper, transaction,
+                    TagRecipeTransactionEventType.FAILURE,
+                    TagRecipeTransactionEventType.ROLLBACK_STARTED,
+                    TagRecipeTransactionEventType.ROLLBACK_RECIPES_RESTORED,
+                    TagRecipeTransactionEventType.ROLLBACK_TAG_REGISTRY_REPLACEMENT_STARTED,
+                    TagRecipeTransactionEventType.ROLLBACK_TAG_RESTORED,
+                    TagRecipeTransactionEventType.ROLLBACK_INGREDIENT_INVALIDATION_STARTED,
+                    TagRecipeTransactionEventType.ROLLBACK_INGREDIENTS_INVALIDATED,
+                    TagRecipeTransactionEventType.ROLLBACK_TAGS_EVENT_DISPATCH_STARTED,
+                    TagRecipeTransactionEventType.ROLLBACK_TAGS_EVENT_DISPATCHED,
+                    TagRecipeTransactionEventType.ROLLBACK_VERIFICATION_STARTED,
+                    TagRecipeTransactionEventType.DEGRADED);
+            assertEventsAbsent(helper, transaction, TagRecipeTransactionEventType.ROLLBACK_VERIFICATION_PASSED);
+        });
+    }
+
+    @GameTest(template = "empty", batch = "phase4e-tag-recipe-transaction", timeoutTicks = 1200)
+    public static void duringRollbackDegrades(GameTestHelper helper) {
+        runTransactionalScenario(helper, "duringRollbackDegrades", fixture -> {
+            fixture.installGenerationA();
+            fixture.prepareGenerationB();
+            fixture.armFaultSequence(TagRecipeFaultPoint.AFTER_RECIPE_PUBLICATION,
+                    TagRecipeFaultPoint.DURING_ROLLBACK);
+            TagRecipeCommitTransaction transaction = fixture.service()
+                    .requestTagRecipeCommit(fixture.server(), "gametest-during-rollback");
+            fixture.service().processTagRecipeSafePoint(fixture.server());
+            helper.assertTrue(transaction.status() == TagRecipeTransactionStatus.DEGRADED,
+                    "wrong terminal: " + transaction.status());
+            helper.assertTrue(fixture.service().state() == PartialReloadState.DEGRADED, "service not degraded");
+            helper.assertTrue(transaction.restartRequired(), "restart was not required");
+            helper.assertTrue(transaction.failure().contains("TAG_RECIPE_ROLLBACK_FAILED")
+                    && transaction.failure().contains("FAULT_INJECTED:DURING_ROLLBACK"),
+                    "wrong failure: " + transaction.failure());
+            helper.assertTrue(transaction.tagMutationOccurred() && transaction.recipePublicationOccurred(),
+                    "prior mutation not recorded");
+            helper.assertTrue(transaction.ingredientCommitInvalidations() == 0
+                    && transaction.commitTagEvents() == 0
+                    && transaction.ingredientRollbackInvalidations() == 0
+                    && transaction.rollbackTagEvents() == 0, "unexpected counters");
+            helper.assertTrue(!transaction.verificationPassed(), "verification unexpectedly passed");
+            fixture.assertGenerationB();
+            assertLockout(helper, fixture, transaction);
+            assertEventsInOrder(helper, transaction,
+                    TagRecipeTransactionEventType.RECIPES_PUBLISHED,
+                    TagRecipeTransactionEventType.FAILURE,
+                    TagRecipeTransactionEventType.DEGRADED);
+            assertEventsAbsent(helper, transaction,
+                    TagRecipeTransactionEventType.ROLLBACK_STARTED,
+                    TagRecipeTransactionEventType.ROLLBACK_RECIPES_RESTORED,
+                    TagRecipeTransactionEventType.ROLLBACK_TAG_RESTORED);
+        });
+    }
+
+    @GameTest(template = "empty", batch = "phase4e-tag-recipe-transaction", timeoutTicks = 1200)
+    public static void tagLifecyclePreservesMissingEmptyAndRemoved(GameTestHelper helper) {
+        runTransactionalScenario(helper, "tagLifecyclePreservesMissingEmptyAndRemoved", fixture -> {
+            fixture.installGenerationA();
+            fixture.prepareLifecycleGenerationB();
+            fixture.assertLifecycleGenerationA();
+            var oldRemovedNamed = fixture.captureRemovedTagNamedSet();
+            fixture.assertItemHolderHasTag(net.minecraft.world.item.Items.STONE, id("removed_tag"), true);
+            TagRecipeCommitTransaction commit = fixture.service()
+                    .requestTagRecipeCommit(fixture.server(), "gametest-tag-lifecycle");
+            fixture.service().processTagRecipeSafePoint(fixture.server());
+            helper.assertTrue(commit.status() == TagRecipeTransactionStatus.SUCCESS, "lifecycle commit failed");
+            helper.assertTrue(commit.verificationPassed(), "lifecycle commit verification failed");
+            fixture.assertLifecycleGenerationB();
+            helper.assertTrue(oldRemovedNamed.size() == 0, "old named set retained members");
+            fixture.assertItemHolderHasTag(net.minecraft.world.item.Items.STONE, id("removed_tag"), false);
+            fixture.assertItemHolderHasTag(net.minecraft.world.item.Items.DIRT, id("new_tag"), true);
+            fixture.assertItemHolderHasTag(net.minecraft.world.item.Items.DIRT, id("empty_tag"), true);
+            TagRecipeCommitTransaction rollback = fixture.service()
+                    .requestTagRecipeRollback("gametest-tag-lifecycle-rollback");
+            fixture.service().processTagRecipeSafePoint(fixture.server());
+            helper.assertTrue(rollback.status() == TagRecipeTransactionStatus.ROLLED_BACK, "lifecycle rollback failed");
+            helper.assertTrue(rollback.verificationPassed(), "lifecycle rollback verification failed");
+            fixture.assertLifecycleGenerationA();
+            helper.assertTrue(oldRemovedNamed.size() == 0, "old named set was repopulated");
+            fixture.assertItemHolderHasTag(net.minecraft.world.item.Items.STONE, id("removed_tag"), true);
+            fixture.assertItemHolderHasTag(net.minecraft.world.item.Items.DIRT, id("new_tag"), false);
+            fixture.assertItemHolderHasTag(net.minecraft.world.item.Items.DIRT, id("empty_tag"), false);
+            fixture.assertRegistryIdentitiesPreserved();
+        });
+    }
+
+    @GameTest(template = "empty", batch = "phase4e-tag-recipe-transaction", timeoutTicks = 1200)
+    public static void unsupportedRegistryFailsSafe(GameTestHelper helper) {
+        runTransactionalScenario(helper, "unsupportedRegistryFailsSafe", fixture -> {
+            fixture.installGenerationA();
+            fixture.prepareUnsupportedGenerationB();
+            TagRecipeCommitTransaction transaction = fixture.service()
+                    .requestTagRecipeCommit(fixture.server(), "gametest-unsupported-registry");
+            fixture.service().processTagRecipeSafePoint(fixture.server());
+            helper.assertTrue(transaction.status() == TagRecipeTransactionStatus.FAILED_SAFE,
+                    "wrong terminal: " + transaction.status());
+            helper.assertTrue(fixture.service().state() == PartialReloadState.FAILED_SAFE, "service not failed safe");
+            helper.assertTrue(transaction.failure().contains("TAG_REGISTRY_COMMIT_UNSUPPORTED"),
+                    "wrong failure: " + transaction.failure());
+            fixture.assertNoMutationCounters(transaction);
+            helper.assertTrue(!transaction.tagMutationOccurred(), "tag mutation occurred");
+            fixture.assertGenerationA();
+            assertEventsInOrder(helper, transaction,
+                    TagRecipeTransactionEventType.SAFE_POINT_REACHED,
+                    TagRecipeTransactionEventType.FAILURE);
+            assertEventsAbsent(helper, transaction,
+                    TagRecipeTransactionEventType.CANDIDATE_BINDINGS_BUILT,
+                    TagRecipeTransactionEventType.TAG_REGISTRY_REPLACEMENT_STARTED,
+                    TagRecipeTransactionEventType.RECIPES_PUBLISHED,
+                    TagRecipeTransactionEventType.ROLLBACK_STARTED);
+        });
+    }
+
+    private static void assertLockout(GameTestHelper helper, TagRecipeGameTestFixture fixture,
+                                      TagRecipeCommitTransaction original) {
+        try {
+            fixture.service().requestTagRecipeCommit(fixture.server(), "gametest-lockout-apply");
+            throw new AssertionError("degraded apply was accepted");
+        } catch (IllegalStateException expected) {
+            helper.assertTrue(expected.getMessage().contains("TAG_RECIPE_TRANSACTION_DEGRADED"),
+                    "wrong apply lockout: " + expected.getMessage());
+        }
+        try {
+            fixture.service().requestTagRecipeRollback("gametest-lockout-rollback");
+            throw new AssertionError("degraded rollback was accepted");
+        } catch (IllegalStateException expected) {
+            helper.assertTrue(expected.getMessage().contains("TAG_RECIPE_TRANSACTION_DEGRADED"),
+                    "wrong rollback lockout: " + expected.getMessage());
+        }
+        helper.assertTrue(fixture.service().tagRecipeTransaction() == original, "degraded transaction replaced");
+    }
+
+    private static ResourceLocation id(String path) {
+        return ResourceLocation.fromNamespaceAndPath("partialreload", "gametest_tx/" + path);
+    }
+
     private static void assertEventsInOrder(GameTestHelper helper, TagRecipeCommitTransaction transaction,
                                             TagRecipeTransactionEventType... expected) {
         List<TagRecipeTransactionEvent> events = transaction.events();

@@ -9,12 +9,12 @@
 | ingredient | tags/recipe A | tags/recipe B | AFTER_INGREDIENT_INVALIDATION | tags+recipes+cache | passed | completa | ROLLED_BACK | dedicated-tags-recipes-safety-acceptance.json | dedicated |
 | evento | tags/recipe A | tags/recipe B | AFTER_TAGS_UPDATED_EVENT | tags+recipes+evento | passed | completa | ROLLED_BACK | dedicated-tags-recipes-safety-acceptance.json | dedicated |
 | rollback impossível | geração A | geração B | DURING_ROLLBACK | parcial | passed | DEGRADED | DEGRADED | dedicated-tags-recipes-safety-acceptance.json + transcript | dedicated |
-| rollback verification fault | geração A | geração B | BEFORE_ROLLBACK_VERIFICATION | restaurada antes da verificação | pending | DEGRADED | FAILURE + DEGRADED | harness atualizado, execução pendente | dedicated |
-| player request | sem player | com player | — | nenhuma | pendente | não aplicável | FAILED_SAFE | race não automatizada | GameTest |
-| player safe point | 0 players | player entre fases | — | nenhuma | pendente | não aplicável | FAILED_SAFE | probe ausente | GameTest |
-| tag ausente | missing | dirt | — | tag nova | pendente | missing | ROLLED_BACK | fixture ausente | dedicated |
-| tag removida | stone | removida | — | tag removida | pendente | stone | ROLLED_BACK | fixture ausente | dedicated |
-| registry não suportado | sem mudança | biome/damage_type | — | nenhuma | pendente | não aplicável | FAILED_SAFE | matriz ausente | unit/dedicated |
+| rollback verification fault | geração A | geração B | BEFORE_ROLLBACK_VERIFICATION | restaurada antes da verificação | passed | DEGRADED | FAILURE + DEGRADED | GameTest + dedicated completa | dedicated/GameTest |
+| player request | sem player | com player | — | nenhuma | passed | não aplicável | FAILED_SAFE | GameTest + grupo players | GameTest/dedicated |
+| player safe point | 0 players | player entre fases | — | nenhuma | passed | não aplicável | FAILED_SAFE | GameTest + grupo players | GameTest/dedicated |
+| tag ausente | missing | dirt | — | tag nova | passed | missing | ROLLED_BACK | GameTest + tag-lifecycle | GameTest/dedicated |
+| tag removida | stone | removida | — | tag removida | passed | stone | ROLLED_BACK | GameTest + tag-lifecycle | GameTest/dedicated |
+| registry não suportado | sem mudança | biome/damage_type | — | nenhuma | passed | não aplicável | FAILED_SAFE | GameTest + unsupported | GameTest/dedicated |
 
 O harness `run-dedicated-tags-recipes-safety-acceptance.py` executou os nove
 faults recoverable e o cenário isolado `DEGRADED` com RCON, incluindo
@@ -56,3 +56,13 @@ Após a correção, o grupo `tag-lifecycle` foi executado novamente e passou; o
 relatório filtrado registra os estados candidatos e restaurados diretamente.
 O primeiro relatório anterior à correção permanece apenas como diagnóstico
 histórico da falha no campo sombreado, não como evidência de aceitação.
+
+## Encerramento 2026-07-27
+
+Rodada autoritativa concluída: 24/24 GameTests globais passaram, incluindo os
+13 cenários do batch `phase4e-tag-recipe-transaction`; o parser registrou
+`coverage_complete=true`, `missing_tests=[]` e `duplicate_markers=[]`.
+`dedicated-tags-recipes-safety-acceptance.json` passou com `complete_run=true`
+e os seis grupos aprovados. O runner consolidado executou as sete suítes,
+validou relatórios, marcadores, portas RCON, properties, fingerprints/resíduos,
+locks e processos, e emitiu `ALL_ACCEPTANCE_PASSED`.

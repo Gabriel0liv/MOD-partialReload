@@ -53,9 +53,9 @@ somente em servidor dedicado sem jogadores conectados. O safe point usa o fim
 do tick da server thread; bindings usam `Registry.bindTags`, recipes usam
 `RecipeManager.replaceRecipes`, `Ingredient.invalidateAll()` é chamado e
 `TagsUpdatedEvent` é emitido. Uma geração conjunta anterior fica retida em
-memória para rollback único. A implementação permanece em endurecimento de
-segurança até que preflight stale, fault injection, player race, registry vazio
-e a regressão dedicada completa tenham cobertura explícita.
+memória para rollback único. O safety gate 4E-S foi aprovado após cobertura de
+preflight stale, fault injection, player race, registries vazios/não suportados
+e regressão dedicada completa.
 
 A Fase 4A prepara recipes vanilla/Forge read-only. A Fase 4B possui apenas
 pesquisa e snapshot/classificação segura de KubeJS até existir um runtime Forge
@@ -98,3 +98,8 @@ encerram a árvore própria com `taskkill /PID <pid> /T`. Nunca encerrar `java.e
 globalmente. Locks stale só podem ser removidos no mundo descartável de userdev
 depois de confirmar que nenhum processo da aceitação está vivo. O runner
 consolidado é `python scripts/run-all-acceptance.py`.
+
+Atualização 2026-07-27: o safety gate server-side da Fase 4E-S foi aceito com
+GameTests completos, safety dedicated completa e runner consolidado aprovado.
+Networking e classes client-side continuam proibidos nesta fase; a Spec 017
+está pronta apenas para uma implementação futura explicitamente autorizada.

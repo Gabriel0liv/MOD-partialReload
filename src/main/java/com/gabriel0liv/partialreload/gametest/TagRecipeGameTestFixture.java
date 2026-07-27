@@ -13,8 +13,12 @@ import com.gabriel0liv.partialreload.joint.PreparedTagsAndRecipes;
 import com.gabriel0liv.partialreload.resource.ResourceSnapshot;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.core.registries.Registries;
+import net.minecraft.core.Holder;
+import net.minecraft.core.HolderSet;
+import net.minecraft.core.Registry;
 import net.minecraft.gametest.framework.GameTestHelper;
 import net.minecraft.resources.ResourceLocation;
+import net.minecraft.resources.ResourceKey;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.tags.TagKey;
 import net.minecraft.world.item.Item;
@@ -116,6 +120,23 @@ final class TagRecipeGameTestFixture implements AutoCloseable {
                 generationB.artifact(), (candidateServer, expected) -> expected == generationB.snapshot());
     }
 
+    void prepareLifecycleGenerationB() {
+        prepareGenerationB();
+    }
+
+    void prepareUnsupportedGenerationB() {
+        if (generationA == null) {
+            throw new IllegalStateException("generation A is not prepared");
+        }
+        Map<ResourceLocation, String> resources = resources(true);
+        resources.put(location("tags/worldgen/biome/gametest_tx/unsupported.json"),
+                "{\"replace\":true,\"values\":[\"minecraft:plains\"]}");
+        generationB = TagRecipeGameTestPreparation.prepare(server, resources, generationA.snapshot());
+        service.installTagRecipeGameTestReadyState(generationA.snapshot(), generationB.snapshot(),
+                generationB.changeSet(), generationB.artifact(),
+                (candidateServer, expected) -> expected == generationB.snapshot());
+    }
+
     void fixedPlayerCount(int count) {
         service.fixedConnectedPlayerProbe(count);
     }
@@ -156,6 +177,52 @@ final class TagRecipeGameTestFixture implements AutoCloseable {
         assertRecipe(2);
     }
 
+    void assertLifecycleGenerationA() {
+        assertGenerationA();
+        assertItemTagMissing(id("new_tag"));
+        assertItemTagEmpty(id("empty_tag"));
+        assertItemTagMembers(id("removed_tag"), ResourceLocation.parse("minecraft:stone"));
+    }
+
+    void assertLifecycleGenerationB() {
+        assertGenerationB();
+        assertItemTagMembers(id("new_tag"), ResourceLocation.parse("minecraft:dirt"));
+        assertItemTagMembers(id("empty_tag"), ResourceLocation.parse("minecraft:dirt"));
+        assertItemTagMissing(id("removed_tag"));
+    }
+
+    HolderSet.Named<Item> captureRemovedTagNamedSet() {
+        return itemRegistry().getTag(TagKey.create(Registries.ITEM, id("removed_tag")))
+                .orElseThrow(() -> new AssertionError("removed tag missing before commit"));
+    }
+
+    void assertItemTagMissing(ResourceLocation tagId) {
+        helper.assertTrue(itemRegistry().getTag(TagKey.create(Registries.ITEM, tagId)).isEmpty(),
+                "tag should be missing: " + tagId);
+    }
+
+    void assertItemTagEmpty(ResourceLocation tagId) {
+        var named = itemRegistry().getTag(TagKey.create(Registries.ITEM, tagId))
+                .orElseThrow(() -> new AssertionError("tag should be present: " + tagId));
+        helper.assertTrue(named.size() == 0, "tag should be empty: " + tagId);
+    }
+
+    void assertItemTagMembers(ResourceLocation tagId, ResourceLocation... expectedMembers) {
+        var named = itemRegistry().getTag(TagKey.create(Registries.ITEM, tagId))
+                .orElseThrow(() -> new AssertionError("tag missing: " + tagId));
+        var expected = java.util.Arrays.stream(expectedMembers).sorted().toList();
+        var observed = named.stream().map(holder -> BuiltInRegistries.ITEM.getKey(holder.value())).sorted().toList();
+        helper.assertTrue(observed.equals(expected), "unexpected members for " + tagId + ": " + observed);
+    }
+
+    void assertItemHolderHasTag(Item item, ResourceLocation tagId, boolean expected) {
+        ResourceKey<Item> itemKey = ResourceKey.create(Registries.ITEM, BuiltInRegistries.ITEM.getKey(item));
+        Holder<Item> holder = itemRegistry().getHolder(itemKey)
+                .orElseThrow(() -> new AssertionError("item holder missing: " + itemKey.location()));
+        helper.assertTrue(holder.is(TagKey.create(Registries.ITEM, tagId)) == expected,
+                "unexpected membership for " + itemKey.location() + " in " + tagId);
+    }
+
     void assertNoMutationCounters(TagRecipeCommitTransaction transaction) {
         helper.assertTrue(transaction.mutatedTagRegistries().isEmpty(), "unexpected mutated registries");
         helper.assertTrue(!transaction.recipePublicationOccurred(), "recipe publication occurred");
@@ -181,6 +248,10 @@ final class TagRecipeGameTestFixture implements AutoCloseable {
         var members = named.stream().map(holder -> BuiltInRegistries.ITEM.getKey(holder.value())).toList();
         helper.assertTrue(members.size() == 1 && Objects.equals(members.get(0), ResourceLocation.parse(expectedMember)),
                 "unexpected members for " + key.location() + ": " + members);
+    }
+
+    private Registry<Item> itemRegistry() {
+        return server.registryAccess().registryOrThrow(Registries.ITEM);
     }
 
     void assertRecipe(int expectedCount) {
@@ -251,6 +322,17 @@ final class TagRecipeGameTestFixture implements AutoCloseable {
         Map<ResourceLocation, String> resources = new LinkedHashMap<>();
         resources.put(location("tags/items/gametest_tx/item_joint.json"),
                 "{\"replace\":true,\"values\":[\"" + member + "\"]}");
+        if (candidate) {
+            resources.put(location("tags/items/gametest_tx/new_tag.json"),
+                    "{\"replace\":true,\"values\":[\"minecraft:dirt\"]}");
+            resources.put(location("tags/items/gametest_tx/empty_tag.json"),
+                    "{\"replace\":true,\"values\":[\"minecraft:dirt\"]}");
+        } else {
+            resources.put(location("tags/items/gametest_tx/empty_tag.json"),
+                    "{\"replace\":true,\"values\":[]}");
+            resources.put(location("tags/items/gametest_tx/removed_tag.json"),
+                    "{\"replace\":true,\"values\":[\"minecraft:stone\"]}");
+        }
         resources.put(location("recipes/gametest_tx/acceptance.json"),
                 "{\"type\":\"minecraft:crafting_shapeless\",\"ingredients\":[{\"tag\":\"partialreload:gametest_tx/item_joint\"}],\"result\":{\"item\":\"minecraft:torch\",\"count\":" + count + "}}");
         return resources;

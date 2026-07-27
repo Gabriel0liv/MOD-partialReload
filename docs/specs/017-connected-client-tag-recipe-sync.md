@@ -76,5 +76,13 @@ Depende de 015 e 016; preserva 009–014; antecede adapters de viewers.
 
 ## Estado da spec
 
-`CLIENT_SYNC_BLOCKED_BY_SERVER_SAFETY_GATE` — nenhum código de networking foi
-introduzido nesta tarefa.
+`CLIENT_SYNC_READY_FOR_IMPLEMENTATION` — nenhum código de networking foi
+introduzido nesta tarefa; a implementação permanece fora do escopo desta
+rodada.
+
+## Pronta para implementação
+
+O safety gate server-side da Fase 4E-S foi promovido em 2026-07-27 após
+GameTests, safety acceptance completa e runner consolidado aprovados. Esta
+spec está pronta para implementação; networking, packets e sincronização
+client-side continuam fora desta rodada.

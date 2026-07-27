@@ -129,5 +129,14 @@ faults recoverable e a sequência `AFTER_RECIPE_PUBLICATION` +
 `DURING_ROLLBACK`, incluindo lockout de `DEGRADED`; esses resultados estão no
 relatório dedicado e no transcript completo. A política continua
 `SERVER_ONLY_NO_PLAYERS`.
-O plano `phase-four-e-s-safety-gate-tasks.md` mantém a matriz pendente e impede
-a promoção do estado ou o início da Fase 4F até todas as linhas passarem.
+O plano `phase-four-e-s-safety-gate-tasks.md` registra a matriz concluída; a
+promoção server-side foi autorizada, enquanto a Fase 4F permanece fora desta
+implementação.
+
+## Evidência de fechamento do safety gate
+
+Em 2026-07-27, a matriz foi aceita no Forge 47.4.10: GameTests 24/24,
+`phase4e-tag-recipe-transaction` completo, safety dedicada completa com seis
+grupos `passed` e runner consolidado com sete suítes e
+`ALL_ACCEPTANCE_PASSED`. A política permanece server-only; nenhuma
+sincronização client-side foi implementada.

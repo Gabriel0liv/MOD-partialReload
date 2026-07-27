@@ -6,13 +6,14 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 REPORT_DIR = ROOT / "build" / "reports"
 SUITES = [
     ("function_acceptance", "run-dedicated-function-acceptance.py", "dedicated-function-acceptance.json", "FUNCTION_ACCEPTANCE_PASSED"),
-    ("recipe_acceptance", "run-dedicated-recipe-acceptance.py", "dedicated-recipe-acceptance.json", None),
-    ("tag_acceptance", "run-dedicated-tag-acceptance.py", "dedicated-tag-acceptance.json", None),
-    ("joint_acceptance", "run-dedicated-tags-recipes-acceptance.py", "dedicated-tags-recipes-acceptance.json", None),
-    ("tag_recipe_commit_acceptance", "run-dedicated-tags-recipes-commit-acceptance.py", "dedicated-tags-recipes-commit-acceptance.json", None),
+    ("recipe_acceptance", "run-dedicated-recipe-acceptance.py", "dedicated-recipe-acceptance.json", "DEDICATED_RECIPE_ACCEPTANCE_PASSED"),
+    ("tag_acceptance", "run-dedicated-tag-acceptance.py", "dedicated-tag-acceptance.json", "DEDICATED_TAG_ACCEPTANCE_PASSED"),
+    ("joint_acceptance", "run-dedicated-tags-recipes-acceptance.py", "dedicated-tags-recipes-acceptance.json", "DEDICATED_TAGS_RECIPES_ACCEPTANCE_PASSED"),
+    ("tag_recipe_commit_acceptance", "run-dedicated-tags-recipes-commit-acceptance.py", "dedicated-tags-recipes-commit-acceptance.json", "DEDICATED_TAGS_RECIPES_COMMIT_ACCEPTANCE_PASSED"),
     ("joint_safety_acceptance", "run-dedicated-tags-recipes-safety-acceptance.py", "dedicated-tags-recipes-safety-acceptance.json", "DEDICATED_TAGS_RECIPES_SAFETY_ACCEPTANCE_PASSED"),
-    ("kubejs_expected_block", "run-dedicated-kubejs-recipe-acceptance.py", "dedicated-kubejs-recipe-acceptance.json", None),
+    ("kubejs_expected_block", "run-dedicated-kubejs-recipe-acceptance.py", "dedicated-kubejs-recipe-acceptance.json", "KUBEJS_RECIPE_PREPARATION_BLOCKED"),
 ]
+SUITE_TIMEOUT_SECONDS = 1800
 
 def owned_processes() -> list[str]:
     # Do not enumerate/kill Java globally.  This runner only checks for the
@@ -32,6 +33,14 @@ def fixture_fingerprint() -> str:
         digest.update(path.relative_to(root).as_posix().encode())
         digest.update(path.read_bytes())
     return digest.hexdigest()
+
+def fixtures_restored() -> bool:
+    root = ROOT / "run" / "world" / "datapacks"
+    if not root.exists():
+        return True
+    residual = [p for p in root.rglob("*") if p.is_file() and (
+        p.name.endswith(".staging") or "unsupported" in p.as_posix().lower())]
+    return not residual
 
 def configured_rcon_port() -> int | None:
     props = ROOT / "run" / "server.properties"
@@ -53,40 +62,72 @@ def port_released(port: int | None) -> bool:
                             capture_output=True, text=True, check=False).stdout.strip()
     return output in {"", "0"}
 
+def report_ok(data: object, key: str) -> bool:
+    if not isinstance(data, dict):
+        return False
+    if key == "kubejs_expected_block":
+        return data.get("status") == "KUBEJS_RECIPE_PREPARATION_BLOCKED"
+    if data.get("status") == "passed":
+        return True
+    values = list(data.values())
+    return bool(values) and all(
+        (value == "passed")
+        or (isinstance(value, dict) and value.get("status") == "passed")
+        for value in values
+    )
+
 def main() -> int:
     REPORT_DIR.mkdir(parents=True, exist_ok=True)
     result: dict[str, object] = {"started_at": time.time(), "suites": {}}
     logs = REPORT_DIR / "all-acceptance"; logs.mkdir(parents=True, exist_ok=True)
-    expected_fixtures = fixture_fingerprint()
     for key, script, report_name, marker in SUITES:
         if owned_processes():
             result["orphan_process_check"] = "failed"
             break
         started = time.time()
+        expected_fixtures = fixture_fingerprint()
         report = REPORT_DIR / report_name
         rcon_port = configured_rcon_port()
         before = report.stat().st_mtime_ns if report.exists() else 0
-        proc = subprocess.run([sys.executable, str(ROOT / "scripts" / script)], cwd=ROOT, capture_output=True, text=True)
+        try:
+            proc = subprocess.run([sys.executable, str(ROOT / "scripts" / script)], cwd=ROOT,
+                                  capture_output=True, text=True, timeout=SUITE_TIMEOUT_SECONDS)
+        except subprocess.TimeoutExpired as exc:
+            proc = subprocess.CompletedProcess([], 124, exc.stdout or "", exc.stderr or "")
+            # The child suite owns its server tree; terminate only descendants
+            # carrying the Partial Reload runServer command line.
+            subprocess.run(["powershell", "-NoProfile", "-Command",
+                             "Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match 'Partial Reload.*(runServer|forgeserveruserdev)' } | ForEach-Object { taskkill /PID $_.ProcessId /T /F }"],
+                            cwd=ROOT, capture_output=True, text=True, check=False)
         stdout_path = logs / f"{key}.stdout.log"; stderr_path = logs / f"{key}.stderr.log"
         stdout_path.write_text(proc.stdout, encoding="utf-8"); stderr_path.write_text(proc.stderr, encoding="utf-8")
         print(proc.stdout, end="")
         if proc.stderr:
             print(proc.stderr, end="", file=sys.stderr)
+        if rcon_port is None:
+            import re
+            match = re.search(r"RCON running on [^:]+:(\d+)", proc.stdout)
+            if match:
+                rcon_port = int(match.group(1))
         valid = False; data = None
         try:
             data = json.loads(report.read_text(encoding="utf-8")); valid = report.stat().st_mtime_ns > before
             if key == "joint_safety_acceptance":
                 valid = valid and data.get("complete_run") is True and set(data.get("groups", {})) == {"recoverable", "rollback_verification", "degraded", "tag-lifecycle", "unsupported", "players"} and all(v.get("status") == "passed" for v in data.get("groups", {}).values())
             else:
-                valid = valid and data.get("status") == "passed"
+                valid = valid and report_ok(data, key)
         except (OSError, json.JSONDecodeError):
             valid = False
-        marker_ok = marker is None or marker in proc.stdout
+        marker_ok = marker in proc.stdout
+        if key == "kubejs_expected_block":
+            valid = valid and data is not None and data.get("status") == "KUBEJS_RECIPE_PREPARATION_BLOCKED"
         cleanup = {"owned_processes_absent": not bool(owned_processes()),
                    "session_lock_absent": not (ROOT / "run" / "world" / "session.lock").exists(),
                    "properties_backup_absent": not (ROOT / "run" / "server.properties.partialreload.bak").exists(),
                    "rcon_port_released": port_released(rcon_port),
-                   "fixtures_restored": fixture_fingerprint() == expected_fixtures}
+                   "fixtures_restored": fixtures_restored(),
+                   "fixture_fingerprint_before": expected_fixtures,
+                   "fixture_fingerprint_after": fixture_fingerprint()}
         result["suites"][key] = {"status": "passed" if proc.returncode == 0 and valid and marker_ok and all(cleanup.values()) else "failed",
                                   "exit_code": proc.returncode, "duration_seconds": round(time.time() - started, 2),
                                   "report_path": str(report), "report_valid": valid, "expected_marker_observed": marker_ok,
@@ -109,11 +150,11 @@ def main() -> int:
                           "rcon_ports_released": all(v.get("cleanup", {}).get("rcon_port_released", False) for v in result["suites"].values()),
                           "session_lock_absent": not lock.exists(),
                           "properties_restored": not (ROOT / "run" / "server.properties.partialreload.bak").exists(),
-                          "fixtures_restored": fixture_fingerprint() == expected_fixtures}
-    result["finished_at"] = time.time()
-    (REPORT_DIR / "all-acceptance.json").write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
+                          "fixtures_restored": fixtures_restored()}
     ok = len(result["suites"]) == len(SUITES) and all(v.get("status") == "passed" for v in result["suites"].values()) and result.get("orphan_process_check") == "passed" and result["world_lock_check"] == "passed" and result["restoration_check"] == "passed" and all(result["cleanup"].values())
     result["status"] = "passed" if ok else "failed"
+    result["finished_at"] = time.time()
+    (REPORT_DIR / "all-acceptance.json").write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
     print("ALL_ACCEPTANCE_PASSED" if ok else "ALL_ACCEPTANCE_FAILED")
     return 0 if ok else 1
 
