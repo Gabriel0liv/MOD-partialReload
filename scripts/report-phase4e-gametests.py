@@ -17,7 +17,14 @@ BATCH = "phase4e-tag-recipe-transaction"
 # The task's risk matrix requires ten transacted scenarios in addition to the
 # three existing smoke tests.  This is a coverage floor, not a global test
 # count requirement.
-MIN_REQUIRED_BATCH_TESTS = 10
+REQUIRED_TRANSACTIONAL_TESTS = {
+    "successfulCommitPublishesGenerationB", "manualRollbackRestoresGenerationA",
+    "playerPresentAtRequestIsRejected", "playerRaceAtSafePointFailsSafe",
+    "beforeFirstTagBindFailsSafe", "afterRecipePublicationRollsBack",
+    "beforeRollbackVerificationDegrades", "duringRollbackDegrades",
+    "tagLifecyclePreservesMissingEmptyAndRemoved", "unsupportedRegistryFailsSafe",
+}
+REQUIRED_SMOKE_TESTS = {"forgeWrapperIsRecognized", "registryIdentityIsStable", "defaultPlayerProbeUsesRealServerList"}
 
 
 def parse(log: str) -> dict[str, object]:
@@ -28,14 +35,26 @@ def parse(log: str) -> dict[str, object]:
     batch_total = sum(int(count) for name, count in batch_runs if name.startswith(BATCH))
     failed = int(failed_match.group(1)) if failed_match else (0 if totals and "failed" not in log.lower() else None)
     global_total = int(totals.group(1)) if totals else None
-    complete = bool(totals and batch_seen and failed == 0 and batch_total >= MIN_REQUIRED_BATCH_TESTS)
+    markers = re.findall(r"PHASE4E_GAMETEST_PASSED:([A-Za-z0-9_]+)", log)
+    counts = {name: markers.count(name) for name in set(markers)}
+    required = REQUIRED_TRANSACTIONAL_TESTS | REQUIRED_SMOKE_TESTS
+    missing = sorted(required - set(markers))
+    duplicates = sorted(name for name, count in counts.items() if count > 1)
+    unexpected = sorted(set(markers) - required)
+    complete = bool(totals and batch_seen and failed == 0 and not missing and not duplicates)
     return {
         "status": "passed" if complete else "failed",
         "batch": BATCH,
         "global_total": global_total,
         "batch_total": batch_total,
-        "passed": batch_total if complete else 0,
-        "failed": failed,
+        "global_failed": failed,
+        "observed_passed": len(set(markers)),
+        "coverage_complete": not missing and not duplicates,
+        "required_tests": sorted(required),
+        "missing_tests": missing,
+        "duplicate_markers": duplicates,
+        "unexpected_markers": unexpected,
+        "observed_tests": markers,
         "tests": [{"batch": name, "count": int(count)} for name, count in batch_runs if name.startswith(BATCH)],
     }
 

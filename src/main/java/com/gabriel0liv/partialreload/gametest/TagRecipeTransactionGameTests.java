@@ -25,6 +25,7 @@ public final class TagRecipeTransactionGameTests {
         helper.assertTrue(compatibility.compatible(), "item registry bridge must be compatible");
         helper.assertTrue(compatibility.kind() == MappedRegistryTagBridge.Kind.FORGE_NAMESPACED_WRAPPER,
                 "item registry must use Forge NamespacedWrapper");
+        PartialReloadMod.LOGGER.info("PHASE4E_GAMETEST_PASSED:forgeWrapperIsRecognized");
         helper.succeed();
     }
 
@@ -35,6 +36,7 @@ public final class TagRecipeTransactionGameTests {
         var before = System.identityHashCode(server.registryAccess().registryOrThrow(key));
         var after = System.identityHashCode(server.registryAccess().registryOrThrow(key));
         helper.assertTrue(before == after, "registry identity changed");
+        PartialReloadMod.LOGGER.info("PHASE4E_GAMETEST_PASSED:registryIdentityIsStable");
         helper.succeed();
     }
 
@@ -43,6 +45,7 @@ public final class TagRecipeTransactionGameTests {
         var server = helper.getLevel().getServer();
         helper.assertTrue(ConnectedPlayerProbe.DEFAULT.playerCount(server) == server.getPlayerList().getPlayerCount(),
                 "default probe did not read the real player list");
+        PartialReloadMod.LOGGER.info("PHASE4E_GAMETEST_PASSED:defaultPlayerProbeUsesRealServerList");
         helper.succeed();
     }
 }
