@@ -345,6 +345,15 @@ public final class PartialReloadService {
         return preparedArtifact instanceof PreparedTagsAndRecipes joint ? joint : null;
     }
 
+    public synchronized PartialReloadState state() {
+        return stateMachine.state();
+    }
+
+    public synchronized boolean tagRecipeSafePointHeldForGameTest() {
+        requireGameTestAccess();
+        return tagRecipeSafePointHeld;
+    }
+
     public synchronized boolean hasTagChanges() {
         return lastChangeSet.changedResources().stream().anyMatch(change -> change.category() == ReloadCategory.TAGS);
     }
@@ -583,7 +592,7 @@ public final class PartialReloadService {
             catch(RuntimeException rollback){
                 lastError = "TAG_RECIPE_ROLLBACK_FAILED: " + (rollback.getMessage() == null ? rollback.getClass().getSimpleName() : rollback.getMessage());
                 tx.failure(lastError);
-                tx.event(com.gabriel0liv.partialreload.joint.TagRecipeTransactionEventType.DEGRADED, TagRecipeTransactionStatus.DEGRADED, lastError); tx.status(TagRecipeTransactionStatus.DEGRADED); stateMachine.transitionTo(PartialReloadState.DEGRADED);
+                tx.event(com.gabriel0liv.partialreload.joint.TagRecipeTransactionEventType.DEGRADED, TagRecipeTransactionStatus.DEGRADED, lastError); tx.restartRequired(true); tx.status(TagRecipeTransactionStatus.DEGRADED); stateMachine.transitionTo(PartialReloadState.DEGRADED);
             }
         }
     }
