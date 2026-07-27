@@ -144,6 +144,27 @@ public final class PartialReloadService {
         stateMachine.forceStateForGameTest(snapshot.state());
     }
 
+    public synchronized ActiveTagRecipeGeneration captureTagRecipeGenerationForGameTest(MinecraftServer server, PreparedTagsAndRecipes candidate) {
+        requireGameTestAccess();
+        Set<ResourceKey<? extends Registry<?>>> scope = new LinkedHashSet<>();
+        for (String path : candidate.preparedTags().registries().keySet()) {
+            String canonical = canonicalRegistry(path);
+            if (canonical != null) scope.add(registryKey(canonical));
+        }
+        return captureTagRecipeGeneration(server, scope, candidate.preparedTags());
+    }
+
+    public synchronized void restoreTagRecipeGenerationForGameTest(MinecraftServer server, ActiveTagRecipeGeneration generation) {
+        requireGameTestAccess();
+        if (generation == null) throw new IllegalArgumentException("generation");
+        stateMachine.forceStateForGameTest(PartialReloadState.COMMITTING);
+        TagRecipeCommitTransaction tx = new TagRecipeCommitTransaction(UUID.randomUUID(), null, Instant.now(), "gametest-restore");
+        tx.previousGeneration(generation);
+        tx.registriesToMutate(generation.tags().registries().keySet());
+        generation.tags().registries().keySet().forEach(tx::tagRegistryMutated);
+        restoreTagRecipeGeneration(server, generation, tx);
+    }
+
     @Nullable
     private ResourceSnapshot activeReference;
     @Nullable
