@@ -15,17 +15,40 @@ confirmação de rollback.
 Definir handshake versionado, capabilities, pre-encoding, digests, ACK,
 quiescência, recipe-book sync e rollback compensatório.
 
-## 4. Não objetivos
+## 4. Fases de implementação
+
+### 4F-A — foundation e handshake (escopo atual)
+
+Canal opcional versionado, capabilities mínimas (`HANDSHAKE_V1`), handshake
+challenge-response, registry server-authoritative de sessões, timeout,
+logout cleanup e codecs defensivos. Não publica tags ou recipes e não integra
+com o commit da Spec 016.
+
+### 4F-B — pré-codificação e quiescência
+
+Fase futura para preparar payloads e definir quiescência de menus.
+
+### 4F-C — publicação cliente e ACK
+
+Fase futura para publicação de tags/recipes e ACK de geração.
+
+### 4F-D — rollback compensatório e acceptance multi-client
+
+Fase futura para falhas distribuídas, rollback e clientes reais.
+
+Somente 4F-A está autorizada nesta rodada.
+
+## 5. Não objetivos
 
 Não inclui KubeJS, viewers não testados, loot, resource reload, texturas,
 Mixins amplos ou suporte sem cliente compatível.
 
-## 5. Terminologia
+## 6. Terminologia
 
 `generationId`, `ClientCapabilities`, `ClientDigest`, `ClientSyncTransaction`,
 `quiescence` e `compensating rollback`.
 
-## 6. Requisitos funcionais
+## 7. Requisitos funcionais
 
 1. Cliente compatível deve completar handshake antes da mutação.
 2. Packets candidatos devem ser pré-codificados.
@@ -33,56 +56,57 @@ Mixins amplos ou suporte sem cliente compatível.
 4. Cada cliente deve enviar ACK com transaction/generation/digests.
 5. Falha de ACK deve iniciar rollback compensatório ou desconectar o cliente.
 
-## 7. Requisitos não funcionais
+## 8. Requisitos não funcionais
 
 Código client-only deve ser side-safe; nenhum bloqueio da server thread; limite
 de payload; protocolo versionado; sem `/reload`.
 
-## 8. Invariantes
+## 9. Invariantes
 
 Nenhum cliente conectado pode permanecer em geração desconhecida; ACK antigo,
 duplicado ou de outro jogador nunca conclui transação; server-only continua
 funcionando quando não há jogadores.
 
-## 9. Modelo de erros
+## 10. Modelo de erros
 
-`TAG_RECIPE_CLIENT_CAPABILITY_MISSING`, `TAG_RECIPE_CLIENT_ACK_INVALID`,
-`TAG_RECIPE_CLIENT_DIGEST_MISMATCH`, `TAG_RECIPE_CLIENT_READY_TIMEOUT`,
+`TAG_RECIPE_CLIENT_PROTOCOL_MISMATCH`, `TAG_RECIPE_CLIENT_HANDSHAKE_INVALID`,
+`TAG_RECIPE_CLIENT_CAPABILITY_MISSING`, `TAG_RECIPE_CLIENT_READY_TIMEOUT`,
+`TAG_RECIPE_CLIENT_ACK_INVALID`, `TAG_RECIPE_CLIENT_DIGEST_MISMATCH`,
 `TAG_RECIPE_CLIENT_ROLLBACK_SYNC_FAILED`.
 
-## 10. Riscos
+## 11. Riscos
 
 Serializers ausentes no cliente, recipe viewers, menus abertos, desconexões e
 efeitos externos de listeners podem impedir atomicidade distribuída.
 
-## 11. Critérios de aceitação
+## 12. Critérios de aceitação
 
 Somente após o gate server-side da Fase 4E, cliente Forge real deve observar
 B, recipe book e menus sem relog, confirmar ACK e observar A após rollback.
 
-## 12. Cenários de teste
+## 13. Cenários de teste
 
 Handshake incompatível, ACK válido/inválido, timeout, digest mismatch,
 join/disconnect race, menu aberto, recipe removida, rollback e dois clientes.
 
-## 13. Decisões pendentes
+## 14. Decisões pendentes
 
 Implementação permanece bloqueada até fault injection, player race, registry
 vazio, registries não suportados e `DEGRADED` terem aceitação dedicada real.
 
-## 14. Relação com outras specs
+## 15. Relação com outras specs
 
 Depende de 015 e 016; preserva 009–014; antecede adapters de viewers.
 
 ## Estado da spec
 
-`CLIENT_SYNC_READY_FOR_IMPLEMENTATION` — nenhum código de networking foi
-introduzido nesta tarefa; a implementação permanece fora do escopo desta
-rodada.
+`CLIENT_SYNC_PROTOCOL_FOUNDATION_IMPLEMENTED_PENDING_REAL_CLIENT_HANDSHAKE_ACCEPTANCE`
+— 4F-A foi implementada com canal opcional, handshake e sessões; payloads,
+publicação e ACK transacional permanecem fora do escopo.
 
 ## Pronta para implementação
 
 O safety gate server-side da Fase 4E-S foi promovido em 2026-07-27 após
-GameTests, safety acceptance completa e runner consolidado aprovados. Esta
-spec está pronta para implementação; networking, packets e sincronização
-client-side continuam fora desta rodada.
+GameTests, safety acceptance completa e runner consolidado aprovados. A
+fundação 4F-A foi validada por testes de codecs, sessões e boot dedicated;
+4F-B/C/D continuam bloqueadas até acceptance real multi-client.

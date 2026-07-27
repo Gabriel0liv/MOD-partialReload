@@ -10,6 +10,8 @@ import com.gabriel0liv.partialreload.resource.ResourceScanner;
 import com.gabriel0liv.partialreload.function.VanillaFunctionsProvider;
 import com.gabriel0liv.partialreload.loot.VanillaLootDataProvider;
 import com.gabriel0liv.partialreload.joint.TagRecipeFaultInjection;
+import com.gabriel0liv.partialreload.network.PartialReloadNetwork;
+import com.gabriel0liv.partialreload.network.server.ClientHandshakeServer;
 import com.mojang.logging.LogUtils;
 import net.minecraftforge.common.MinecraftForge;
 import net.minecraftforge.event.RegisterCommandsEvent;
@@ -31,9 +33,14 @@ public final class PartialReloadMod {
     public static final Logger LOGGER = LogUtils.getLogger();
 
     private final PartialReloadService service;
+    private static ClientHandshakeServer handshakeServer;
 
     public PartialReloadMod(FMLJavaModLoadingContext context) {
         TagRecipeFaultInjection.clear();
+        PartialReloadNetwork.register();
+        LOGGER.info("CLIENT_HANDSHAKE_FOUNDATION_CHANNEL_REGISTERED:{}",
+                com.gabriel0liv.partialreload.network.protocol.ClientSyncProtocol.CHANNEL_ID);
+        handshakeServer = new ClientHandshakeServer();
         context.registerConfig(ModConfig.Type.COMMON, PartialReloadConfig.SPEC);
 
         Clock clock = Clock.systemUTC();
@@ -55,11 +62,16 @@ public final class PartialReloadMod {
 
         MinecraftForge.EVENT_BUS.addListener(this::registerCommands);
         MinecraftForge.EVENT_BUS.addListener(this::serverStopping);
+        MinecraftForge.EVENT_BUS.addListener(handshakeServer::onPlayerLogin);
+        MinecraftForge.EVENT_BUS.addListener(handshakeServer::onPlayerLogout);
         MinecraftForge.EVENT_BUS.addListener(EventPriority.LOWEST, this::serverTick);
     }
 
     private void serverStopping(ServerStoppingEvent event) {
         TagRecipeFaultInjection.clear();
+        if (handshakeServer != null) {
+            handshakeServer.clear();
+        }
     }
 
     private void registerCommands(RegisterCommandsEvent event) {
@@ -70,7 +82,14 @@ public final class PartialReloadMod {
         if (event.phase == TickEvent.Phase.END) {
             service.processFunctionSafePoint(event.getServer());
             service.processTagRecipeSafePoint(event.getServer());
+            if (handshakeServer != null) {
+                handshakeServer.tick(event.getServer().getTickCount());
+            }
         }
+    }
+
+    public static ClientHandshakeServer networkServer() {
+        return handshakeServer;
     }
 
     public PartialReloadService service() {

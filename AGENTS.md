@@ -5,7 +5,7 @@ Este repositório usa Spec-Driven Development (SDD). Leia `docs/specs/` e os ADR
 ## Limites permanentes
 
 - Minecraft 1.20.1, Forge 47.4.10, Java 17 e mappings oficiais.
-- O mod é server-side only: não referencie classes cliente em código comum e não registre conteúdo de gameplay.
+- O núcleo é server-authoritative e o protocolo comum pode existir em ambos os lados; um módulo client-only opcional permanece isolado. O servidor funciona sem o mod no cliente, clientes sem canal compatível entram normalmente, e classes `net.minecraft.client` nunca podem ser carregadas no dedicated server.
 - Nunca implemente partial reload chamando `MinecraftServer.reloadResources`, executando `/reload`, ou disparando um listener isolado sem contrato comprovado.
 - Java, JARs, Mixins, serializers, tipos registrados por código, registries estáticos, `startup_scripts`, worldgen arbitrário, dimensões e biomas são `RESTART_REQUIRED` até prova e spec em contrário.
 - Categoria pública, provider, recurso e transação são níveis distintos.
@@ -42,11 +42,11 @@ A fase 3B continua somente preparação conjunta e passiva de predicates, item
 modifiers e loot tables; `VanillaLootDataProvider` nunca publica no
 `LootDataManager`. GLM permanece separado conforme ADR-007.
 
-A Fase 4F está especificada, mas bloqueada pelo gate de segurança da Fase 4E:
-clientes conectados continuam recusados até existirem fault injection crítica,
-player race, registry vazio, registries não suportados, `DEGRADED` e GameTests
-dedicados correspondentes. Não adicionar networking ou classes client-side antes
-desse gate.
+A Fase 4F-A implementa somente a fundação opcional de protocolo e handshake;
+clientes sem canal compatível entram normalmente. Operações da Spec 016
+continuam recusando qualquer jogador conectado. As fases 4F-B/C/D permanecem
+fora do escopo: nenhum payload, recipe-book, ACK transacional, quiescência ou
+rollback compensatório é permitido nesta fase.
 
 A Fase 4E implementa o caminho server-only de commit conjunto de tags + recipes
 somente em servidor dedicado sem jogadores conectados. O safe point usa o fim
@@ -101,5 +101,5 @@ consolidado é `python scripts/run-all-acceptance.py`.
 
 Atualização 2026-07-27: o safety gate server-side da Fase 4E-S foi aceito com
 GameTests completos, safety dedicated completa e runner consolidado aprovado.
-Networking e classes client-side continuam proibidos nesta fase; a Spec 017
-está pronta apenas para uma implementação futura explicitamente autorizada.
+A fundação opcional 4F-A de protocolo/handshake foi implementada sem payload
+de tags/recipes; 4F-B/C/D permanecem fora do escopo até acceptance real.
