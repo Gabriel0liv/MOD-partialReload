@@ -1,5 +1,7 @@
 package com.gabriel0liv.partialreload.core;
 
+import net.minecraftforge.fml.loading.FMLEnvironment;
+
 import java.util.EnumMap;
 import java.util.EnumSet;
 import java.util.Map;
@@ -18,6 +20,11 @@ public final class PartialReloadStateMachine {
             throw new InvalidStateTransitionException(state, next);
         }
         state = next;
+    }
+
+    synchronized void forceStateForGameTest(PartialReloadState next) {
+        if (FMLEnvironment.production) throw new IllegalStateException("TAG_RECIPE_GAMETEST_ACCESS_NOT_AVAILABLE_IN_PRODUCTION");
+        state = java.util.Objects.requireNonNull(next, "next");
     }
 
     private static Map<PartialReloadState, Set<PartialReloadState>> allowedTransitions() {

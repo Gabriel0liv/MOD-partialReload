@@ -73,6 +73,7 @@ import net.minecraft.world.item.crafting.Ingredient;
 import net.minecraft.world.item.crafting.Recipe;
 import net.minecraft.world.item.crafting.RecipeManager;
 import net.minecraftforge.common.MinecraftForge;
+import net.minecraftforge.fml.loading.FMLEnvironment;
 import net.minecraftforge.event.TagsUpdatedEvent;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
@@ -89,6 +90,7 @@ public final class PartialReloadService {
     private final PartialReloadStateMachine stateMachine = new PartialReloadStateMachine();
     private volatile ConnectedPlayerProbe connectedPlayerProbe = ConnectedPlayerProbe.DEFAULT;
     private volatile boolean tagRecipeSafePointHeld;
+    private volatile TagRecipeCurrentResourceProbe currentResourceProbe = this::currentResourcesMatchReal;
 
     public void connectedPlayerProbe(ConnectedPlayerProbe probe) {
         connectedPlayerProbe = Objects.requireNonNull(probe, "probe");
@@ -106,6 +108,41 @@ public final class PartialReloadService {
 
     public void holdTagRecipeSafePoint() { tagRecipeSafePointHeld = true; }
     public void releaseTagRecipeSafePoint() { tagRecipeSafePointHeld = false; }
+
+    private static void requireGameTestAccess() {
+        if (FMLEnvironment.production) throw new IllegalStateException("TAG_RECIPE_GAMETEST_ACCESS_NOT_AVAILABLE_IN_PRODUCTION");
+    }
+
+    public synchronized TagRecipeGameTestState captureTagRecipeGameTestState() {
+        requireGameTestAccess();
+        return new TagRecipeGameTestState(activeReference, latestScan, lastChangeSet, lastPlan, lastError,
+                preparedArtifact, tagRecipeTransaction, retainedTagRecipeGeneration, activeTagRecipeGeneration,
+                stateMachine.state(), connectedPlayerProbe, tagRecipeSafePointHeld, currentResourceProbe);
+    }
+
+    public synchronized void installTagRecipeGameTestReadyState(ResourceSnapshot activeSnapshot, ResourceSnapshot candidateSnapshot,
+                                                                  ChangeSet changeSet, PreparedTagsAndRecipes artifact,
+                                                                  TagRecipeCurrentResourceProbe resourceProbe) {
+        requireGameTestAccess();
+        if (artifact == null || artifact.sourceSnapshot() != candidateSnapshot || !artifact.isApplicable())
+            throw new IllegalArgumentException("TAG_RECIPE_GAMETEST_ARTIFACT_INVALID");
+        activeReference = activeSnapshot; latestScan = candidateSnapshot; lastChangeSet = changeSet;
+        lastPlan = null; lastError = null; preparedArtifact = artifact; tagRecipeTransaction = null;
+        retainedTagRecipeGeneration = null; activeTagRecipeGeneration = null;
+        connectedPlayerProbe = ConnectedPlayerProbe.DEFAULT; tagRecipeSafePointHeld = false;
+        currentResourceProbe = Objects.requireNonNull(resourceProbe, "resourceProbe");
+        stateMachine.forceStateForGameTest(PartialReloadState.READY);
+    }
+
+    public synchronized void restoreTagRecipeGameTestState(TagRecipeGameTestState snapshot) {
+        requireGameTestAccess();
+        activeReference = snapshot.activeReference(); latestScan = snapshot.latestScan(); lastChangeSet = snapshot.lastChangeSet();
+        lastPlan = snapshot.lastPlan(); lastError = snapshot.lastError(); preparedArtifact = snapshot.preparedArtifact();
+        tagRecipeTransaction = snapshot.tagRecipeTransaction(); retainedTagRecipeGeneration = snapshot.retainedTagRecipeGeneration();
+        activeTagRecipeGeneration = snapshot.activeTagRecipeGeneration(); connectedPlayerProbe = snapshot.connectedPlayerProbe();
+        tagRecipeSafePointHeld = snapshot.safePointHeld(); currentResourceProbe = snapshot.currentResourceProbe();
+        stateMachine.forceStateForGameTest(snapshot.state());
+    }
 
     @Nullable
     private ResourceSnapshot activeReference;
@@ -552,11 +589,11 @@ public final class PartialReloadService {
         if (System.identityHashCode(server.getRecipeManager())!=tx.recipeManagerIdentity() || System.identityHashCode(server.registryAccess())!=tx.registryAccessIdentity()) throw new IllegalStateException("TAG_RECIPE_COMMIT_STATE_CHANGED");
         TagRecipeCommitCompatibility compatibility=TagRecipeCommitCompatibility.inspect(server);
         if (!compatibility.compatible() || !compatibility.fingerprint().equals(tx.compatibilityFingerprint())) throw new IllegalStateException("TAG_RECIPE_COMMIT_NOT_COMPATIBLE");
-        if (!currentResourcesMatch(server, artifact.sourceSnapshot())) throw new IllegalStateException("TAG_RECIPE_COMMIT_SNAPSHOT_STALE");
+            if (!currentResourceProbe.matches(server, artifact.sourceSnapshot())) throw new IllegalStateException("TAG_RECIPE_COMMIT_SNAPSHOT_STALE");
         deriveRegistriesToMutate(artifact); // validates unsupported changes before mutation
     }
 
-    private boolean currentResourcesMatch(MinecraftServer server, ResourceSnapshot expected) {
+    private boolean currentResourcesMatchReal(MinecraftServer server, ResourceSnapshot expected) {
         try {
             ResourceSnapshot current=new ResourceScanner(Clock.systemUTC()).scan(new ScanContext(server.getResourceManager(), PartialReloadConfig.maxScannedResources(), java.time.Duration.ofSeconds(PartialReloadConfig.scanTimeoutSeconds()), true));
             for (var entry:expected.resources().entrySet()) if ((entry.getValue().category()==ReloadCategory.TAGS || entry.getValue().category()==ReloadCategory.RECIPES)) { var now=current.resources().get(entry.getKey()); if(now==null || !now.fingerprint().hash().equals(entry.getValue().fingerprint().hash()) || !now.sourcePack().equals(entry.getValue().sourcePack())) return false; }
