@@ -19,30 +19,40 @@
 O harness `run-dedicated-tags-recipes-safety-acceptance.py` executou os nove
 faults recoverable e o cenário isolado `DEGRADED` com RCON, incluindo
 restauração de properties e shutdown limpo. Permanecem sem evidência nesta
-rodada os cenários de player race, lifecycle de tags ausente/removida,
-registries não suportados e GameTests específicos. A promoção
+rodada os cenários de player race e GameTests específicos. A promoção
 para `JOINT_TAG_RECIPE_TRANSACTIONAL_COMMIT_IMPLEMENTED_SERVER_ONLY` é proibida
 até cada linha possuir evidência direta.
 
 Atualização posterior: `ActiveRecipeSnapshot` passou a participar da
 verificação estrutural de rollback e o índice de recipes usa
 `RecipeManager.getAllRecipesFor(RecipeType)`. Os eventos de tags/recipes usam
-tipos explícitos nos call sites de produção. Os cenários de player, lifecycle
-de tags ausente/vazia/removida, registries não suportados e GameTests dedicados
-continuam pendentes e não foram marcados como aceitos.
+tipos explícitos nos call sites de produção. Os cenários de player e os
+GameTests dedicados continuam pendentes e não foram marcados como aceitos.
 
 Nesta rodada, a verificação por tipo passou a consultar diretamente
 `RecipeManager.getAllRecipesFor`, foi introduzido `TagSnapshotUniverse` para
 capturar IDs A ∪ B, e foi adicionada a matriz unitária de registries não
-suportados. Os grupos dedicados de lifecycle de tags, registries não
-suportados e os GameTests end-to-end continuam bloqueados até execução real;
-nenhum deles é marcado como passed por inferência.
+suportados. O grupo dedicado `tag-lifecycle` passou com observação direta de
+`MISSING→RESOLVED→MISSING`, `EMPTY→RESOLVED→EMPTY` e
+`RESOLVED→MISSING→RESOLVED`. O grupo `unsupported` passou para biome ADD,
+damage_type MODIFY e damage_type REMOVE, cada um bloqueado no safe point com
+`TAG_REGISTRY_COMMIT_UNSUPPORTED` e sem mutação. Player race e GameTests
+end-to-end continuam pendentes; nenhum resultado é inferido.
 
-Foi criado `MappedRegistryTagBridge`, apoiado pelo campo `MappedRegistry.tags`
+Foi criado `MappedRegistryTagBridge` com dois caminhos explícitos. A inspeção do
+Forge 47.4.10 confirmou que `NamespacedWrapper` estende `MappedRegistry`, mas
+declara um campo `tags` próprio; `getTags`, `getTag`, `getOrCreateTag`,
+`bindTags` e `resetTags` leem esse campo sombreado. Portanto
+`MappedRegistry.tags != NamespacedWrapper.tags` para items/blocks Forge.
+O bridge v2 acessa `NamespacedWrapper.tags` no caminho Forge e
+`MappedRegistry.tags` somente no caminho vanilla, instala um mapa-semente exato
+antes de chamar `bindTags`, esvazia referências `HolderSet.Named` removidas e
+verifica o lookup público. O AT correspondente foi processado e o JAR contém
+`META-INF/accesstransformer.cfg`.
 exposto no Access Transformer. O bridge limpa referências `HolderSet.Named`
 omitidas, remove as chaves do índice e usa o mesmo caminho para commit e
 rollback. A validação final continua no serviço, incluindo membros e estados.
-As execuções dedicadas posteriores ao bridge ainda falharam antes da
-verificação final (`TAG_REGISTRY_EXACT_REPLACEMENT_UNSUPPORTED` na primeira
-versão do bridge); por isso `MISSING`/remoção não foram marcados como aceitos.
-Nenhum resultado foi inferido.
+Após a correção, o grupo `tag-lifecycle` foi executado novamente e passou; o
+relatório filtrado registra os estados candidatos e restaurados diretamente.
+O primeiro relatório anterior à correção permanece apenas como diagnóstico
+histórico da falha no campo sombreado, não como evidência de aceitação.

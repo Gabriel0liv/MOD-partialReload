@@ -80,12 +80,24 @@ def run_unsupported_scenario(name: str, Args) -> dict:
         acceptance.configure_rcon(); acceptance.start(); acceptance.expect("status", "partialreload status", r"TAG_RECIPE_SERVER_ONLY", 30)
         acceptance.expect("scan_a", "partialreload scan", r"scan", 30); acceptance.wait_state(r"Last scan:\s*(?!never)", 120)
         structured("B"); target.parent.mkdir(parents=True, exist_ok=True)
-        if name == "biome_add" or name == "damage_type_modify": target.write_text(json.dumps({"replace": True, "values": ["minecraft:plains"]}) + "\n")
+        if name == "biome_add": target.write_text(json.dumps({"replace": True, "values": ["minecraft:plains"]}) + "\n")
+        elif name == "damage_type_modify": target.write_text(json.dumps({"replace": True, "values": ["minecraft:in_fire"]}) + "\n")
         else: target.unlink(missing_ok=True)
         acceptance.expect("scan_b", "partialreload scan", r"scan", 30); acceptance.wait_state(r"Changed resources:\s*[1-9]", 120)
         prep = acceptance.command("partialreload prepare tags_recipes")
-        if "unsupported" not in prep.lower() and "blocker" not in prep.lower(): raise AssertionError(f"unsupported registry not diagnosed: {prep}")
-        result.update(status="passed", preparation=prep.strip())
+        # Unsupported registries are a commit-time safety blocker. Preparation
+        # remains read-only and may therefore legitimately reach READY.
+        if "unsupported" in prep.lower() or "blocker" in prep.lower():
+            result.update(status="passed", preparation=prep.strip(), terminal="PREPARATION_BLOCKED")
+        else:
+            acceptance.wait_state(r"State:\s*READY", 120)
+            acceptance.expect("apply", "partialreload apply prepared", r"queued|recus|reject", 30)
+            tx = acceptance.command("partialreload transaction")
+            if "TAG_REGISTRY_COMMIT_UNSUPPORTED" not in tx and "TAG_REGISTRY_EXACT_REPLACEMENT_UNSUPPORTED" not in tx:
+                raise AssertionError(f"unsupported registry not diagnosed at commit: {tx}")
+            if "Tag mutation: true" in tx or "Recipe mutation: true" in tx:
+                raise AssertionError(f"unsupported registry mutated state: {tx}")
+            result.update(status="passed", preparation=prep.strip(), transaction=tx.strip())
     except Exception as exc: result["error"] = str(exc)
     finally:
         try: acceptance.shutdown()
