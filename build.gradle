@@ -98,6 +98,10 @@ minecraft {
             if (acceptanceClient) {
                 workingDirectory project.file(acceptanceRunDirectory)
                 args '--username', acceptanceUsername
+                if ((System.getenv('PARTIALRELOAD_ACCEPTANCE_INITIAL_CONNECT_MODE') ?: 'CONTROL') == 'LAUNCH_ARGS') {
+                    args '--server', System.getenv('PARTIALRELOAD_ACCEPTANCE_HOST') ?: '127.0.0.1',
+                            '--port', System.getenv('PARTIALRELOAD_ACCEPTANCE_PORT') ?: '25565'
+                }
             }
             mods {
                 if (acceptanceWithMod) {

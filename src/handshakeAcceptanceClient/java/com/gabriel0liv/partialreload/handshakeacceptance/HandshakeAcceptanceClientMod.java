@@ -34,6 +34,11 @@ public final class HandshakeAcceptanceClientMod {
     private long diagnosticTicks;
     private boolean initialReadyEmitted;
     private boolean reconnectReadyEmitted;
+    private PendingAction pendingAction;
+    private long ticksSinceRequest;
+    private String previousScreen;
+
+    private enum PendingAction { INITIAL_CONNECT, RECONNECT }
 
     private enum AcceptanceClientState {
         BOOTING, READY, CONNECTING, CONNECTED, DISCONNECTING, DISCONNECTED, RECONNECTING, FAILED
@@ -48,7 +53,7 @@ public final class HandshakeAcceptanceClientMod {
     private void loggingIn(ClientPlayerNetworkEvent.LoggingIn event) {
         if (state == AcceptanceClientState.CONNECTING || state == AcceptanceClientState.RECONNECTING) {
             state = AcceptanceClientState.CONNECTED;
-            LOGGER.info("HANDSHAKE_ACCEPTANCE_CLIENT_NETWORK_LOGIN state=CONNECTED");
+            LOGGER.info("HANDSHAKE_ACCEPTANCE_CLIENT_NETWORK_LOGIN run={} attempt={} state=CONNECTED", runId(), attemptId());
         }
     }
 
@@ -57,7 +62,7 @@ public final class HandshakeAcceptanceClientMod {
             state = AcceptanceClientState.DISCONNECTED;
             stableTicks = 0;
             reconnectReadyEmitted = false;
-            LOGGER.info("HANDSHAKE_ACCEPTANCE_CLIENT_NETWORK_LOGOUT state=DISCONNECTED");
+            LOGGER.info("HANDSHAKE_ACCEPTANCE_CLIENT_NETWORK_LOGOUT run={} attempt={} state=DISCONNECTED", runId(), attemptId());
         }
     }
 
@@ -68,8 +73,32 @@ public final class HandshakeAcceptanceClientMod {
         Minecraft minecraft = Minecraft.getInstance();
         diagnosticTicks++;
         dismissAccessibilityOnboarding(minecraft);
+        String screen = minecraft.screen == null ? "null" : minecraft.screen.getClass().getSimpleName();
+        if (!screen.equals(previousScreen)) {
+            LOGGER.info("HANDSHAKE_ACCEPTANCE_CLIENT_SCREEN_CHANGED run={} attempt={} state={} previousScreen={} currentScreen={} overlayPresent={} connectionPresent={} levelPresent={} thread={}",
+                    runId(), attemptId(), state, previousScreen == null ? "null" : previousScreen, screen,
+                    minecraft.getOverlay() != null, minecraft.getConnection() != null, minecraft.level != null,
+                    Thread.currentThread().getName());
+            previousScreen = screen;
+        }
+        if (state == AcceptanceClientState.CONNECTING || state == AcceptanceClientState.RECONNECTING) {
+            ticksSinceRequest++;
+            if (ticksSinceRequest % 100 == 0) {
+                LOGGER.info("HANDSHAKE_ACCEPTANCE_CLIENT_CONNECT_HEARTBEAT run={} attempt={} state={} screen={} overlayPresent={} connectionPresent={} levelPresent={} ticksSinceRequest={} thread={}",
+                        runId(), attemptId(), state, screen, minecraft.getOverlay() != null,
+                        minecraft.getConnection() != null, minecraft.level != null, ticksSinceRequest,
+                        Thread.currentThread().getName());
+            }
+            if (pendingAction != null && ticksSinceRequest >= 1) {
+                PendingAction action = pendingAction;
+                pendingAction = null;
+                invokeConnection(minecraft, action == PendingAction.RECONNECT);
+                return;
+            }
+        }
         if (diagnosticTicks % 100 == 0 && state == AcceptanceClientState.BOOTING) {
-            LOGGER.info("HANDSHAKE_ACCEPTANCE_CLIENT_BOOT_STATE screenClass={} overlayPresent={} connectionPresent={} levelPresent={} partialReloadLoaded={} helperLoaded={} stableTicks={}",
+            LOGGER.info("HANDSHAKE_ACCEPTANCE_CLIENT_BOOT_STATE run={} attempt={} screenClass={} overlayPresent={} connectionPresent={} levelPresent={} partialReloadLoaded={} helperLoaded={} stableTicks={}",
+                    runId(), attemptId(),
                     minecraft.screen == null ? "null" : minecraft.screen.getClass().getSimpleName(),
                     minecraft.getOverlay() != null, minecraft.getConnection() != null, minecraft.level != null,
                     ModList.get().isLoaded("partialreload"), ModList.get().isLoaded(MOD_ID), stableTicks);
@@ -78,8 +107,8 @@ public final class HandshakeAcceptanceClientMod {
         if (state == AcceptanceClientState.BOOTING || state == AcceptanceClientState.READY) {
             if (!validateModSet()) {
                 state = AcceptanceClientState.FAILED;
-                LOGGER.error("HANDSHAKE_ACCEPTANCE_CLIENT_MOD_SET_INVALID expectedWithMod={} partialreload={} helper={}",
-                        expectedWithMod, ModList.get().isLoaded("partialreload"), ModList.get().isLoaded(MOD_ID));
+            LOGGER.error("HANDSHAKE_ACCEPTANCE_CLIENT_MOD_SET_INVALID run={} attempt={} expectedWithMod={} partialreload={} helper={}",
+                    runId(), attemptId(), expectedWithMod, ModList.get().isLoaded("partialreload"), ModList.get().isLoaded(MOD_ID));
                 return;
             }
             if (isInitialConnectionReady(minecraft)) {
@@ -90,15 +119,21 @@ public final class HandshakeAcceptanceClientMod {
             if (stableTicks >= REQUIRED_STABLE_TICKS && !initialReadyEmitted) {
                 initialReadyEmitted = true;
                 state = AcceptanceClientState.READY;
-                LOGGER.info("HANDSHAKE_ACCEPTANCE_CLIENT_READY screenClass={} overlayPresent={} connectionPresent={} levelPresent={} partialReloadLoaded={} helperLoaded={} stableTicks={}",
+                LOGGER.info("HANDSHAKE_ACCEPTANCE_CLIENT_READY run={} attempt={} screenClass={} overlayPresent={} connectionPresent={} levelPresent={} partialReloadLoaded={} helperLoaded={} stableTicks={}",
+                        runId(), attemptId(),
                         minecraft.screen.getClass().getSimpleName(), minecraft.getOverlay() != null,
                         minecraft.getConnection() != null, minecraft.level != null,
                         ModList.get().isLoaded("partialreload"), ModList.get().isLoaded(MOD_ID), stableTicks);
+                if ("LAUNCH_ARGS".equalsIgnoreCase(initialConnectMode())) {
+                    LOGGER.info("HANDSHAKE_ACCEPTANCE_CLIENT_LAUNCH_ARGS_ARMED run={} attempt={} state={} thread={}",
+                            runId(), attemptId(), state, Thread.currentThread().getName());
+                }
             }
         }
         if ((state == AcceptanceClientState.READY || state == AcceptanceClientState.DISCONNECTED)
+                && !"LAUNCH_ARGS".equalsIgnoreCase(initialConnectMode())
                 && Files.exists(control.resolve("connect.request"))) {
-            connect(minecraft, control.resolve("connect.request"), false);
+            consumeRequest(minecraft, control.resolve("connect.request"), false);
             return;
         }
         if (state == AcceptanceClientState.DISCONNECTED && minecraft.getConnection() == null
@@ -110,11 +145,11 @@ public final class HandshakeAcceptanceClientMod {
             }
             if (stableTicks >= REQUIRED_STABLE_TICKS && !reconnectReadyEmitted) {
                 reconnectReadyEmitted = true;
-                LOGGER.info("HANDSHAKE_ACCEPTANCE_CLIENT_RECONNECT_READY screenClass={} stableTicks={}",
-                        minecraft.screen.getClass().getSimpleName(), stableTicks);
+                LOGGER.info("HANDSHAKE_ACCEPTANCE_CLIENT_RECONNECT_READY run={} attempt={} screenClass={} stableTicks={}",
+                        runId(), attemptId(), minecraft.screen.getClass().getSimpleName(), stableTicks);
             }
             if (reconnectReadyEmitted && Files.exists(control.resolve("reconnect.request"))) {
-                connect(minecraft, control.resolve("reconnect.request"), true);
+                consumeRequest(minecraft, control.resolve("reconnect.request"), true);
                 return;
             }
         }
@@ -122,7 +157,7 @@ public final class HandshakeAcceptanceClientMod {
             try {
                 Files.deleteIfExists(control.resolve("disconnect.request"));
                 state = AcceptanceClientState.DISCONNECTING;
-                LOGGER.info("HANDSHAKE_ACCEPTANCE_CLIENT_DISCONNECT_REQUESTED");
+                LOGGER.info("HANDSHAKE_ACCEPTANCE_CLIENT_DISCONNECT_REQUESTED run={} attempt={} state={}", runId(), attemptId(), state);
                 minecraft.getConnection().getConnection().disconnect(Component.literal("acceptance disconnect"));
             } catch (IOException exception) {
                 fail("HANDSHAKE_ACCEPTANCE_CLIENT_CONTROL_FAILED", exception);
@@ -131,7 +166,7 @@ public final class HandshakeAcceptanceClientMod {
         if (Files.exists(control.resolve("exit.request"))) {
             try {
                 Files.deleteIfExists(control.resolve("exit.request"));
-                LOGGER.info("HANDSHAKE_ACCEPTANCE_CLIENT_EXIT_REQUESTED");
+                LOGGER.info("HANDSHAKE_ACCEPTANCE_CLIENT_EXIT_REQUESTED run={} attempt={} state={}", runId(), attemptId(), state);
                 minecraft.stop();
             } catch (IOException exception) {
                 fail("HANDSHAKE_ACCEPTANCE_CLIENT_CONTROL_FAILED", exception);
@@ -139,18 +174,40 @@ public final class HandshakeAcceptanceClientMod {
         }
     }
 
-    private void connect(Minecraft minecraft, Path request, boolean reconnect) {
+    private void consumeRequest(Minecraft minecraft, Path request, boolean reconnect) {
         if (!isInitialConnectionReady(minecraft) && !isReconnectReady(minecraft)) {
             return;
         }
         try {
             Files.deleteIfExists(request);
             state = reconnect ? AcceptanceClientState.RECONNECTING : AcceptanceClientState.CONNECTING;
-            LOGGER.info(reconnect ? "HANDSHAKE_ACCEPTANCE_CLIENT_RECONNECT_REQUESTED" :
-                    "HANDSHAKE_ACCEPTANCE_CLIENT_CONNECT_REQUESTED");
-            startConnection(minecraft);
+            ticksSinceRequest = 0;
+            pendingAction = reconnect ? PendingAction.RECONNECT : PendingAction.INITIAL_CONNECT;
+            LOGGER.info(reconnect ? "HANDSHAKE_ACCEPTANCE_CLIENT_RECONNECT_REQUESTED run={} attempt={} state={} thread={}"
+                    : "HANDSHAKE_ACCEPTANCE_CLIENT_CONNECT_REQUESTED run={} attempt={} state={} thread={}",
+                    runId(), attemptId(), state, Thread.currentThread().getName());
         } catch (IOException | RuntimeException exception) {
             fail("HANDSHAKE_ACCEPTANCE_CLIENT_FAILED", exception);
+        }
+    }
+
+    private void invokeConnection(Minecraft minecraft, boolean reconnect) {
+        String host = System.getenv("PARTIALRELOAD_ACCEPTANCE_HOST");
+        String port = System.getenv("PARTIALRELOAD_ACCEPTANCE_PORT");
+        LOGGER.info("HANDSHAKE_ACCEPTANCE_CLIENT_CONNECT_CALL_ENTER run={} attempt={} thread={} screen={} host={} port={} state={}",
+                runId(), attemptId(), Thread.currentThread().getName(),
+                minecraft.screen == null ? "null" : minecraft.screen.getClass().getSimpleName(), host, port, state);
+        try {
+            startConnection(minecraft);
+            LOGGER.info("HANDSHAKE_ACCEPTANCE_CLIENT_CONNECT_CALL_RETURN run={} attempt={} thread={} screen={} host={} port={} state={}",
+                    runId(), attemptId(), Thread.currentThread().getName(),
+                    minecraft.screen == null ? "null" : minecraft.screen.getClass().getSimpleName(), host, port, state);
+        } catch (RuntimeException exception) {
+            state = AcceptanceClientState.FAILED;
+            LOGGER.error("HANDSHAKE_ACCEPTANCE_CLIENT_CONNECT_CALL_FAILED run={} attempt={} thread={} screen={} host={} port={} state={}",
+                    runId(), attemptId(), Thread.currentThread().getName(),
+                    minecraft.screen == null ? "null" : minecraft.screen.getClass().getSimpleName(), host, port, state, exception);
+            throw exception;
         }
     }
 
@@ -169,7 +226,7 @@ public final class HandshakeAcceptanceClientMod {
                 && minecraft.screen.getClass().getSimpleName().equals("AccessibilityOnboardingScreen"))) {
             minecraft.options.onboardAccessibility = false;
             minecraft.setScreen(new TitleScreen(false));
-            LOGGER.info("HANDSHAKE_ACCEPTANCE_CLIENT_ACCESSIBILITY_DISMISSED");
+            LOGGER.info("HANDSHAKE_ACCEPTANCE_CLIENT_ACCESSIBILITY_DISMISSED run={} attempt={}", runId(), attemptId());
         }
     }
 
@@ -180,6 +237,18 @@ public final class HandshakeAcceptanceClientMod {
 
     private Path controlDirectory() {
         return Path.of(System.getenv().getOrDefault("PARTIALRELOAD_ACCEPTANCE_CONTROL_DIR", "."));
+    }
+
+    private static String runId() {
+        return System.getenv().getOrDefault("PARTIALRELOAD_ACCEPTANCE_RUN_ID", "-");
+    }
+
+    private static String attemptId() {
+        return System.getenv().getOrDefault("PARTIALRELOAD_ACCEPTANCE_ATTEMPT_ID", "-");
+    }
+
+    private static String initialConnectMode() {
+        return System.getenv().getOrDefault("PARTIALRELOAD_ACCEPTANCE_INITIAL_CONNECT_MODE", "CONTROL");
     }
 
     private void startConnection(Minecraft minecraft) {

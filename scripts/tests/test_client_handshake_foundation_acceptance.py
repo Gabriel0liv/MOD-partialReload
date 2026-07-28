@@ -81,11 +81,34 @@ class HandshakeAcceptanceReportTest(unittest.TestCase):
         self.assertFalse(MODULE.validate_report(value)[0])
 
     def test_login_failure_classification(self):
-        self.assertEqual(MODULE.classify_failure("timeout NETWORK_LOGIN", []),
+        self.assertEqual(MODULE.classify_failure(MODULE.LoginEvidence(False, False, False, False, False)),
+                         "CLIENT_BOOT_NOT_READY")
+        self.assertEqual(MODULE.classify_failure(MODULE.LoginEvidence(True, False, False, False, False)),
+                         "CLIENT_CONNECT_NOT_TRIGGERED")
+        self.assertEqual(MODULE.classify_failure(MODULE.LoginEvidence(True, True, False, False, False)),
                          "FORGE_LOGIN_NOT_COMPLETED")
-        self.assertEqual(MODULE.classify_failure("timeout SERVER_PENDING", [
-            {"marker": "HANDSHAKE_ACCEPTANCE_CLIENT_NETWORK_LOGIN"}]),
+        self.assertEqual(MODULE.classify_failure(MODULE.LoginEvidence(True, True, True, False, False)),
                          "PARTIALRELOAD_HANDSHAKE_NOT_STARTED")
+        self.assertEqual(MODULE.classify_failure(MODULE.LoginEvidence(True, True, True, True, False)),
+                         "PARTIALRELOAD_HANDSHAKE_FAILED")
+
+    def test_cursor_is_snapshot_before_trigger(self):
+        process = self.process(["CLIENT_HANDSHAKE_SERVER_PENDING player=old"])
+        cursor = process.cursor()
+        process.lines.append("CLIENT_HANDSHAKE_SERVER_PENDING player=new")
+        found = process.wait_marker("CLIENT_HANDSHAKE_SERVER_PENDING", timeout=.01, after_line=cursor)
+        self.assertEqual(found["fields"]["player"], "new")
+
+    def test_acceptance_runs_have_distinct_run_ids(self):
+        first = MODULE.Acceptance("CONTROL", 0)
+        second = MODULE.Acceptance("LAUNCH_ARGS", 0)
+        self.assertNotEqual(first.run_id, second.run_id)
+        self.assertEqual(first.initial_connect_mode, "CONTROL")
+        self.assertEqual(second.initial_connect_mode, "LAUNCH_ARGS")
+
+    def test_diagnostic_report_cannot_be_complete(self):
+        value = report(status="diagnostic_passed", complete=False)
+        self.assertFalse(MODULE.validate_report(value)[0])
 
 
 if __name__ == "__main__":
