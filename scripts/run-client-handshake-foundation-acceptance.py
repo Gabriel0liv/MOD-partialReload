@@ -35,6 +35,70 @@ class LoginEvidence:
     server_compatible_seen: bool
 
 
+@dataclass(frozen=True)
+class AttemptWindow:
+    server_start_line: int
+    client_start_line: int
+    server_end_line: int | None
+    client_end_line: int | None
+
+
+def entries_in_window(process: "OwnedProcess | None", start: int, end: int | None,
+                      run_id: str | None = None, attempt_id: str | None = None) -> list[dict[str, object]]:
+    if process is None:
+        return []
+    upper = len(process.lines) - 1 if end is None else end
+    return [entry for entry in process.entries()
+            if start < int(entry["line"]) <= upper
+            and (run_id is None or fields(entry).get("run") == run_id)
+            and (attempt_id is None or fields(entry).get("attempt") == attempt_id)]
+
+
+def attempt_marker_evidence(server: "OwnedProcess | None", client: "OwnedProcess | None",
+                            window: AttemptWindow, run_id: str, attempt_id: str) -> dict[str, object]:
+    server_entries = entries_in_window(server, window.server_start_line, window.server_end_line,
+                                       run_id, attempt_id)
+    client_entries = entries_in_window(client, window.client_start_line, window.client_end_line,
+                                       run_id, attempt_id)
+    server_markers = {entry["marker"] for entry in server_entries}
+    client_markers = {entry["marker"] for entry in client_entries}
+    return {
+        "server_entries": server_entries,
+        "client_entries": client_entries,
+        "ready": "HANDSHAKE_ACCEPTANCE_CLIENT_READY" in client_markers,
+        "connect_requested": "HANDSHAKE_ACCEPTANCE_CLIENT_CONNECT_REQUESTED" in client_markers,
+        "network_login": "HANDSHAKE_ACCEPTANCE_CLIENT_NETWORK_LOGIN" in client_markers,
+        "server_absent": "CLIENT_HANDSHAKE_SERVER_ABSENT" in server_markers,
+        "server_pending": "CLIENT_HANDSHAKE_SERVER_PENDING" in server_markers,
+        "server_compatible": "CLIENT_HANDSHAKE_SERVER_COMPATIBLE" in server_markers,
+        "network_logout": "HANDSHAKE_ACCEPTANCE_CLIENT_NETWORK_LOGOUT" in client_markers,
+        "server_disconnected": "CLIENT_HANDSHAKE_SERVER_DISCONNECTED" in server_markers,
+    }
+
+
+def first_network_divergence(successful_lines: list[str], failed_lines: list[str]) -> dict[str, object]:
+    def normalize(line: str) -> str:
+        value = re.sub(r"\[[^]]+\]", "", line)
+        value = re.sub(r"\b(?:run|attempt|challenge|player|connection|port|pid)=\S+", "", value)
+        value = re.sub(r"\b\d{4,}\b", "<n>", value)
+        value = re.sub(r"\s+", " ", value).strip()
+        return value
+
+    success = [(normalize(line), line) for line in successful_lines]
+    failure = [(normalize(line), line) for line in failed_lines]
+    success_set = {item[0] for item in success}
+    failure_set = {item[0] for item in failure}
+    common = [item[1] for item in success if item[0] in failure_set]
+    success_only = next((raw for key, raw in success if key not in failure_set), None)
+    failure_only = next((raw for key, raw in failure if key not in success_set), None)
+    terminal = next((raw for raw in reversed(failed_lines)
+                     if any(token in raw for token in ("Disconnected", "Timed out", "lost connection"))), None)
+    return {"last_common_event": common[-1] if common else None,
+            "first_success_only_event": success_only,
+            "first_failure_only_event": failure_only,
+            "failure_terminal_event": terminal}
+
+
 def free_port() -> int:
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
@@ -97,8 +161,11 @@ class OwnedProcess:
         if self.process is None:
             return 0
         if self.process.poll() is None:
-            subprocess.run(["taskkill", "/PID", str(self.process.pid), "/T", "/F"],
-                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+            try:
+                self.process.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                subprocess.run(["taskkill", "/PID", str(self.process.pid), "/T", "/F"],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
         self.process.wait(timeout=timeout)
         if self.thread is not None:
             self.thread.join(timeout=timeout)
@@ -377,10 +444,13 @@ def capture_tcp_state(run_log_root: pathlib.Path, server_port: int,
 
 class Acceptance:
     def __init__(self, initial_connect_mode: str = "CONTROL", cold_login_probes: int = 0,
-                 client_mod_mode: str = "with_mod") -> None:
+                 client_mod_mode: str = "with_mod", strict_client_isolation: bool = False,
+                 require_attempt_cleanup: bool = False, fresh_server_per_probe: bool = False,
+                 cycles: int = 0) -> None:
         self.run_id = uuid.uuid4().hex
         self.run_log_root = LOG_ROOT / self.run_id
         self.server_port, self.rcon_port = free_port(), free_port()
+        self.server_directory_name = "server"
         self.password = uuid.uuid4().hex
         self.server: OwnedProcess | None = None
         self.clients: list[OwnedProcess] = []
@@ -391,6 +461,10 @@ class Acceptance:
         self.initial_connect_mode = initial_connect_mode
         self.cold_login_probes = cold_login_probes
         self.client_mod_mode = client_mod_mode
+        self.strict_client_isolation = strict_client_isolation
+        self.require_attempt_cleanup = require_attempt_cleanup
+        self.fresh_server_per_probe = fresh_server_per_probe
+        self.cycles = cycles
         self.failure_capture_errors: list[str] = []
         self.failure_tcp_state: dict[str, object] = {}
         self.failure_process_tree: dict[str, object] = {}
@@ -420,7 +494,7 @@ class Acceptance:
         return result
 
     def prepare_server(self) -> None:
-        directory = RUN_ROOT / "server"
+        directory = RUN_ROOT / self.server_directory_name
         directory.mkdir(parents=True, exist_ok=True)
         (directory / "server.properties").write_text("\n".join([
             "online-mode=false", "enable-rcon=true", "server-ip=127.0.0.1",
@@ -433,7 +507,7 @@ class Acceptance:
         self.prepare_server()
         server_env = self.env()
         server_env["PARTIALRELOAD_ACCEPTANCE_RUN_ID"] = self.run_id
-        server_env["PARTIALRELOAD_ACCEPTANCE_RUN_DIR"] = str(RUN_ROOT / "server")
+        server_env["PARTIALRELOAD_ACCEPTANCE_RUN_DIR"] = str(RUN_ROOT / self.server_directory_name)
         self.server = OwnedProcess("server", [str(ROOT / "gradlew.bat"), "--no-daemon", "--console=plain",
                                                "runServer"], server_env, ROOT,
                                    self.run_log_root / "server.stdout.log")
@@ -479,6 +553,67 @@ class Acceptance:
         process.start()
         self.clients.append(process)
         return process
+
+    def cleanup_attempt(self, client: OwnedProcess, name: str, username: str,
+                        entered_server: bool, expect_server_disconnect: bool) -> dict[str, object]:
+        control = RUN_ROOT / name / "control"
+        control.mkdir(parents=True, exist_ok=True)
+        client_cursor = client.cursor()
+        server_cursor = self.server.cursor()
+        (control / "exit.request").write_text("exit\n", encoding="utf-8")
+        exit_seen = True
+        try:
+            client.wait_marker("HANDSHAKE_ACCEPTANCE_CLIENT_EXIT_REQUESTED", 20, client_cursor)
+        except Exception:
+            exit_seen = False
+        logout_seen = not entered_server
+        server_disconnected_seen = not expect_server_disconnect
+        if entered_server:
+            try:
+                client.wait_marker("HANDSHAKE_ACCEPTANCE_CLIENT_NETWORK_LOGOUT", 30, client_cursor)
+                logout_seen = True
+            except Exception:
+                logout_seen = False
+            if expect_server_disconnect:
+                try:
+                    self.server.wait_marker("CLIENT_HANDSHAKE_SERVER_DISCONNECTED", 30, server_cursor)
+                    server_disconnected_seen = True
+                except Exception:
+                    server_disconnected_seen = False
+        player_absent = True
+        if self.rcon is not None:
+            deadline = time.monotonic() + 20
+            while time.monotonic() < deadline:
+                try:
+                    listing = self.rcon.command("list")
+                    if username not in listing:
+                        break
+                except Exception:
+                    pass
+                time.sleep(.25)
+            else:
+                player_absent = False
+        try:
+            client.stop()
+        except Exception:
+            pass
+        owned_absent = client.process is not None and client.process.poll() is not None
+        tcp = capture_tcp_state(self.run_log_root, self.server_port, client, self.server)
+        active_states = {"ESTABLISHED", "SYN_SENT", "SYN_RECEIVED", "CLOSE_WAIT",
+                         "FIN_WAIT_1", "FIN_WAIT_2", "LISTEN"}
+        tcp_absent = not any(str(entry.get("State", "")).upper() in active_states
+                             for entry in tcp.get("entries", []))
+        reader_stopped = client.thread is None or not client.thread.is_alive()
+        status = all((exit_seen, logout_seen, server_disconnected_seen, player_absent,
+                      owned_absent, tcp_absent, reader_stopped))
+        return {"status": "passed" if status else "failed",
+                "client_logout_seen": logout_seen,
+                "server_disconnect_seen": server_disconnected_seen,
+                "player_absent_from_rcon": player_absent,
+                "owned_processes_absent": owned_absent,
+                "tcp_connections_absent": tcp_absent,
+                "reader_threads_stopped": reader_stopped,
+                "exit_requested_seen": exit_seen}
 
     @staticmethod
     def challenge(entry: dict[str, object]) -> str | None:
@@ -608,14 +743,68 @@ class Acceptance:
             raise AssertionError(f"commit was not blocked: {response}")
         self.scenarios["connected_commit_still_blocked"] = {"status": "passed", "response": response.strip()}
 
+    def absent_reconnect_stress(self) -> None:
+        cycles = self.cycles or 5
+        client = self.start_client("absent-reconnect-stress", "PRAbsentStress", with_mod=False)
+        client.wait_marker("HANDSHAKE_ACCEPTANCE_CLIENT_READY", 120)
+        control = RUN_ROOT / "absent-reconnect-stress" / "control"
+        control.mkdir(parents=True, exist_ok=True)
+        connections: list[str] = []
+        for cycle in range(cycles):
+            client_cursor = client.cursor()
+            server_cursor = self.server.cursor()
+            (control / ("connect.request" if cycle == 0 else "reconnect.request")).write_text(
+                "connect\n", encoding="utf-8")
+            if cycle == 0:
+                client.wait_marker("HANDSHAKE_ACCEPTANCE_CLIENT_CONNECT_REQUESTED", 60, client_cursor)
+            else:
+                client.wait_marker("HANDSHAKE_ACCEPTANCE_CLIENT_RECONNECT_REQUESTED", 60, client_cursor)
+            client.wait_marker("HANDSHAKE_ACCEPTANCE_CLIENT_NETWORK_LOGIN", 120, client_cursor)
+            absent = self.server.wait_marker("CLIENT_HANDSHAKE_SERVER_ABSENT", 120, server_cursor)
+            connection = fields(absent).get("connection")
+            if not connection or connection in connections:
+                raise AssertionError("absent reconnect reused connection identity")
+            connections.append(connection)
+            if any(entry["marker"] in {"CLIENT_HANDSHAKE_SERVER_PENDING",
+                                       "CLIENT_HANDSHAKE_SERVER_COMPATIBLE",
+                                       "CLIENT_HANDSHAKE_SERVER_TIMED_OUT"}
+                   and fields(entry).get("player") == fields(absent).get("player")
+                   for entry in self.server.entries()):
+                raise AssertionError("absent reconnect acquired a handshake session")
+            if cycle < cycles - 1:
+                disconnect_cursor = client.cursor(); server_disconnect_cursor = self.server.cursor()
+                (control / "disconnect.request").write_text("disconnect\n", encoding="utf-8")
+                client.wait_marker("HANDSHAKE_ACCEPTANCE_CLIENT_DISCONNECT_REQUESTED", 60, disconnect_cursor)
+                client.wait_marker("HANDSHAKE_ACCEPTANCE_CLIENT_NETWORK_LOGOUT", 60, disconnect_cursor)
+                self.server.wait_marker("CLIENT_HANDSHAKE_SERVER_DISCONNECTED", 60, server_disconnect_cursor)
+                client.wait_marker("HANDSHAKE_ACCEPTANCE_CLIENT_RECONNECT_READY", 60, client.cursor())
+        cleanup = self.cleanup_attempt(client, "absent-reconnect-stress", "PRAbsentStress", True, False)
+        self.scenarios["absent_reconnect_stress"] = {
+            "status": "passed" if cleanup["status"] == "passed" else "failed",
+            "same_client_process": True, "cycles": cycles,
+            "connections": connections, "cleanup": cleanup,
+            "client_log": str(client.log_path), "server_log": str(self.server.log_path)}
+
     def cold_login(self) -> None:
         attempts = []
         for index in range(1, self.cold_login_probes + 1):
+            if index > 1 and self.fresh_server_per_probe:
+                if self.rcon is not None:
+                    self.rcon.close()
+                    self.rcon = None
+                if self.server is not None:
+                    self.server.stop()
+                    self.server = None
+                self.server_port, self.rcon_port = free_port(), free_port()
+                self.server_directory_name = f"server-{index:02d}"
+                self.start_server()
             name = f"cold-{index:02d}"
             username = (f"PRWith{index:02d}" if self.client_mod_mode == "with_mod"
                         else f"PRBase{index:02d}")
+            server_start_line = self.server.cursor()
             client = self.start_client(name, username,
                                        with_mod=self.client_mod_mode == "with_mod")
+            client_start_line = client.cursor()
             try:
                 ready = client.wait_marker("HANDSHAKE_ACCEPTANCE_CLIENT_READY", 90)
                 client_cursor = client.cursor()
@@ -648,6 +837,8 @@ class Acceptance:
                                                  "passed": sum(item.get("status") == "passed" for item in attempts)}
                 # Continue with the next fresh client when this attempt cleaned up.
             finally:
+                window = AttemptWindow(server_start_line, client_start_line,
+                                       self.server.cursor(), client.cursor())
                 capture_tcp_state(self.run_log_root, self.server_port, client, self.server,
                                   f"tcp-before-cleanup-{name}.json")
                 evidence = login_evidence(self.server, client, self.initial_connect_mode, self.server_port)
@@ -666,20 +857,30 @@ class Acceptance:
                     attempts[-1]["processes"] = {
                         "client": process_summary(client, "client"),
                         "server": process_summary(self.server, "server")}
+                    attempts[-1]["window"] = {
+                        "server_start_line": window.server_start_line,
+                        "client_start_line": window.client_start_line,
+                        "server_end_line": window.server_end_line,
+                        "client_end_line": window.client_end_line}
                 if evidence.initial_connect_triggered and not evidence.network_login_seen:
                     self.failure_capture_errors = capture_thread_dumps(self.run_log_root, client, self.server)
                     self.failure_tcp_state = capture_tcp_state(self.run_log_root, self.server_port, client, self.server)
                     self.failure_process_tree = {
                         "client": process_tree(client.process.pid) if client.process else [],
                         "server": process_tree(self.server.process.pid) if self.server and self.server.process else []}
-                control = RUN_ROOT / name / "control"
-                control.mkdir(parents=True, exist_ok=True)
-                (control / "exit.request").write_text("exit\n", encoding="utf-8")
-                try:
-                    client.wait_marker("HANDSHAKE_ACCEPTANCE_CLIENT_EXIT_REQUESTED", 20)
-                except Exception:
-                    pass
-                client.stop()
+                entered = evidence.network_login_seen
+                attempt_cleanup = self.cleanup_attempt(
+                    client, name, username, entered,
+                    entered and self.client_mod_mode == "with_mod")
+                if attempts:
+                    attempts[-1]["cleanup"] = attempt_cleanup
+                    final_window = AttemptWindow(window.server_start_line, window.client_start_line,
+                                                 self.server.cursor(), client.cursor())
+                    attempts[-1]["attempt_evidence"] = attempt_marker_evidence(
+                        self.server, client, final_window, self.run_id, self.attempt_ids.get(name, ""))
+                    if attempt_cleanup["status"] != "passed":
+                        attempts[-1]["status"] = "failed"
+                        attempts[-1]["classification"] = "ATTEMPT_CLEANUP_FAILED"
         passed_count = sum(item.get("status") == "passed" for item in attempts)
         self.scenarios["cold_login"] = {"status": "passed" if passed_count == self.cold_login_probes else "failed",
                                          "client_mod_mode": self.client_mod_mode,
@@ -738,6 +939,7 @@ class Acceptance:
                 if "silent_timeout" in selected: self.silent_timeout()
                 if "absent_client_allowed" in selected: self.absent()
                 if "connected_commit_still_blocked" in selected: self.connected_commit()
+                if "absent_reconnect_stress" in selected: self.absent_reconnect_stress()
         finally:
             self.cleanup()
         if cold_mode:
@@ -766,9 +968,15 @@ def main() -> int:
     parser.add_argument("--initial-connect-mode", choices=("control", "launch_args"), default="control")
     parser.add_argument("--cold-login-probes", type=int, default=0)
     parser.add_argument("--client-mod-mode", choices=("with_mod", "without_mod"), default="with_mod")
+    parser.add_argument("--strict-client-isolation", action="store_true")
+    parser.add_argument("--require-attempt-cleanup", action="store_true")
+    parser.add_argument("--fresh-server-per-probe", action="store_true")
+    parser.add_argument("--cycles", type=int, default=0)
     args = parser.parse_args()
     LOG_ROOT.mkdir(parents=True, exist_ok=True)
-    acceptance = Acceptance(args.initial_connect_mode.upper(), args.cold_login_probes, args.client_mod_mode)
+    acceptance = Acceptance(args.initial_connect_mode.upper(), args.cold_login_probes, args.client_mod_mode,
+                            args.strict_client_isolation, args.require_attempt_cleanup,
+                            args.fresh_server_per_probe, args.cycles)
     selected = None if not args.scenarios else set(args.scenarios.split(","))
     try:
         report = acceptance.run(selected)

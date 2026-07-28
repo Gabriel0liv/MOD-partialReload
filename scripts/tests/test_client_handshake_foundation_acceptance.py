@@ -142,6 +142,25 @@ class HandshakeAcceptanceReportTest(unittest.TestCase):
         process.process = type("P", (), {"pid": 1})()
         self.assertEqual(MODULE.launch_args_evidence(process, 25565)["server_arg_present"], False)
 
+    def test_attempt_window_excludes_previous_markers(self):
+        process = self.process(["CLIENT_HANDSHAKE_SERVER_ABSENT run=r attempt=old",
+                                "CLIENT_HANDSHAKE_SERVER_ABSENT run=r attempt=new"])
+        window = MODULE.AttemptWindow(0, 0, 1, 1)
+        evidence = MODULE.attempt_marker_evidence(process, None, window, "r", "new")
+        self.assertTrue(evidence["server_absent"])
+        self.assertEqual(len(evidence["server_entries"]), 1)
+
+    def test_attempt_cleanup_flags_are_fail_closed(self):
+        self.assertFalse(MODULE.validate_report({"status": "diagnostic_passed", "complete_run": False,
+                                                  "scenarios": {}, "cleanup": {"status": "failed"}})[0])
+
+    def test_first_network_divergence_normalizes_attempt_fields(self):
+        value = MODULE.first_network_divergence(
+            ["NETWORK phase=login connection=11", "COMPATIBLE run=a"],
+            ["NETWORK phase=login connection=22", "Disconnected"])
+        self.assertEqual(value["last_common_event"], "NETWORK phase=login connection=11")
+        self.assertEqual(value["failure_terminal_event"], "Disconnected")
+
 
 if __name__ == "__main__":
     unittest.main()

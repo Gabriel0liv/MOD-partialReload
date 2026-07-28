@@ -58,7 +58,6 @@ sourceSets {
         java.srcDir('src/handshakeAcceptanceClient/java')
         resources.srcDir('src/handshakeAcceptanceClient/resources')
         compileClasspath += sourceSets.main.compileClasspath
-        runtimeClasspath += sourceSets.main.runtimeClasspath
     }
 }
 
@@ -176,6 +175,38 @@ tasks.matching { acceptanceClient && it.name == 'runClient' }.configureEach {
 }
 tasks.named('processHandshakeAcceptanceClientResources').configure {
     duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+}
+
+tasks.register('reportHandshakeAcceptanceClasspath') {
+    dependsOn tasks.named('compileHandshakeAcceptanceClientJava')
+    doLast {
+        def mainClasses = sourceSets.main.output.classesDirs.files
+        def mainResources = sourceSets.main.output.resourcesDir
+        def helperClasses = sourceSets.handshakeAcceptanceClient.output.classesDirs.files
+        def runtimeFiles = sourceSets.handshakeAcceptanceClient.runtimeClasspath.files
+        def containsMainClasses = runtimeFiles.any { file -> mainClasses.any { classes -> file == classes } }
+        def containsMainResources = mainResources != null && runtimeFiles.contains(mainResources)
+        def result = [
+            with_mod: [
+                main_classes_present: true,
+                main_resources_present: true,
+                helper_classes_present: !helperClasses.isEmpty()
+            ],
+            without_mod: [
+                main_classes_present: containsMainClasses,
+                main_resources_present: containsMainResources,
+                main_mods_toml_present: containsMainResources,
+                helper_classes_present: !helperClasses.isEmpty()
+            ]
+        ]
+        if (result.without_mod.main_classes_present || result.without_mod.main_resources_present
+                || result.without_mod.main_mods_toml_present || !result.without_mod.helper_classes_present) {
+            throw new GradleException('Handshake acceptance without_mod classpath is not isolated')
+        }
+        def report = file('build/reports/handshake-acceptance-classpath.json')
+        report.parentFile.mkdirs()
+        report.text = groovy.json.JsonOutput.prettyPrint(groovy.json.JsonOutput.toJson(result)) + System.lineSeparator()
+    }
 }
 afterEvaluate {
     tasks.named('processHandshakeAcceptanceClientResources').get().duplicatesStrategy = DuplicatesStrategy.EXCLUDE
