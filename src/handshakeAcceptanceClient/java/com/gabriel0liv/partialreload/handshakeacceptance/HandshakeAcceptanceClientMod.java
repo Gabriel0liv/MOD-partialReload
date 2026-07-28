@@ -34,6 +34,8 @@ public final class HandshakeAcceptanceClientMod {
     private long diagnosticTicks;
     private boolean initialReadyEmitted;
     private boolean reconnectReadyEmitted;
+    private boolean exitRequested;
+    private boolean stopAfterLogout;
     private PendingAction pendingAction;
     private long ticksSinceRequest;
     private String previousScreen;
@@ -72,6 +74,13 @@ public final class HandshakeAcceptanceClientMod {
         }
         Minecraft minecraft = Minecraft.getInstance();
         diagnosticTicks++;
+        if (exitRequested && stopAfterLogout && minecraft.getConnection() == null && minecraft.level == null) {
+            LOGGER.info("HANDSHAKE_ACCEPTANCE_CLIENT_STOPPING_AFTER_LOGOUT run={} attempt={} state={} thread={}",
+                    runId(), attemptId(), state, Thread.currentThread().getName());
+            stopAfterLogout = false;
+            minecraft.stop();
+            return;
+        }
         dismissAccessibilityOnboarding(minecraft);
         String screen = minecraft.screen == null ? "null" : minecraft.screen.getClass().getSimpleName();
         if (!screen.equals(previousScreen)) {
@@ -169,16 +178,25 @@ public final class HandshakeAcceptanceClientMod {
                 LOGGER.info("HANDSHAKE_ACCEPTANCE_CLIENT_DISCONNECT_REQUESTED run={} attempt={} state={}", runId(), attemptId(), state);
                 minecraft.getConnection().getConnection().disconnect(Component.literal("acceptance disconnect"));
             } catch (IOException exception) {
-                fail("HANDSHAKE_ACCEPTANCE_CLIENT_CONTROL_FAILED", exception);
+                LOGGER.warn("HANDSHAKE_ACCEPTANCE_CLIENT_CONTROL_FILE_DELETE_RETRY run={} attempt={} requestFile=disconnect.request",
+                        runId(), attemptId(), exception);
             }
         }
         if (Files.exists(control.resolve("exit.request"))) {
             try {
                 Files.deleteIfExists(control.resolve("exit.request"));
                 LOGGER.info("HANDSHAKE_ACCEPTANCE_CLIENT_EXIT_REQUESTED run={} attempt={} state={}", runId(), attemptId(), state);
-                minecraft.stop();
+                exitRequested = true;
+                stopAfterLogout = true;
+                if (minecraft.getConnection() != null) {
+                    state = AcceptanceClientState.DISCONNECTING;
+                    minecraft.getConnection().getConnection().disconnect(Component.literal("acceptance exit"));
+                } else {
+                    state = AcceptanceClientState.DISCONNECTED;
+                }
             } catch (IOException exception) {
-                fail("HANDSHAKE_ACCEPTANCE_CLIENT_CONTROL_FAILED", exception);
+                LOGGER.warn("HANDSHAKE_ACCEPTANCE_CLIENT_CONTROL_FILE_DELETE_RETRY run={} attempt={} requestFile=exit.request",
+                        runId(), attemptId(), exception);
             }
         }
     }
@@ -196,7 +214,12 @@ public final class HandshakeAcceptanceClientMod {
                     : "HANDSHAKE_ACCEPTANCE_CLIENT_CONNECT_REQUESTED run={} attempt={} state={} thread={}",
                     runId(), attemptId(), state, Thread.currentThread().getName());
         } catch (IOException | RuntimeException exception) {
-            fail("HANDSHAKE_ACCEPTANCE_CLIENT_FAILED", exception);
+            if (exception instanceof IOException) {
+                LOGGER.warn("HANDSHAKE_ACCEPTANCE_CLIENT_CONTROL_FILE_DELETE_RETRY run={} attempt={} requestFile={}",
+                        runId(), attemptId(), request.getFileName(), exception);
+            } else {
+                fail("HANDSHAKE_ACCEPTANCE_CLIENT_FAILED", exception);
+            }
         }
     }
 

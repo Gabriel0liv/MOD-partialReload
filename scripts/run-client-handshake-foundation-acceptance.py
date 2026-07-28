@@ -43,6 +43,20 @@ class AttemptWindow:
     client_end_line: int | None
 
 
+@dataclass(frozen=True)
+class AttemptEvidence:
+    client_ready_seen: bool
+    connect_requested_seen: bool
+    network_login_seen: bool
+    server_absent_seen: bool
+    server_pending_seen: bool
+    server_compatible_seen: bool
+    network_logout_seen: bool
+    server_disconnected_seen: bool
+    player: str | None
+    connection: str | None
+
+
 def entries_in_window(process: "OwnedProcess | None", start: int, end: int | None,
                       run_id: str | None = None, attempt_id: str | None = None) -> list[dict[str, object]]:
     if process is None:
@@ -56,8 +70,10 @@ def entries_in_window(process: "OwnedProcess | None", start: int, end: int | Non
 
 def attempt_marker_evidence(server: "OwnedProcess | None", client: "OwnedProcess | None",
                             window: AttemptWindow, run_id: str, attempt_id: str) -> dict[str, object]:
-    server_entries = entries_in_window(server, window.server_start_line, window.server_end_line,
-                                       run_id, attempt_id)
+    # Acceptance run/attempt fields exist only on helper client markers.  The
+    # server deliberately cannot receive these identifiers over the protocol;
+    # correlate its events by the attempt window and player/connection fields.
+    server_entries = entries_in_window(server, window.server_start_line, window.server_end_line)
     client_entries = entries_in_window(client, window.client_start_line, window.client_end_line,
                                        run_id, attempt_id)
     server_markers = {entry["marker"] for entry in server_entries}
@@ -74,6 +90,24 @@ def attempt_marker_evidence(server: "OwnedProcess | None", client: "OwnedProcess
         "network_logout": "HANDSHAKE_ACCEPTANCE_CLIENT_NETWORK_LOGOUT" in client_markers,
         "server_disconnected": "CLIENT_HANDSHAKE_SERVER_DISCONNECTED" in server_markers,
     }
+
+
+def attempt_evidence(server: "OwnedProcess | None", client: "OwnedProcess | None",
+                     window: AttemptWindow, run_id: str, attempt_id: str,
+                     expected_mode: str, expected_client_mod_mode: str) -> AttemptEvidence:
+    evidence = attempt_marker_evidence(server, client, window, run_id, attempt_id)
+    server_entries = evidence["server_entries"]
+    absent = next((entry for entry in server_entries
+                   if entry["marker"] in {"CLIENT_HANDSHAKE_SERVER_ABSENT",
+                                           "CLIENT_HANDSHAKE_SERVER_PENDING"}), None)
+    player = fields(absent).get("player") if absent else None
+    connection = fields(absent).get("connection") if absent else None
+    return AttemptEvidence(
+        bool(evidence["ready"]), bool(evidence["connect_requested"]),
+        bool(evidence["network_login"]), bool(evidence["server_absent"]),
+        bool(evidence["server_pending"]), bool(evidence["server_compatible"]),
+        bool(evidence["network_logout"]), bool(evidence["server_disconnected"]),
+        player, connection)
 
 
 def first_network_divergence(successful_lines: list[str], failed_lines: list[str]) -> dict[str, object]:
@@ -600,7 +634,7 @@ class Acceptance:
         owned_absent = client.process is not None and client.process.poll() is not None
         tcp = capture_tcp_state(self.run_log_root, self.server_port, client, self.server)
         active_states = {"ESTABLISHED", "SYN_SENT", "SYN_RECEIVED", "CLOSE_WAIT",
-                         "FIN_WAIT_1", "FIN_WAIT_2", "LISTEN"}
+                         "FIN_WAIT_1", "FIN_WAIT_2"}
         tcp_absent = not any(str(entry.get("State", "")).upper() in active_states
                              for entry in tcp.get("entries", []))
         reader_stopped = client.thread is None or not client.thread.is_alive()
@@ -661,14 +695,18 @@ class Acceptance:
         reset = client.wait_marker("CLIENT_HANDSHAKE_CLIENT_RESET", 60, int(requested["line"]))
         logout = client.wait_marker("HANDSHAKE_ACCEPTANCE_CLIENT_NETWORK_LOGOUT", 60, int(requested["line"]))
         disconnected = self.server.wait_marker("CLIENT_HANDSHAKE_SERVER_DISCONNECTED", 60, server_cursor)
-        server_cursor = self.server.cursor(); client_cursor = client.cursor()
+        # RECONNECT_READY may be emitted while the logout/disconnect waits are
+        # in progress.  Keep the cursor captured before disconnect and search
+        # from that causal point instead of taking a new cursor afterwards.
         client.wait_marker("HANDSHAKE_ACCEPTANCE_CLIENT_RECONNECT_READY", 60, client_cursor)
-        client_cursor = client.cursor()
+        reconnect_trigger_cursor = client.cursor()
+        server_reconnect_cursor = self.server.cursor()
         (control / "reconnect.request").write_text("reconnect\n", encoding="utf-8")
-        reconnect_requested = client.wait_marker("HANDSHAKE_ACCEPTANCE_CLIENT_RECONNECT_REQUESTED", 60, client_cursor)
-        pending = self.server.wait_marker("CLIENT_HANDSHAKE_SERVER_PENDING", 90, server_cursor)
+        reconnect_requested = client.wait_marker("HANDSHAKE_ACCEPTANCE_CLIENT_RECONNECT_REQUESTED", 60,
+                                                  reconnect_trigger_cursor)
+        pending = self.server.wait_marker("CLIENT_HANDSHAKE_SERVER_PENDING", 90, server_reconnect_cursor)
         server_ok = self.server.wait_marker("CLIENT_HANDSHAKE_SERVER_COMPATIBLE", 90, int(pending["line"]))
-        received = client.wait_marker("CLIENT_HANDSHAKE_CLIENT_HELLO_RECEIVED", 90, client_cursor)
+        received = client.wait_marker("CLIENT_HANDSHAKE_CLIENT_HELLO_RECEIVED", 90, reconnect_requested["line"])
         sent = client.wait_marker("CLIENT_HANDSHAKE_CLIENT_HELLO_SENT", 90, int(received["line"]))
         accepted = client.wait_marker("CLIENT_HANDSHAKE_CLIENT_ACCEPTED", 90, int(sent["line"]))
         client_ok = client.wait_marker("CLIENT_HANDSHAKE_CLIENT_COMPATIBLE", 90, int(accepted["line"]))
@@ -725,6 +763,10 @@ class Acceptance:
         client.wait_marker("HANDSHAKE_ACCEPTANCE_CLIENT_NETWORK_LOGIN", 120, client_cursor)
         absent = self.server.wait_marker("CLIENT_HANDSHAKE_SERVER_ABSENT", 120, server_cursor)
         player = fields(absent).get("player")
+        if self.rcon is not None:
+            listing = self.rcon.command("list")
+            if "PRAbsent" not in listing:
+                raise AssertionError("absent client was not present in RCON list")
         if any(entry["marker"] in SERVER_MARKERS - {"CLIENT_HANDSHAKE_SERVER_ABSENT",
                                                      "CLIENT_HANDSHAKE_SERVER_DISCONNECTED"}
                and fields(entry).get("player") == player for entry in self.server.entries()):
@@ -733,7 +775,11 @@ class Acceptance:
                                                     "pending_seen": False,
                                                     "server_log": str(self.server.log_path),
                                                     "client_log": str(client.log_path)}
-        client.stop()
+        cleanup = self.cleanup_attempt(client, "absent", "PRAbsent", True, True)
+        self.scenarios["absent_client_allowed"]["cleanup"] = cleanup
+        if cleanup["status"] != "passed":
+            self.scenarios["absent_client_allowed"]["status"] = "failed"
+            raise AssertionError("absent client cleanup failed")
 
     def connected_commit(self) -> None:
         if self.rcon is None:
@@ -777,7 +823,8 @@ class Acceptance:
                 client.wait_marker("HANDSHAKE_ACCEPTANCE_CLIENT_DISCONNECT_REQUESTED", 60, disconnect_cursor)
                 client.wait_marker("HANDSHAKE_ACCEPTANCE_CLIENT_NETWORK_LOGOUT", 60, disconnect_cursor)
                 self.server.wait_marker("CLIENT_HANDSHAKE_SERVER_DISCONNECTED", 60, server_disconnect_cursor)
-                client.wait_marker("HANDSHAKE_ACCEPTANCE_CLIENT_RECONNECT_READY", 60, client.cursor())
+                client.wait_marker("HANDSHAKE_ACCEPTANCE_CLIENT_RECONNECT_READY", 60,
+                                   disconnect_cursor)
         cleanup = self.cleanup_attempt(client, "absent-reconnect-stress", "PRAbsentStress", True, False)
         self.scenarios["absent_reconnect_stress"] = {
             "status": "passed" if cleanup["status"] == "passed" else "failed",
@@ -841,10 +888,16 @@ class Acceptance:
                                        self.server.cursor(), client.cursor())
                 capture_tcp_state(self.run_log_root, self.server_port, client, self.server,
                                   f"tcp-before-cleanup-{name}.json")
-                evidence = login_evidence(self.server, client, self.initial_connect_mode, self.server_port)
+                evidence = attempt_evidence(
+                    self.server, client, window, self.run_id,
+                    self.attempt_ids.get(name, ""), self.initial_connect_mode,
+                    self.client_mod_mode)
                 if attempts and attempts[-1].get("status") == "failed":
                     launch = launch_args_evidence(client, self.server_port)
-                    classification = classify_failure(evidence, self.initial_connect_mode)
+                    classification = classify_failure(LoginEvidence(
+                        evidence.client_ready_seen, evidence.connect_requested_seen,
+                        evidence.network_login_seen, evidence.server_pending_seen,
+                        evidence.server_compatible_seen), self.initial_connect_mode)
                     if (self.initial_connect_mode == "LAUNCH_ARGS"
                             and all(launch.get(key) for key in
                                     ("server_arg_present", "server_value_matches",
@@ -871,7 +924,7 @@ class Acceptance:
                 entered = evidence.network_login_seen
                 attempt_cleanup = self.cleanup_attempt(
                     client, name, username, entered,
-                    entered and self.client_mod_mode == "with_mod")
+                    entered)
                 if attempts:
                     attempts[-1]["cleanup"] = attempt_cleanup
                     final_window = AttemptWindow(window.server_start_line, window.client_start_line,
