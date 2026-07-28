@@ -915,7 +915,7 @@ class Acceptance:
                         "client_start_line": window.client_start_line,
                         "server_end_line": window.server_end_line,
                         "client_end_line": window.client_end_line}
-                if evidence.initial_connect_triggered and not evidence.network_login_seen:
+                if evidence.connect_requested_seen and not evidence.network_login_seen:
                     self.failure_capture_errors = capture_thread_dumps(self.run_log_root, client, self.server)
                     self.failure_tcp_state = capture_tcp_state(self.run_log_root, self.server_port, client, self.server)
                     self.failure_process_tree = {

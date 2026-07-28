@@ -4,6 +4,7 @@ import java.util.function.Supplier;
 
 import com.gabriel0liv.partialreload.client.network.ClientHandshakeController;
 import com.gabriel0liv.partialreload.network.packet.ClientHelloC2S;
+import com.gabriel0liv.partialreload.network.packet.ClientPresenceC2S;
 import com.gabriel0liv.partialreload.network.packet.HandshakeAcceptedS2C;
 import com.gabriel0liv.partialreload.network.packet.ServerHelloS2C;
 import com.gabriel0liv.partialreload.network.protocol.ClientCapability;
@@ -61,6 +62,13 @@ public final class PartialReloadNetwork {
                 .consumerMainThread((message, context) -> clientPacket(context, () ->
                         ClientHandshakeController.handle(message)))
                 .add();
+        CHANNEL.messageBuilder(ClientPresenceC2S.class,
+                        ClientSyncProtocol.CLIENT_PRESENCE_DISCRIMINATOR, NetworkDirection.PLAY_TO_SERVER)
+                .encoder(ClientPresenceC2S::encode)
+                .decoder(ClientPresenceC2S::decode)
+                .consumerMainThread((message, context) ->
+                        ClientHandshakeServer.handleClientPresence(message, context.get()))
+                .add();
         registered = true;
     }
 
@@ -79,6 +87,10 @@ public final class PartialReloadNetwork {
 
     public static void sendToServer(ClientHelloC2S hello) {
         CHANNEL.sendToServer(hello);
+    }
+
+    public static void sendPresence(ClientPresenceC2S presence) {
+        CHANNEL.sendToServer(presence);
     }
 
     public static boolean isRemotePresent(Connection connection) {

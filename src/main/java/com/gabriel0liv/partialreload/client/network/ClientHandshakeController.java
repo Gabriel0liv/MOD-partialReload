@@ -2,8 +2,11 @@ package com.gabriel0liv.partialreload.client.network;
 
 import java.util.UUID;
 
+import net.minecraft.client.Minecraft;
+
 import com.gabriel0liv.partialreload.network.PartialReloadNetwork;
 import com.gabriel0liv.partialreload.network.packet.ClientHelloC2S;
+import com.gabriel0liv.partialreload.network.packet.ClientPresenceC2S;
 import com.gabriel0liv.partialreload.network.packet.HandshakeAcceptedS2C;
 import com.gabriel0liv.partialreload.network.packet.ServerHelloS2C;
 import com.gabriel0liv.partialreload.network.protocol.ClientCapabilities;
@@ -19,12 +22,29 @@ public final class ClientHandshakeController {
     private static volatile ClientHandshakeState state = ClientHandshakeState.ABSENT;
     private static volatile UUID pendingChallenge;
     private static volatile int pendingProtocol;
+    private static volatile UUID clientSessionNonce;
 
     private ClientHandshakeController() {
     }
 
     public static void registerClientListeners() {
+        MinecraftForge.EVENT_BUS.addListener(ClientHandshakeController::onLoggingIn);
         MinecraftForge.EVENT_BUS.addListener((ClientPlayerNetworkEvent.LoggingOut event) -> reset());
+    }
+
+    private static void onLoggingIn(ClientPlayerNetworkEvent.LoggingIn event) {
+        var listener = Minecraft.getInstance().getConnection();
+        if (listener == null || !PartialReloadNetwork.isRemotePresent(listener.getConnection())) {
+            ClientHandshakeAcceptanceTrace.client("CLIENT_HANDSHAKE_CLIENT_PRESENCE_SKIPPED_REMOTE_ABSENT",
+                    null, ClientSyncProtocol.PROTOCOL_VERSION, ClientCapabilities.empty());
+            return;
+        }
+        clientSessionNonce = UUID.randomUUID();
+        ClientCapabilities capabilities = ClientCapabilities.of(ClientCapability.HANDSHAKE_V1);
+        PartialReloadNetwork.sendPresence(new ClientPresenceC2S(ClientSyncProtocol.PROTOCOL_VERSION,
+                com.gabriel0liv.partialreload.PartialReloadMod.VERSION, capabilities, clientSessionNonce));
+        ClientHandshakeAcceptanceTrace.client("CLIENT_HANDSHAKE_CLIENT_PRESENCE_SENT",
+                clientSessionNonce, ClientSyncProtocol.PROTOCOL_VERSION, capabilities);
     }
 
     public static void handle(ServerHelloS2C hello) {
@@ -70,6 +90,7 @@ public final class ClientHandshakeController {
     public static void reset() {
         pendingChallenge = null;
         pendingProtocol = 0;
+        clientSessionNonce = null;
         state = ClientHandshakeState.ABSENT;
         ClientHandshakeAcceptanceTrace.client("CLIENT_HANDSHAKE_CLIENT_RESET", null, 0,
                 ClientCapabilities.empty());

@@ -56,6 +56,7 @@ public final class ClientHandshakeAcceptanceTrace {
 
     private static String marker(ClientHandshakeState state) {
         return switch (state) {
+            case DISCOVERING -> "CLIENT_HANDSHAKE_SERVER_DISCOVERING";
             case ABSENT -> "CLIENT_HANDSHAKE_SERVER_ABSENT";
             case PENDING -> "CLIENT_HANDSHAKE_SERVER_PENDING";
             case COMPATIBLE -> "CLIENT_HANDSHAKE_SERVER_COMPATIBLE";

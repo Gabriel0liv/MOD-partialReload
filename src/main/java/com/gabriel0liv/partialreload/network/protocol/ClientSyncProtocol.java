@@ -9,6 +9,7 @@ public final class ClientSyncProtocol {
     public static final int SERVER_HELLO_DISCRIMINATOR = 0;
     public static final int CLIENT_HELLO_DISCRIMINATOR = 1;
     public static final int HANDSHAKE_ACCEPTED_DISCRIMINATOR = 2;
+    public static final int CLIENT_PRESENCE_DISCRIMINATOR = 3;
     public static final int MAX_MOD_VERSION_LENGTH = 64;
     public static final int MAX_CAPABILITIES = 16;
 

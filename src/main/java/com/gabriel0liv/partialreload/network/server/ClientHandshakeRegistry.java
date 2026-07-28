@@ -3,6 +3,8 @@ package com.gabriel0liv.partialreload.network.server;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Optional;
+import java.util.HashSet;
+import java.util.Set;
 import java.util.UUID;
 
 import com.gabriel0liv.partialreload.network.protocol.ClientCapabilities;
@@ -20,6 +22,16 @@ public final class ClientHandshakeRegistry {
     public static final String READY_TIMEOUT = ClientHandshakeError.READY_TIMEOUT.code();
 
     private final Map<UUID, ClientHandshakeSession> sessions = new HashMap<>();
+    private final Set<UUID> acceptedPresenceNonces = new HashSet<>();
+
+    public synchronized ClientHandshakeSession beginDiscovery(UUID playerId, int connectionIdentity,
+            long currentTick, long deadlineTick) {
+        ClientHandshakeSession session = new ClientHandshakeSession(playerId, connectionIdentity,
+                UUID.randomUUID(), ClientSyncProtocol.PROTOCOL_VERSION, ClientCapabilities.empty(),
+                ClientHandshakeState.DISCOVERING, currentTick, deadlineTick, null, null);
+        sessions.put(playerId, session);
+        return session;
+    }
 
     public synchronized ClientHandshakeSession begin(UUID playerId, int connectionIdentity,
             long currentTick, long deadlineTick) {
@@ -29,6 +41,35 @@ public final class ClientHandshakeRegistry {
                 deadlineTick, null, null);
         sessions.put(playerId, session);
         return session;
+    }
+
+    public synchronized ClientHandshakeResult acceptPresence(UUID playerId, int connectionIdentity,
+            UUID nonce, int protocolVersion, ClientCapabilities capabilities, String modVersion,
+            long currentTick, long challengeDeadlineTick) {
+        ClientHandshakeSession current = sessions.get(playerId);
+        if (current == null || current.state() != ClientHandshakeState.DISCOVERING
+                || current.connectionIdentity() != connectionIdentity || nonce == null
+                || acceptedPresenceNonces.contains(nonce)) {
+            return new ClientHandshakeResult(false, current, HANDSHAKE_INVALID);
+        }
+        if (currentTick >= current.deadlineTick()) {
+            ClientHandshakeSession absent = withState(current, ClientHandshakeState.ABSENT,
+                    currentTick, null);
+            sessions.put(playerId, absent);
+            return new ClientHandshakeResult(false, absent, READY_TIMEOUT);
+        }
+        if (protocolVersion != ClientSyncProtocol.PROTOCOL_VERSION) {
+            return reject(current, PROTOCOL_MISMATCH, currentTick);
+        }
+        if (capabilities == null || !capabilities.contains(ClientCapability.HANDSHAKE_V1)) {
+            return reject(current, CAPABILITY_MISSING, currentTick);
+        }
+        acceptedPresenceNonces.add(nonce);
+        ClientHandshakeSession pending = new ClientHandshakeSession(playerId, connectionIdentity,
+                UUID.randomUUID(), protocolVersion, capabilities, ClientHandshakeState.PENDING,
+                current.createdTick(), challengeDeadlineTick, null, null);
+        sessions.put(playerId, pending);
+        return new ClientHandshakeResult(true, pending, null);
     }
 
     public synchronized ClientHandshakeSession markAbsent(UUID playerId, int connectionIdentity,
@@ -99,6 +140,13 @@ public final class ClientHandshakeRegistry {
     public synchronized java.util.List<ClientHandshakeSession> tick(long currentTick) {
         java.util.ArrayList<ClientHandshakeSession> timedOut = new java.util.ArrayList<>();
         sessions.replaceAll((playerId, session) -> {
+            if (session.state() == ClientHandshakeState.DISCOVERING
+                    && currentTick >= session.deadlineTick()) {
+                ClientHandshakeSession result = withState(session, ClientHandshakeState.ABSENT,
+                        currentTick, null);
+                timedOut.add(result);
+                return result;
+            }
             if (session.state() == ClientHandshakeState.PENDING
                     && currentTick >= session.deadlineTick()) {
                 ClientHandshakeSession result = withState(session, ClientHandshakeState.TIMED_OUT,
@@ -128,6 +176,7 @@ public final class ClientHandshakeRegistry {
 
     public synchronized void clear() {
         sessions.clear();
+        acceptedPresenceNonces.clear();
     }
 
     private static ClientHandshakeSession withState(ClientHandshakeSession session,

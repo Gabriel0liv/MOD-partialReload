@@ -34,6 +34,7 @@ public final class PartialReloadConfig {
     private static final ForgeConfigSpec.IntValue MAX_TAG_DEPENDENCY_EDGES;
     private static final ForgeConfigSpec.LongValue MAX_TAG_JSON_BYTES;
     private static final ForgeConfigSpec.IntValue CLIENT_SYNC_HANDSHAKE_TIMEOUT_TICKS;
+    private static final ForgeConfigSpec.IntValue CLIENT_SYNC_PRESENCE_TIMEOUT_TICKS;
 
     static {
         ForgeConfigSpec.Builder builder = new ForgeConfigSpec.Builder();
@@ -103,6 +104,9 @@ public final class PartialReloadConfig {
         CLIENT_SYNC_HANDSHAKE_TIMEOUT_TICKS = builder
                 .comment("Ticks allowed for the optional client handshake.")
                 .defineInRange("handshake_timeout_ticks", 200, 20, 1_200);
+        CLIENT_SYNC_PRESENCE_TIMEOUT_TICKS = builder
+                .comment("Ticks allowed for client presence discovery.")
+                .defineInRange("presence_timeout_ticks", 100, 20, 600);
         builder.pop();
 
         builder.push("experimental");
@@ -189,5 +193,9 @@ public final class PartialReloadConfig {
     public static long maxTagJsonBytes() { return MAX_TAG_JSON_BYTES.get(); }
     public static int clientSyncHandshakeTimeoutTicks() {
         return CLIENT_SYNC_HANDSHAKE_TIMEOUT_TICKS.get();
+    }
+
+    public static int clientSyncPresenceTimeoutTicks() {
+        return CLIENT_SYNC_PRESENCE_TIMEOUT_TICKS.get();
     }
 }

@@ -5,6 +5,7 @@ import com.gabriel0liv.partialreload.PartialReloadMod;
 import com.gabriel0liv.partialreload.config.PartialReloadConfig;
 import com.gabriel0liv.partialreload.network.PartialReloadNetwork;
 import com.gabriel0liv.partialreload.network.packet.ClientHelloC2S;
+import com.gabriel0liv.partialreload.network.packet.ClientPresenceC2S;
 import com.gabriel0liv.partialreload.network.packet.HandshakeAcceptedS2C;
 import com.gabriel0liv.partialreload.network.packet.ServerHelloS2C;
 import com.gabriel0liv.partialreload.network.protocol.ClientCapabilities;
@@ -30,19 +31,10 @@ public final class ClientHandshakeServer {
             return;
         }
         int identity = System.identityHashCode(player.connection.connection);
-        if (!PartialReloadNetwork.isRemotePresent(player.connection.connection)) {
-            ClientHandshakeSession absent = registry.markAbsent(player.getUUID(), identity,
-                    player.getServer().getTickCount());
-            ClientHandshakeAcceptanceTrace.server("CLIENT_HANDSHAKE_SERVER_ABSENT", absent);
-            return;
-        }
         long now = player.getServer().getTickCount();
-        ClientHandshakeSession session = registry.begin(player.getUUID(), identity, now,
-                now + PartialReloadConfig.clientSyncHandshakeTimeoutTicks());
-        ClientHandshakeAcceptanceTrace.server("CLIENT_HANDSHAKE_SERVER_PENDING", session);
-        PartialReloadNetwork.sendHello(player, new ServerHelloS2C(
-                session.protocolVersion(), session.challenge(), PartialReloadMod.VERSION,
-                ClientCapabilities.of(ClientCapability.HANDSHAKE_V1)));
+        ClientHandshakeSession session = registry.beginDiscovery(player.getUUID(), identity, now,
+                now + PartialReloadConfig.clientSyncPresenceTimeoutTicks());
+        ClientHandshakeAcceptanceTrace.server("CLIENT_HANDSHAKE_SERVER_DISCOVERING", session);
     }
 
     public void onPlayerLogout(PlayerEvent.PlayerLoggedOutEvent event) {
@@ -64,7 +56,11 @@ public final class ClientHandshakeServer {
 
     public void tick(long currentTick) {
         for (ClientHandshakeSession session : registry.tick(currentTick)) {
-            ClientHandshakeAcceptanceTrace.server("CLIENT_HANDSHAKE_SERVER_TIMED_OUT", session);
+            if (session.state() == com.gabriel0liv.partialreload.network.protocol.ClientHandshakeState.ABSENT) {
+                ClientHandshakeAcceptanceTrace.server("CLIENT_HANDSHAKE_SERVER_ABSENT", session);
+            } else {
+                ClientHandshakeAcceptanceTrace.server("CLIENT_HANDSHAKE_SERVER_TIMED_OUT", session);
+            }
         }
     }
 
@@ -97,6 +93,36 @@ public final class ClientHandshakeServer {
                         new HandshakeAcceptedS2C(message.challenge(), message.protocolVersion(),
                                 message.capabilities()));
             }
+        });
+        context.setPacketHandled(true);
+    }
+
+    public static void handleClientPresence(ClientPresenceC2S message, NetworkEvent.Context context) {
+        context.enqueueWork(() -> {
+            ServerPlayer sender = context.getSender();
+            if (sender == null || sender.getServer() == null) {
+                return;
+            }
+            ClientHandshakeServer server = PartialReloadMod.networkServer();
+            if (server == null) {
+                return;
+            }
+            int identity = System.identityHashCode(sender.connection.connection);
+            ClientHandshakeResult result = server.registry.acceptPresence(sender.getUUID(), identity,
+                    message.clientSessionNonce(), message.protocolVersion(), message.capabilities(),
+                    message.clientModVersion(), sender.getServer().getTickCount(),
+                    sender.getServer().getTickCount() + PartialReloadConfig.clientSyncHandshakeTimeoutTicks());
+            if (!result.accepted()) {
+                if (result.session() != null) {
+                    ClientHandshakeAcceptanceTrace.server("CLIENT_HANDSHAKE_SERVER_INCOMPATIBLE", result.session());
+                }
+                return;
+            }
+            ClientHandshakeAcceptanceTrace.server("CLIENT_HANDSHAKE_SERVER_PRESENCE_RECEIVED", result.session());
+            ClientHandshakeAcceptanceTrace.server("CLIENT_HANDSHAKE_SERVER_PENDING", result.session());
+            PartialReloadNetwork.sendHello(sender, new ServerHelloS2C(
+                    result.session().protocolVersion(), result.session().challenge(), PartialReloadMod.VERSION,
+                    ClientCapabilities.of(ClientCapability.HANDSHAKE_V1)));
         });
         context.setPacketHandled(true);
     }
