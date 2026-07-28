@@ -6,12 +6,66 @@ plugins {
 
 version = mod_version
 group = mod_group_id
+def partialReloadModId = mod_id
+def acceptanceRunDirectory = System.getenv('PARTIALRELOAD_ACCEPTANCE_RUN_DIR')
+def acceptanceUsername = System.getenv('PARTIALRELOAD_ACCEPTANCE_USERNAME')
+def acceptanceWithMod = System.getenv('PARTIALRELOAD_ACCEPTANCE_WITH_MOD') != 'false'
+def acceptanceClient = acceptanceRunDirectory != null && acceptanceUsername != null
+
+def forgeLaunchJvmArgs = { String runName ->
+    def gradleCache = new File(gradle.gradleUserHomeDir, 'caches/modules-2/files-2.1')
+    def jar = { String group, String module, String fileName ->
+        def matches = fileTree(new File(gradleCache, "${group}/${module}")) {
+            include "**/${fileName}"
+        }.files
+        if (matches.empty) {
+            throw new GradleException("Missing ForgeGradle launch dependency ${group}:${module}:${fileName}")
+        }
+        matches.sort { a, b -> a.absolutePath <=> b.absolutePath }.last()
+    }
+    def moduleJars = [
+            jar('cpw.mods', 'bootstraplauncher', 'bootstraplauncher-1.1.2.jar'),
+            jar('cpw.mods', 'securejarhandler', 'securejarhandler-2.1.10.jar'),
+            jar('org.ow2.asm', 'asm-commons', 'asm-commons-9.8.jar'),
+            jar('org.ow2.asm', 'asm-util', 'asm-util-9.8.jar'),
+            jar('org.ow2.asm', 'asm-analysis', 'asm-analysis-9.8.jar'),
+            jar('org.ow2.asm', 'asm-tree', 'asm-tree-9.8.jar'),
+            jar('org.ow2.asm', 'asm', 'asm-9.8.jar'),
+            jar('net.minecraftforge', 'JarJarFileSystems', 'JarJarFileSystems-0.3.19.jar')
+    ]
+    [
+            "-DlegacyClassPath.file=${new File(buildDir, "classpath/${runName}_minecraftClasspath.txt")}",
+            '-DignoreList=bootstraplauncher,securejarhandler,asm-commons,asm-util,asm-analysis,asm-tree,asm,JarJarFileSystems,client-extra,fmlcore,javafmllanguage,lowcodelanguage,mclanguage,forge-',
+            '-DmergeModules=jna-5.10.0.jar,jna-platform-5.10.0.jar',
+            '-Djava.net.preferIPv6Addresses=system',
+            '-p', moduleJars.join(File.pathSeparator),
+            '--add-modules', 'ALL-MODULE-PATH',
+            '--add-opens', 'java.base/java.util.jar=cpw.mods.securejarhandler',
+            '--add-opens', 'java.base/java.lang.invoke=cpw.mods.securejarhandler',
+            '--add-exports', 'java.base/sun.security.util=cpw.mods.securejarhandler',
+            '--add-exports', 'jdk.naming.dns/com.sun.jndi.dns=java.naming'
+    ].collect { it.toString() }
+}
 
 base {
     archivesName = mod_id
 }
 
 java.toolchain.languageVersion = JavaLanguageVersion.of(17)
+
+sourceSets {
+    handshakeAcceptanceClient {
+        java.srcDir('src/handshakeAcceptanceClient/java')
+        resources.srcDir('src/handshakeAcceptanceClient/resources')
+        compileClasspath += sourceSets.main.compileClasspath
+        runtimeClasspath += sourceSets.main.runtimeClasspath
+    }
+}
+
+configurations {
+    handshakeAcceptanceClientImplementation.extendsFrom implementation
+    handshakeAcceptanceClientRuntimeOnly.extendsFrom runtimeOnly
+}
 
 minecraft {
     mappings channel: mapping_channel, version: mapping_version
@@ -21,23 +75,108 @@ minecraft {
         configureEach {
             workingDirectory project.file('run')
             property 'forge.logging.console.level', 'info'
-
-            mods {
-                "${mod_id}" {
-                    source sourceSets.main
-                }
-            }
         }
 
         server {
             args '--nogui'
+            if (acceptanceRunDirectory != null) {
+                workingDirectory project.file(acceptanceRunDirectory)
+            }
+            mods {
+                "${mod_id}" { source sourceSets.main }
+            }
         }
 
         gameTestServer {
             property 'forge.enabledGameTestNamespaces', mod_id
+            mods {
+                "${mod_id}" { source sourceSets.main }
+            }
+        }
+
+        client {
+            if (acceptanceClient) {
+                workingDirectory project.file(acceptanceRunDirectory)
+                args '--username', acceptanceUsername
+            }
+            mods {
+                if (acceptanceWithMod) {
+                    "${mod_id}" { source sourceSets.main }
+                }
+                if (acceptanceClient) {
+                    partialreload_handshake_acceptance { source sourceSets.handshakeAcceptanceClient }
+                }
+            }
+        }
+
+        handshakeAcceptanceServer {
+            main 'cpw.mods.bootstraplauncher.BootstrapLauncher'
+            client false
+            workingDirectory project.file('run/handshake-acceptance/server')
+            args '--nogui'
+            mods {
+                "${mod_id}" { source sourceSets.main }
+            }
+            jvmArgs forgeLaunchJvmArgs('runHandshakeAcceptanceServer')
+            args '--launchTarget', 'forgeserveruserdev', '--gameDir', '.',
+                    '--fml.forgeVersion', forge_version, '--fml.mcVersion', minecraft_version,
+                    '--fml.forgeGroup', 'net.minecraftforge', '--fml.mcpVersion', '20230612.114412', '--nogui'
+        }
+
+        handshakeAcceptanceClientWithMod {
+            main 'cpw.mods.bootstraplauncher.BootstrapLauncher'
+            client true
+            workingDirectory project.file('run/handshake-acceptance/client-with-mod')
+            args '--username', System.getenv('PARTIALRELOAD_ACCEPTANCE_USERNAME') ?: 'PartialReloadCompatible'
+            mods {
+                "${mod_id}" { source sourceSets.main }
+                partialreload_handshake_acceptance { source sourceSets.handshakeAcceptanceClient }
+            }
+            jvmArgs forgeLaunchJvmArgs('runHandshakeAcceptanceClientWithMod')
+            args '--launchTarget', 'forgeclientuserdev', '--gameDir', '.',
+                    '--fml.forgeVersion', forge_version, '--fml.mcVersion', minecraft_version,
+                    '--fml.forgeGroup', 'net.minecraftforge', '--fml.mcpVersion', '20230612.114412'
+        }
+
+        handshakeAcceptanceClientWithoutMod {
+            main 'cpw.mods.bootstraplauncher.BootstrapLauncher'
+            client true
+            workingDirectory project.file('run/handshake-acceptance/client-without-mod')
+            args '--username', System.getenv('PARTIALRELOAD_ACCEPTANCE_USERNAME') ?: 'PartialReloadAbsent'
+            mods {
+                partialreload_handshake_acceptance { source sourceSets.handshakeAcceptanceClient }
+            }
+            def mainMod = getMods().findByName(partialReloadModId)
+            if (mainMod != null) {
+                getMods().remove(mainMod)
+            }
+            jvmArgs forgeLaunchJvmArgs('runHandshakeAcceptanceClientWithoutMod')
+            args '--launchTarget', 'forgeclientuserdev', '--gameDir', '.',
+                    '--fml.forgeVersion', forge_version, '--fml.mcVersion', minecraft_version,
+                    '--fml.forgeGroup', 'net.minecraftforge', '--fml.mcpVersion', '20230612.114412'
         }
     }
 }
+
+tasks.matching { it.name in [
+        'handshakeAcceptanceServer',
+        'handshakeAcceptanceClientWithMod',
+        'handshakeAcceptanceClientWithoutMod'
+] }.configureEach {
+    dependsOn tasks.named('compileHandshakeAcceptanceClientJava')
+    dependsOn tasks.named('processHandshakeAcceptanceClientResources')
+}
+tasks.matching { acceptanceClient && it.name == 'runClient' }.configureEach {
+    dependsOn tasks.named('compileHandshakeAcceptanceClientJava')
+    dependsOn tasks.named('processHandshakeAcceptanceClientResources')
+}
+tasks.named('processHandshakeAcceptanceClientResources').configure {
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+}
+afterEvaluate {
+    tasks.named('processHandshakeAcceptanceClientResources').get().duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+}
+
 
 dependencies {
     minecraft "net.minecraftforge:forge:${minecraft_version}-${forge_version}"

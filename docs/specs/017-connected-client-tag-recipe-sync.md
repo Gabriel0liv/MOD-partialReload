@@ -91,8 +91,9 @@ join/disconnect race, menu aberto, recipe removida, rollback e dois clientes.
 
 ## 14. Decisões pendentes
 
-Implementação permanece bloqueada até fault injection, player race, registry
-vazio, registries não suportados e `DEGRADED` terem aceitação dedicada real.
+A fundação 4F-A foi implementada, mas sua promoção depende de acceptance real
+com cliente compatível, reconexão, timeout e cliente sem canal. As fases
+4F-B/C/D permanecem bloqueadas até essa evidência.
 
 ## 15. Relação com outras specs
 
@@ -108,5 +109,6 @@ publicação e ACK transacional permanecem fora do escopo.
 
 O safety gate server-side da Fase 4E-S foi promovido em 2026-07-27 após
 GameTests, safety acceptance completa e runner consolidado aprovados. A
-fundação 4F-A foi validada por testes de codecs, sessões e boot dedicated;
-4F-B/C/D continuam bloqueadas até acceptance real multi-client.
+fundação 4F-A foi validada por testes de codecs, sessões e boot dedicated, mas
+sua promoção depende de acceptance real com cliente compatível, reconexão,
+timeout e cliente sem canal. 4F-B/C/D continuam bloqueadas até essa evidência.

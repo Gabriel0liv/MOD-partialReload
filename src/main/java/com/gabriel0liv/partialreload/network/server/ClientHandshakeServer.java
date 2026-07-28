@@ -11,6 +11,7 @@ import com.gabriel0liv.partialreload.network.protocol.ClientCapabilities;
 import com.gabriel0liv.partialreload.network.protocol.ClientCapability;
 import com.gabriel0liv.partialreload.network.protocol.ClientHandshakeResult;
 import com.gabriel0liv.partialreload.network.protocol.ClientHandshakeSession;
+import com.gabriel0liv.partialreload.network.protocol.ClientHandshakeAcceptanceTrace;
 
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraftforge.event.entity.player.PlayerEvent;
@@ -30,12 +31,15 @@ public final class ClientHandshakeServer {
         }
         int identity = System.identityHashCode(player.connection.connection);
         if (!PartialReloadNetwork.isRemotePresent(player.connection.connection)) {
-            registry.markAbsent(player.getUUID(), identity, player.getServer().getTickCount());
+            ClientHandshakeSession absent = registry.markAbsent(player.getUUID(), identity,
+                    player.getServer().getTickCount());
+            ClientHandshakeAcceptanceTrace.server("CLIENT_HANDSHAKE_SERVER_ABSENT", absent);
             return;
         }
         long now = player.getServer().getTickCount();
         ClientHandshakeSession session = registry.begin(player.getUUID(), identity, now,
                 now + PartialReloadConfig.clientSyncHandshakeTimeoutTicks());
+        ClientHandshakeAcceptanceTrace.server("CLIENT_HANDSHAKE_SERVER_PENDING", session);
         PartialReloadNetwork.sendHello(player, new ServerHelloS2C(
                 session.protocolVersion(), session.challenge(), PartialReloadMod.VERSION,
                 ClientCapabilities.of(ClientCapability.HANDSHAKE_V1)));
@@ -43,12 +47,25 @@ public final class ClientHandshakeServer {
 
     public void onPlayerLogout(PlayerEvent.PlayerLoggedOutEvent event) {
         if (event.getEntity() instanceof ServerPlayer player) {
-            registry.disconnect(player.getUUID(), System.identityHashCode(player.connection.connection));
+            int identity = System.identityHashCode(player.connection.connection);
+            registry.session(player.getUUID()).ifPresent(session -> {
+                if (session.connectionIdentity() == identity) {
+                    ClientHandshakeAcceptanceTrace.server("CLIENT_HANDSHAKE_SERVER_DISCONNECTED",
+                            new ClientHandshakeSession(session.playerId(), session.connectionIdentity(),
+                                    session.challenge(), session.protocolVersion(), session.capabilities(),
+                                    com.gabriel0liv.partialreload.network.protocol.ClientHandshakeState.DISCONNECTED,
+                                    session.createdTick(), session.deadlineTick(),
+                                    Long.valueOf(player.getServer().getTickCount()), session.errorCode()));
+                }
+            });
+            registry.disconnect(player.getUUID(), identity);
         }
     }
 
     public void tick(long currentTick) {
-        registry.tick(currentTick);
+        for (ClientHandshakeSession session : registry.tick(currentTick)) {
+            ClientHandshakeAcceptanceTrace.server("CLIENT_HANDSHAKE_SERVER_TIMED_OUT", session);
+        }
     }
 
     public void clear() {
@@ -69,6 +86,12 @@ public final class ClientHandshakeServer {
                     System.identityHashCode(context.getNetworkManager()), message.challenge(),
                     message.protocolVersion(), message.capabilities(),
                     sender.getServer().getTickCount());
+            if (result.session() != null) {
+                ClientHandshakeAcceptanceTrace.server(
+                        result.accepted() ? "CLIENT_HANDSHAKE_SERVER_COMPATIBLE"
+                                : "CLIENT_HANDSHAKE_SERVER_INCOMPATIBLE",
+                        result.session());
+            }
             if (result.accepted()) {
                 PartialReloadNetwork.CHANNEL.send(PacketDistributor.PLAYER.with(() -> sender),
                         new HandshakeAcceptedS2C(message.challenge(), message.protocolVersion(),

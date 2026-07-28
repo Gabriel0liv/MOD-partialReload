@@ -1,0 +1,9 @@
+modLoader="javafml"
+loaderVersion="[47,)"
+license="MIT"
+
+[[mods]]
+modId="partialreload_handshake_acceptance"
+version="1.0.0"
+displayName="Partial Reload Handshake Acceptance Client"
+description='''Disposable client-only connector for the 4F-A real handshake acceptance.'''

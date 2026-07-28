@@ -96,15 +96,19 @@ public final class ClientHandshakeRegistry {
         return new ClientHandshakeResult(false, incompatible, error);
     }
 
-    public synchronized void tick(long currentTick) {
+    public synchronized java.util.List<ClientHandshakeSession> tick(long currentTick) {
+        java.util.ArrayList<ClientHandshakeSession> timedOut = new java.util.ArrayList<>();
         sessions.replaceAll((playerId, session) -> {
             if (session.state() == ClientHandshakeState.PENDING
                     && currentTick >= session.deadlineTick()) {
-                return withState(session, ClientHandshakeState.TIMED_OUT, currentTick,
-                        READY_TIMEOUT);
+                ClientHandshakeSession result = withState(session, ClientHandshakeState.TIMED_OUT,
+                        currentTick, READY_TIMEOUT);
+                timedOut.add(result);
+                return result;
             }
             return session;
         });
+        return java.util.List.copyOf(timedOut);
     }
 
     public synchronized void disconnect(UUID playerId, int connectionIdentity) {

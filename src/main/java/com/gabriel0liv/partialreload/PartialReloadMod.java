@@ -21,6 +21,8 @@ import net.minecraftforge.eventbus.api.EventPriority;
 import net.minecraftforge.fml.common.Mod;
 import net.minecraftforge.fml.config.ModConfig;
 import net.minecraftforge.fml.javafmlmod.FMLJavaModLoadingContext;
+import net.minecraftforge.api.distmarker.Dist;
+import net.minecraftforge.fml.DistExecutor;
 import org.slf4j.Logger;
 
 import java.time.Clock;
@@ -38,6 +40,8 @@ public final class PartialReloadMod {
     public PartialReloadMod(FMLJavaModLoadingContext context) {
         TagRecipeFaultInjection.clear();
         PartialReloadNetwork.register();
+        DistExecutor.unsafeRunWhenOn(Dist.CLIENT,
+                () -> com.gabriel0liv.partialreload.client.network.ClientHandshakeController::registerClientListeners);
         LOGGER.info("CLIENT_HANDSHAKE_FOUNDATION_CHANNEL_REGISTERED:{}",
                 com.gabriel0liv.partialreload.network.protocol.ClientSyncProtocol.CHANNEL_ID);
         handshakeServer = new ClientHandshakeServer();

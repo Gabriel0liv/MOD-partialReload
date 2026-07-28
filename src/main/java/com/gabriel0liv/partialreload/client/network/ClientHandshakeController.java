@@ -8,8 +8,12 @@ import com.gabriel0liv.partialreload.network.packet.HandshakeAcceptedS2C;
 import com.gabriel0liv.partialreload.network.packet.ServerHelloS2C;
 import com.gabriel0liv.partialreload.network.protocol.ClientCapabilities;
 import com.gabriel0liv.partialreload.network.protocol.ClientCapability;
+import com.gabriel0liv.partialreload.network.protocol.ClientHandshakeAcceptanceTrace;
 import com.gabriel0liv.partialreload.network.protocol.ClientHandshakeState;
 import com.gabriel0liv.partialreload.network.protocol.ClientSyncProtocol;
+
+import net.minecraftforge.client.event.ClientPlayerNetworkEvent;
+import net.minecraftforge.common.MinecraftForge;
 
 public final class ClientHandshakeController {
     private static volatile ClientHandshakeState state = ClientHandshakeState.ABSENT;
@@ -19,7 +23,13 @@ public final class ClientHandshakeController {
     private ClientHandshakeController() {
     }
 
+    public static void registerClientListeners() {
+        MinecraftForge.EVENT_BUS.addListener((ClientPlayerNetworkEvent.LoggingOut event) -> reset());
+    }
+
     public static void handle(ServerHelloS2C hello) {
+        ClientHandshakeAcceptanceTrace.client("CLIENT_HANDSHAKE_CLIENT_HELLO_RECEIVED",
+                hello.challenge(), hello.protocolVersion(), hello.requiredCapabilities());
         if (hello.protocolVersion() != ClientSyncProtocol.PROTOCOL_VERSION
                 || !hello.requiredCapabilities().contains(ClientCapability.HANDSHAKE_V1)) {
             state = ClientHandshakeState.INCOMPATIBLE;
@@ -28,11 +38,19 @@ public final class ClientHandshakeController {
         pendingChallenge = hello.challenge();
         pendingProtocol = hello.protocolVersion();
         state = ClientHandshakeState.PENDING;
+        if (ClientHandshakeAcceptanceMode.current() == ClientHandshakeAcceptanceMode.SILENT) {
+            return;
+        }
         PartialReloadNetwork.sendToServer(new ClientHelloC2S(hello.challenge(),
                 hello.protocolVersion(), ClientCapabilities.of(ClientCapability.HANDSHAKE_V1)));
+        ClientHandshakeAcceptanceTrace.client("CLIENT_HANDSHAKE_CLIENT_HELLO_SENT",
+                hello.challenge(), hello.protocolVersion(),
+                ClientCapabilities.of(ClientCapability.HANDSHAKE_V1));
     }
 
     public static void handle(HandshakeAcceptedS2C accepted) {
+        ClientHandshakeAcceptanceTrace.client("CLIENT_HANDSHAKE_CLIENT_ACCEPTED",
+                accepted.challenge(), accepted.protocolVersion(), accepted.acceptedCapabilities());
         if (state != ClientHandshakeState.PENDING
                 || !accepted.challenge().equals(pendingChallenge)
                 || accepted.protocolVersion() != pendingProtocol
@@ -41,6 +59,8 @@ public final class ClientHandshakeController {
             return;
         }
         state = ClientHandshakeState.COMPATIBLE;
+        ClientHandshakeAcceptanceTrace.client("CLIENT_HANDSHAKE_CLIENT_COMPATIBLE",
+                accepted.challenge(), accepted.protocolVersion(), accepted.acceptedCapabilities());
     }
 
     public static ClientHandshakeState state() {
@@ -51,5 +71,7 @@ public final class ClientHandshakeController {
         pendingChallenge = null;
         pendingProtocol = 0;
         state = ClientHandshakeState.ABSENT;
+        ClientHandshakeAcceptanceTrace.client("CLIENT_HANDSHAKE_CLIENT_RESET", null, 0,
+                ClientCapabilities.empty());
     }
 }
