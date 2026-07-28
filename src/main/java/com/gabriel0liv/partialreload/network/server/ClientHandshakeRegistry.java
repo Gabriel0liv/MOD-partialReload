@@ -3,8 +3,6 @@ package com.gabriel0liv.partialreload.network.server;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Optional;
-import java.util.HashSet;
-import java.util.Set;
 import java.util.UUID;
 
 import com.gabriel0liv.partialreload.network.protocol.ClientCapabilities;
@@ -22,7 +20,20 @@ public final class ClientHandshakeRegistry {
     public static final String READY_TIMEOUT = ClientHandshakeError.READY_TIMEOUT.code();
 
     private final Map<UUID, ClientHandshakeSession> sessions = new HashMap<>();
-    private final Set<UUID> acceptedPresenceNonces = new HashSet<>();
+    private final Map<UUID, UUID> presenceNonces = new HashMap<>();
+
+    public record DiscoveryResult(ClientHandshakeSession session, boolean created) {}
+
+    public synchronized DiscoveryResult ensureDiscovery(UUID playerId, int connectionIdentity,
+            long currentTick, long deadlineTick) {
+        ClientHandshakeSession current = sessions.get(playerId);
+        if (current != null && current.connectionIdentity() == connectionIdentity
+                && current.state() != ClientHandshakeState.DISCONNECTED) {
+            return new DiscoveryResult(current, false);
+        }
+        ClientHandshakeSession created = beginDiscovery(playerId, connectionIdentity, currentTick, deadlineTick);
+        return new DiscoveryResult(created, true);
+    }
 
     public synchronized ClientHandshakeSession beginDiscovery(UUID playerId, int connectionIdentity,
             long currentTick, long deadlineTick) {
@@ -49,7 +60,7 @@ public final class ClientHandshakeRegistry {
         ClientHandshakeSession current = sessions.get(playerId);
         if (current == null || current.state() != ClientHandshakeState.DISCOVERING
                 || current.connectionIdentity() != connectionIdentity || nonce == null
-                || acceptedPresenceNonces.contains(nonce)) {
+                || presenceNonces.containsKey(playerId)) {
             return new ClientHandshakeResult(false, current, HANDSHAKE_INVALID);
         }
         if (currentTick >= current.deadlineTick()) {
@@ -64,7 +75,7 @@ public final class ClientHandshakeRegistry {
         if (capabilities == null || !capabilities.contains(ClientCapability.HANDSHAKE_V1)) {
             return reject(current, CAPABILITY_MISSING, currentTick);
         }
-        acceptedPresenceNonces.add(nonce);
+        presenceNonces.put(playerId, nonce);
         ClientHandshakeSession pending = new ClientHandshakeSession(playerId, connectionIdentity,
                 UUID.randomUUID(), protocolVersion, capabilities, ClientHandshakeState.PENDING,
                 current.createdTick(), challengeDeadlineTick, null, null);
@@ -162,7 +173,8 @@ public final class ClientHandshakeRegistry {
     public synchronized void disconnect(UUID playerId, int connectionIdentity) {
         ClientHandshakeSession current = sessions.get(playerId);
         if (current != null && current.connectionIdentity() == connectionIdentity) {
-            sessions.remove(playerId);
+        sessions.remove(playerId);
+            presenceNonces.remove(playerId);
         }
     }
 
@@ -176,7 +188,7 @@ public final class ClientHandshakeRegistry {
 
     public synchronized void clear() {
         sessions.clear();
-        acceptedPresenceNonces.clear();
+        presenceNonces.clear();
     }
 
     private static ClientHandshakeSession withState(ClientHandshakeSession session,

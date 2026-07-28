@@ -32,9 +32,11 @@ public final class ClientHandshakeServer {
         }
         int identity = System.identityHashCode(player.connection.connection);
         long now = player.getServer().getTickCount();
-        ClientHandshakeSession session = registry.beginDiscovery(player.getUUID(), identity, now,
+        ClientHandshakeRegistry.DiscoveryResult discovery = registry.ensureDiscovery(player.getUUID(), identity, now,
                 now + PartialReloadConfig.clientSyncPresenceTimeoutTicks());
-        ClientHandshakeAcceptanceTrace.server("CLIENT_HANDSHAKE_SERVER_DISCOVERING", session);
+        if (discovery.created()) {
+            ClientHandshakeAcceptanceTrace.server("CLIENT_HANDSHAKE_SERVER_DISCOVERING", discovery.session());
+        }
     }
 
     public void onPlayerLogout(PlayerEvent.PlayerLoggedOutEvent event) {
@@ -79,7 +81,7 @@ public final class ClientHandshakeServer {
                 return;
             }
             ClientHandshakeResult result = server.registry.accept(sender.getUUID(),
-                    System.identityHashCode(context.getNetworkManager()), message.challenge(),
+                    System.identityHashCode(sender.connection.connection), message.challenge(),
                     message.protocolVersion(), message.capabilities(),
                     sender.getServer().getTickCount());
             if (result.session() != null) {
@@ -108,10 +110,13 @@ public final class ClientHandshakeServer {
                 return;
             }
             int identity = System.identityHashCode(sender.connection.connection);
+            long now = sender.getServer().getTickCount();
+            ClientHandshakeRegistry.DiscoveryResult discovery = server.registry.ensureDiscovery(sender.getUUID(),
+                    identity, now, now + PartialReloadConfig.clientSyncPresenceTimeoutTicks());
             ClientHandshakeResult result = server.registry.acceptPresence(sender.getUUID(), identity,
                     message.clientSessionNonce(), message.protocolVersion(), message.capabilities(),
-                    message.clientModVersion(), sender.getServer().getTickCount(),
-                    sender.getServer().getTickCount() + PartialReloadConfig.clientSyncHandshakeTimeoutTicks());
+                    message.clientModVersion(), now,
+                    now + PartialReloadConfig.clientSyncHandshakeTimeoutTicks());
             if (!result.accepted()) {
                 if (result.session() != null) {
                     ClientHandshakeAcceptanceTrace.server("CLIENT_HANDSHAKE_SERVER_INCOMPATIBLE", result.session());

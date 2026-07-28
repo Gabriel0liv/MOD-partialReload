@@ -11,7 +11,9 @@ import net.minecraft.network.FriendlyByteBuf;
 public record ClientPresenceC2S(int protocolVersion, String clientModVersion,
         ClientCapabilities capabilities, UUID clientSessionNonce) {
     public ClientPresenceC2S {
-        if (clientModVersion == null || clientModVersion.length() > ClientSyncProtocol.MAX_MOD_VERSION_LENGTH
+        if (clientModVersion == null || clientModVersion.isEmpty()
+                || clientModVersion.length() > ClientSyncProtocol.MAX_MOD_VERSION_LENGTH
+                || clientModVersion.chars().anyMatch(Character::isISOControl)
                 || capabilities == null || clientSessionNonce == null) {
             throw new IllegalArgumentException("CLIENT_HANDSHAKE_PRESENCE_INVALID");
         }
