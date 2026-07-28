@@ -113,6 +113,9 @@ public final class ClientHandshakeServer {
             long now = sender.getServer().getTickCount();
             ClientHandshakeRegistry.DiscoveryResult discovery = server.registry.ensureDiscovery(sender.getUUID(),
                     identity, now, now + PartialReloadConfig.clientSyncPresenceTimeoutTicks());
+            if (discovery.created()) {
+                ClientHandshakeAcceptanceTrace.server("CLIENT_HANDSHAKE_SERVER_DISCOVERING", discovery.session());
+            }
             ClientHandshakeResult result = server.registry.acceptPresence(sender.getUUID(), identity,
                     message.clientSessionNonce(), message.protocolVersion(), message.capabilities(),
                     message.clientModVersion(), now,

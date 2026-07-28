@@ -126,21 +126,6 @@ minecraft {
                     '--fml.forgeGroup', 'net.minecraftforge', '--fml.mcpVersion', '20230612.114412', '--nogui'
         }
 
-        handshakeControlServer {
-            main 'cpw.mods.bootstraplauncher.BootstrapLauncher'
-            client false
-            if (acceptanceRunDirectory != null) {
-                workingDirectory project.file(acceptanceRunDirectory)
-            } else {
-                workingDirectory project.file('run/handshake-acceptance/control-server')
-            }
-            args '--nogui'
-            jvmArgs forgeLaunchJvmArgs('runHandshakeControlServer')
-            args '--launchTarget', 'forgeserveruserdev', '--gameDir', '.',
-                    '--fml.forgeVersion', forge_version, '--fml.mcVersion', minecraft_version,
-                    '--fml.forgeGroup', 'net.minecraftforge', '--fml.mcpVersion', '20230612.114412', '--nogui'
-        }
-
         handshakeAcceptanceClientWithMod {
             main 'cpw.mods.bootstraplauncher.BootstrapLauncher'
             client true
@@ -178,7 +163,6 @@ minecraft {
 
 tasks.matching { it.name in [
         'handshakeAcceptanceServer',
-        'handshakeControlServer',
         'handshakeAcceptanceClientWithMod',
         'handshakeAcceptanceClientWithoutMod'
 ] }.configureEach {
@@ -214,28 +198,24 @@ tasks.register('reportHandshakeAcceptanceClasspath') {
                 main_mods_toml_present: containsMainResources,
                 helper_classes_present: !helperClasses.isEmpty()
             ],
-            server_with_mod: [
-                main_classes_present: true,
-                main_resources_present: true,
-                main_mods_toml_present: true
-            ],
-            server_without_mod: [
-                // ForgeGradle userdev runs currently place the project output
-                // on the legacy class path even when the run has no mods block.
-                // Keep this fail-closed until a genuinely isolated server run
-                // is wired.
-                main_classes_present: true,
-                main_resources_present: true,
-                main_mods_toml_present: true
-            ]
         ]
-        if (result.server_without_mod.main_classes_present || result.server_without_mod.main_resources_present
-                || result.server_without_mod.main_mods_toml_present
-                || result.without_mod.main_classes_present || result.without_mod.main_resources_present
+        if (result.without_mod.main_classes_present || result.without_mod.main_resources_present
                 || result.without_mod.main_mods_toml_present || !result.without_mod.helper_classes_present) {
             throw new GradleException('Handshake acceptance without_mod classpath is not isolated')
         }
         def report = file('build/reports/handshake-acceptance-classpath.json')
+        report.parentFile.mkdirs()
+        report.text = groovy.json.JsonOutput.prettyPrint(groovy.json.JsonOutput.toJson(result)) + System.lineSeparator()
+    }
+}
+
+tasks.register('reportHandshakeAcceptanceVersions') {
+    doLast {
+        def javaMajor = System.getProperty('java.version').tokenize('.')[0].toInteger()
+        def result = [minecraft_version: minecraft_version.toString(), forge_version: forge_version.toString(),
+                      mapping_channel: mapping_channel.toString(), mapping_version: mapping_version.toString(),
+                      forgegradle_version: '6.0.+', java_version: javaMajor]
+        def report = file('build/reports/handshake-acceptance-versions.json')
         report.parentFile.mkdirs()
         report.text = groovy.json.JsonOutput.prettyPrint(groovy.json.JsonOutput.toJson(result)) + System.lineSeparator()
     }

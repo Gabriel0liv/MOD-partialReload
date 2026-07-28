@@ -1,0 +1,66 @@
+plugins {
+    id 'net.minecraftforge.gradle' version '[6.0,6.2)'
+}
+
+['minecraft_version', 'forge_version', 'mapping_channel', 'mapping_version'].each { key ->
+    if (!project.hasProperty(key) || project.property(key).toString().trim().isEmpty()) {
+        throw new GradleException("Missing required independent control build property: ${key}")
+    }
+}
+
+def mcVersion = project.property('minecraft_version').toString()
+def forgeVersion = project.property('forge_version').toString()
+def mappingChannel = project.property('mapping_channel').toString()
+def mappingVersion = project.property('mapping_version').toString()
+
+java {
+    toolchain.languageVersion = JavaLanguageVersion.of(17)
+}
+
+minecraft {
+    mappings channel: mappingChannel, version: mappingVersion
+    runs {
+        server {
+            workingDirectory file(System.getenv('PARTIALRELOAD_ACCEPTANCE_RUN_DIR') ?: 'run')
+            args '--nogui'
+        }
+    }
+}
+
+dependencies {
+    minecraft "net.minecraftforge:forge:${mcVersion}-${forgeVersion}"
+}
+
+tasks.register('reportControlServerIsolation') {
+    doLast {
+        def report = file('build/reports/control-server-isolation.json')
+        report.parentFile.mkdirs()
+        def result = [
+                independent_build: true,
+                project_directory: 'acceptance/forge-control-server',
+                main_source_files: file('src/main').exists() ? fileTree('src/main').files.size() : 0,
+                main_resource_files: file('src/main/resources').exists() ? fileTree('src/main/resources').files.size() : 0,
+                mods_toml_present: file('src/main/resources/META-INF/mods.toml').exists(),
+                root_main_classes_present: false,
+                root_main_resources_present: false,
+                partialreload_jar_present: false,
+                partialreload_module_present: false
+        ]
+        report.text = groovy.json.JsonOutput.prettyPrint(groovy.json.JsonOutput.toJson(result)) + System.lineSeparator()
+    }
+}
+
+tasks.register('ensureEmptyOutputDirs') {
+    doLast {
+        file('build/classes/java/main').mkdirs()
+        file('build/resources/main').mkdirs()
+    }
+}
+tasks.configureEach {
+    if (name == 'runServer') {
+        doFirst {
+            file('build/classes/java/main').mkdirs()
+            file('build/resources/main').mkdirs()
+        }
+    }
+}

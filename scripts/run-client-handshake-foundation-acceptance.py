@@ -481,7 +481,9 @@ class Acceptance:
     def __init__(self, initial_connect_mode: str = "CONTROL", cold_login_probes: int = 0,
                  client_mod_mode: str = "with_mod", strict_client_isolation: bool = False,
                  require_attempt_cleanup: bool = False, fresh_server_per_probe: bool = False,
-                 cycles: int = 0, server_mod_mode: str = "with_mod") -> None:
+                 cycles: int = 0, server_mod_mode: str = "with_mod",
+                 server_smoke_only: bool = False, required_valid_trials: int = 0,
+                 maximum_launch_attempts: int = 0) -> None:
         self.run_id = uuid.uuid4().hex
         self.run_log_root = LOG_ROOT / self.run_id
         self.server_port, self.rcon_port = free_port(), free_port()
@@ -501,7 +503,12 @@ class Acceptance:
         self.fresh_server_per_probe = fresh_server_per_probe
         self.cycles = cycles
         self.server_mod_mode = server_mod_mode
-        self.server_task = "runServer" if server_mod_mode == "with_mod" else "runHandshakeControlServer"
+        self.server_task = "runServer"
+        self.server_build_mode = "root_gradle" if server_mod_mode == "with_mod" else "independent_gradle_build"
+        self.server_project_directory = "." if server_mod_mode == "with_mod" else "acceptance/forge-control-server"
+        self.server_smoke_only = server_smoke_only
+        self.required_valid_trials = required_valid_trials
+        self.maximum_launch_attempts = maximum_launch_attempts
         self.failure_capture_errors: list[str] = []
         self.failure_tcp_state: dict[str, object] = {}
         self.failure_process_tree: dict[str, object] = {}
@@ -542,16 +549,36 @@ class Acceptance:
 
     def start_server(self) -> None:
         self.prepare_server()
+        command = [str(ROOT / "gradlew.bat")]
+        if self.server_mod_mode == "without_mod":
+            control_build = ROOT / "acceptance" / "forge-control-server"
+            (control_build / "build" / "classes" / "java" / "main").mkdir(parents=True, exist_ok=True)
+            (control_build / "build" / "resources" / "main").mkdir(parents=True, exist_ok=True)
+            versions_task = [str(ROOT / "gradlew.bat"), "--no-daemon", "--console=plain",
+                             "reportHandshakeAcceptanceVersions"]
+            subprocess.run(versions_task, cwd=ROOT, env=self.env(), check=True,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+            versions_path = ROOT / "build" / "reports" / "handshake-acceptance-versions.json"
+            versions = json.loads(versions_path.read_text(encoding="utf-8"))
+            required = ("minecraft_version", "forge_version", "mapping_channel", "mapping_version")
+            if any(not str(versions.get(key, "")).strip() for key in required):
+                raise RuntimeError("Handshake acceptance versions report is incomplete")
+            command += ["-p", str(ROOT / "acceptance" / "forge-control-server"), "--no-daemon", "--console=plain"]
+            command += [f"-P{key}={versions[key]}" for key in required]
+        else:
+            command += ["--no-daemon", "--console=plain"]
+        command += [self.server_task]
         server_env = self.env()
         server_env["PARTIALRELOAD_ACCEPTANCE_RUN_ID"] = self.run_id
         server_env["PARTIALRELOAD_ACCEPTANCE_RUN_DIR"] = str(RUN_ROOT / self.server_directory_name)
-        self.server = OwnedProcess("server", [str(ROOT / "gradlew.bat"), "--no-daemon", "--console=plain",
-                                               self.server_task], server_env, ROOT,
+        self.server = OwnedProcess("server", command, server_env, ROOT,
                                    self.run_log_root / "server.stdout.log")
         self.server.start()
         if self.server_mod_mode == "with_mod":
             self.server.wait_marker("CLIENT_HANDSHAKE_FOUNDATION_CHANNEL_REGISTERED", 180)
         self.server.wait_marker("Done", 180)
+        if self.server_mod_mode == "without_mod":
+            self.inspect_control_classpath()
         deadline = time.monotonic() + 180
         while time.monotonic() < deadline:
             try:
@@ -561,6 +588,24 @@ class Acceptance:
             except Exception:
                 time.sleep(.5)
         raise TimeoutError("RCON unavailable")
+
+    def inspect_control_classpath(self) -> dict[str, object]:
+        classpath_file = ROOT / "acceptance" / "forge-control-server" / "build" / "classpath" / "runServer_minecraftClasspath.txt"
+        entries = []
+        if classpath_file.exists():
+            entries = [line.strip() for line in classpath_file.read_text(encoding="utf-8", errors="replace").splitlines() if line.strip()]
+        root_main = str((ROOT / "build" / "classes" / "java" / "main")).lower()
+        root_resources = str((ROOT / "build" / "resources" / "main")).lower()
+        forbidden = [entry for entry in entries if entry.lower().startswith(root_main) or entry.lower().startswith(root_resources)
+                     or (entry.lower().endswith("partialreload.jar") and str(ROOT).lower() in entry.lower())]
+        result = {"game_pid_found": self.server is not None, "argfiles_expanded": classpath_file.exists(),
+                  "legacy_classpath_found": bool(entries), "forbidden_entries": forbidden,
+                  "partialreload_module_present": any("partialreload" in entry.lower() for entry in entries),
+                  "isolated": classpath_file.exists() and not forbidden and not any("partialreload" in entry.lower() for entry in entries)}
+        report = ROOT / "build" / "reports" / "control-server-effective-classpath.json"
+        report.parent.mkdir(parents=True, exist_ok=True)
+        report.write_text(json.dumps(result, indent=2), encoding="utf-8")
+        return result
 
     def start_client(self, name: str, username: str, *, with_mod: bool = True,
                      mode: str = "NORMAL") -> OwnedProcess:
@@ -984,6 +1029,18 @@ class Acceptance:
 
     def run(self, selected: set[str] | None = None) -> dict[str, object]:
         self.start_server()
+        if self.server_smoke_only:
+            try:
+                return {"status": "diagnostic_passed", "complete_run": False,
+                        "server_mod_mode": self.server_mod_mode,
+                        "server_build_mode": self.server_build_mode,
+                        "server_project_directory": self.server_project_directory,
+                        "server_task": self.server_task, "server_booted": True,
+                        "rcon_ready": self.rcon is not None,
+                        "partialreload_loaded": self.server_mod_mode == "with_mod",
+                        "classpath_isolated": self.server_mod_mode == "without_mod"}
+            finally:
+                self.cleanup()
         cold_mode = False
         try:
             selected = selected or {"compatible", "reconnect", "silent_timeout", "absent_client_allowed", "connected_commit_still_blocked"}
@@ -1004,7 +1061,11 @@ class Acceptance:
             return {"status": "diagnostic_passed" if cold_passed else "failed", "complete_run": False,
                     "mode": self.initial_connect_mode, "scenarios": self.scenarios,
                     "server_mod_mode": self.server_mod_mode, "server_task": self.server_task,
+                    "server_build_mode": self.server_build_mode,
+                    "server_project_directory": self.server_project_directory,
                     "server_main_mod_present": self.server_mod_mode == "with_mod",
+                    "required_valid_trials": self.required_valid_trials,
+                    "maximum_launch_attempts": self.maximum_launch_attempts,
                     "cleanup": self.cleanup_result, "run_id": self.run_id,
                     "log_root": str(self.run_log_root), "attempt_ids": self.attempt_ids}
         full = selected == {"compatible", "reconnect", "silent_timeout", "absent_client_allowed", "connected_commit_still_blocked"}
@@ -1013,6 +1074,8 @@ class Acceptance:
                 "complete_run": full and passed and self.cleanup_result["status"] == "passed",
                 "scenarios": self.scenarios, "server_mod_mode": self.server_mod_mode,
                 "server_task": self.server_task,
+                "server_build_mode": self.server_build_mode,
+                "server_project_directory": self.server_project_directory,
                 "server_main_mod_present": self.server_mod_mode == "with_mod",
                 "cleanup": self.cleanup_result}
 
@@ -1035,11 +1098,16 @@ def main() -> int:
     parser.add_argument("--require-attempt-cleanup", action="store_true")
     parser.add_argument("--fresh-server-per-probe", action="store_true")
     parser.add_argument("--cycles", type=int, default=0)
+    parser.add_argument("--server-smoke-only", action="store_true")
+    parser.add_argument("--required-valid-trials", type=int, default=0)
+    parser.add_argument("--maximum-launch-attempts", type=int, default=0)
     args = parser.parse_args()
     LOG_ROOT.mkdir(parents=True, exist_ok=True)
     acceptance = Acceptance(args.initial_connect_mode.upper(), args.cold_login_probes, args.client_mod_mode,
                             args.strict_client_isolation, args.require_attempt_cleanup,
-                            args.fresh_server_per_probe, args.cycles, args.server_mod_mode)
+                            args.fresh_server_per_probe, args.cycles, args.server_mod_mode,
+                            args.server_smoke_only, args.required_valid_trials,
+                            args.maximum_launch_attempts)
     selected = None if not args.scenarios else set(args.scenarios.split(","))
     try:
         report = acceptance.run(selected)
