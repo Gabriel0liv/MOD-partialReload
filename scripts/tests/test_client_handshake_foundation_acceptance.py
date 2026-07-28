@@ -19,7 +19,8 @@ def report(status="passed", complete=True, scenarios=None, cleanup="passed"):
         "connected_commit_still_blocked")}
     scenarios["compatible"].update({"challenge": "one", "connection": "1"})
     scenarios["reconnect"].update({"challenge": "two", "previous_challenge": "one",
-                                    "connection": "2", "previous_connection": "1"})
+                                    "connection": "2", "previous_connection": "1",
+                                    "same_client_process": True, "reset_line": 4})
     scenarios["silent_timeout"].update({"response_sent": False})
     scenarios["absent_client_allowed"].update({"pending_seen": False})
     return {"status": status, "complete_run": complete, "scenarios": scenarios,

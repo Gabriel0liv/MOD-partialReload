@@ -11,6 +11,7 @@ import subprocess
 import threading
 import time
 import uuid
+import argparse
 from dataclasses import dataclass, field
 
 from minecraft_rcon import RconClient
@@ -58,20 +59,30 @@ class OwnedProcess:
         self.thread = threading.Thread(target=read, name=f"handshake-reader-{self.name}", daemon=False)
         self.thread.start()
 
-    def wait_marker(self, marker: str, timeout: float = 60.0, after_line: int = -1) -> dict[str, object]:
+    def cursor(self) -> int:
+        return len(self.lines) - 1
+
+    def wait_marker(self, marker: str, timeout: float = 60.0, after_line: int = -1,
+                    expected_fields: dict[str, str] | None = None) -> dict[str, object]:
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             values = marker_entries(self.lines, marker) if marker.startswith("CLIENT_HANDSHAKE_") else [
                 {"marker": marker, "line": index, "fields": {}}
                 for index, line in enumerate(self.lines) if marker in line
             ]
-            values = [value for value in values if int(value["line"]) > after_line]
+            values = [value for value in values if int(value["line"]) > after_line
+                      and (expected_fields is None or all(
+                          fields(value).get(key) == expected for key, expected in expected_fields.items()))]
             if values:
-                return values[-1]
+                return values[0]
             if self.process is not None and self.process.poll() is not None:
                 raise RuntimeError(f"{self.name} exited ({self.process.returncode}) before {marker}")
             time.sleep(.1)
-        raise TimeoutError(f"timeout waiting for {marker}; log={self.log_path}")
+        observed = [entry for entry in self.entries() if int(entry["line"]) > after_line]
+        status = "running" if self.process is None or self.process.poll() is None else str(self.process.returncode)
+        raise TimeoutError(
+            f"{self.name} pid={self.process.pid if self.process else None}: timeout waiting for {marker}; "
+            f"after_line={after_line}; running={status}; observed={observed}; tail={self.lines[-80:]}; log={self.log_path}")
 
     def stop(self, timeout: float = 40.0) -> int:
         if self.process is None:
@@ -122,6 +133,10 @@ def validate_report(report: dict[str, object]) -> tuple[bool, str]:
             return False, name
     compatible = scenarios["compatible"]
     reconnect = scenarios["reconnect"]
+    if reconnect.get("same_client_process") is not True:
+        return False, "reconnect process identity"
+    if reconnect.get("reset_line") is None:
+        return False, "missing client reset evidence"
     if not compatible.get("challenge") or not reconnect.get("challenge"):
         return False, "missing challenge evidence"
     if reconnect.get("challenge") == reconnect.get("previous_challenge"):
@@ -195,6 +210,7 @@ class Acceptance:
                                    LOG_ROOT / "server.stdout.log")
         self.server.start()
         self.server.wait_marker("CLIENT_HANDSHAKE_FOUNDATION_CHANNEL_REGISTERED", 180)
+        self.server.wait_marker("Done", 180)
         deadline = time.monotonic() + 180
         while time.monotonic() < deadline:
             try:
@@ -208,13 +224,16 @@ class Acceptance:
     def start_client(self, name: str, username: str, *, with_mod: bool = True,
                      mode: str = "NORMAL") -> OwnedProcess:
         environment = self.env()
-        directory = RUN_ROOT / ("client-with-mod" if with_mod else "client-without-mod")
+        directory = RUN_ROOT / name
+        if directory.exists():
+            shutil.rmtree(directory)
         directory.mkdir(parents=True, exist_ok=True)
         environment.update({"PARTIALRELOAD_ACCEPTANCE_HOST": "127.0.0.1",
                             "PARTIALRELOAD_ACCEPTANCE_PORT": str(self.server_port),
                             "PARTIALRELOAD_ACCEPTANCE_USERNAME": username,
                             "PARTIALRELOAD_ACCEPTANCE_RUN_DIR": str(directory),
-                            "PARTIALRELOAD_ACCEPTANCE_WITH_MOD": "true" if with_mod else "false"})
+                            "PARTIALRELOAD_ACCEPTANCE_WITH_MOD": "true" if with_mod else "false",
+                            "PARTIALRELOAD_ACCEPTANCE_CONTROL_DIR": str(directory / "control")})
         if mode != "NORMAL":
             environment["JAVA_TOOL_OPTIONS"] += f" -Dpartialreload.handshake.acceptance.mode={mode}"
         task = "runClient"
@@ -230,46 +249,63 @@ class Acceptance:
         return value if value and value != "-" else None
 
     def compatible(self) -> None:
-        client = self.start_client("compatible", "PRCompat")
-        pending = self.server.wait_marker("CLIENT_HANDSHAKE_SERVER_PENDING", 90)
-        server_ok = self.server.wait_marker("CLIENT_HANDSHAKE_SERVER_COMPATIBLE", 90)
-        received = client.wait_marker("CLIENT_HANDSHAKE_CLIENT_HELLO_RECEIVED", 90)
-        sent = client.wait_marker("CLIENT_HANDSHAKE_CLIENT_HELLO_SENT", 90)
-        accepted = client.wait_marker("CLIENT_HANDSHAKE_CLIENT_ACCEPTED", 90)
-        client_ok = client.wait_marker("CLIENT_HANDSHAKE_CLIENT_COMPATIBLE", 90)
+        server_cursor = self.server.cursor()
+        client = self.start_client("compatible-reconnect", "PRCompat")
+        client_cursor = client.cursor()
+        pending = self.server.wait_marker("CLIENT_HANDSHAKE_SERVER_PENDING", 90, server_cursor)
+        server_ok = self.server.wait_marker("CLIENT_HANDSHAKE_SERVER_COMPATIBLE", 90, int(pending["line"]))
+        received = client.wait_marker("CLIENT_HANDSHAKE_CLIENT_HELLO_RECEIVED", 90, client_cursor)
+        sent = client.wait_marker("CLIENT_HANDSHAKE_CLIENT_HELLO_SENT", 90, int(received["line"]))
+        accepted = client.wait_marker("CLIENT_HANDSHAKE_CLIENT_ACCEPTED", 90, int(sent["line"]))
+        client_ok = client.wait_marker("CLIENT_HANDSHAKE_CLIENT_COMPATIBLE", 90, int(accepted["line"]))
         challenge = self.challenge(pending)
         if not challenge or any(self.challenge(item) != challenge for item in (server_ok, received, sent, accepted, client_ok)):
             raise AssertionError("challenge mismatch in compatible")
         self.scenarios["compatible"] = {"status": "passed", "challenge": challenge,
                                          "connection": fields(pending).get("connection"),
+                                         "player": fields(pending).get("player"),
+                                         "client_pid": client.process.pid if client.process else None,
                                          "server_log": str(self.server.log_path),
                                          "client_log": str(client.log_path)}
-        client.stop()
-        self.server.wait_marker("CLIENT_HANDSHAKE_SERVER_DISCONNECTED", 30)
+        self.reconnect_client = client
 
     def reconnect(self) -> None:
-        client = self.start_client("reconnect", "PRCompat")
-        previous_pending_line = max(entry["line"] for entry in self.server.entries()
-                                    if entry["marker"] == "CLIENT_HANDSHAKE_SERVER_PENDING")
-        pending = self.server.wait_marker("CLIENT_HANDSHAKE_SERVER_PENDING", 90, previous_pending_line)
-        self.server.wait_marker("CLIENT_HANDSHAKE_SERVER_COMPATIBLE", 90, previous_pending_line)
-        client.wait_marker("CLIENT_HANDSHAKE_CLIENT_RESET", 90)
-        client.wait_marker("CLIENT_HANDSHAKE_CLIENT_COMPATIBLE", 90)
+        client = self.reconnect_client
         old = self.scenarios["compatible"]
+        control = RUN_ROOT / "compatible-reconnect" / "control"
+        control.mkdir(parents=True, exist_ok=True)
+        server_cursor = self.server.cursor(); client_cursor = client.cursor()
+        (control / "disconnect.request").write_text("disconnect\n", encoding="utf-8")
+        requested = client.wait_marker("HANDSHAKE_ACCEPTANCE_CLIENT_DISCONNECT_REQUESTED", 60, client_cursor)
+        reset = client.wait_marker("CLIENT_HANDSHAKE_CLIENT_RESET", 60, int(requested["line"]))
+        disconnected = self.server.wait_marker("CLIENT_HANDSHAKE_SERVER_DISCONNECTED", 60, server_cursor)
+        server_cursor = self.server.cursor(); client_cursor = client.cursor()
+        (control / "reconnect.request").write_text("reconnect\n", encoding="utf-8")
+        reconnect_requested = client.wait_marker("HANDSHAKE_ACCEPTANCE_CLIENT_RECONNECT_REQUESTED", 60, client_cursor)
+        pending = self.server.wait_marker("CLIENT_HANDSHAKE_SERVER_PENDING", 90, server_cursor)
+        server_ok = self.server.wait_marker("CLIENT_HANDSHAKE_SERVER_COMPATIBLE", 90, int(pending["line"]))
+        received = client.wait_marker("CLIENT_HANDSHAKE_CLIENT_HELLO_RECEIVED", 90, client_cursor)
+        sent = client.wait_marker("CLIENT_HANDSHAKE_CLIENT_HELLO_SENT", 90, int(received["line"]))
+        accepted = client.wait_marker("CLIENT_HANDSHAKE_CLIENT_ACCEPTED", 90, int(sent["line"]))
+        client_ok = client.wait_marker("CLIENT_HANDSHAKE_CLIENT_COMPATIBLE", 90, int(accepted["line"]))
+        if self.challenge(server_ok) != self.challenge(pending) or any(
+                self.challenge(item) != self.challenge(pending) for item in (received, sent, accepted, client_ok)):
+            raise AssertionError("reconnect challenge mismatch")
         if self.challenge(pending) == old["challenge"] or fields(pending).get("connection") == old["connection"]:
             raise AssertionError("reconnect reused challenge or connection")
+        if int(reset["line"]) <= int(requested["line"]):
+            raise AssertionError("client reset did not follow disconnect")
         self.scenarios["reconnect"] = {"status": "passed", "challenge": self.challenge(pending),
                                         "previous_challenge": old["challenge"],
                                         "previous_connection": old["connection"],
                                         "connection": fields(pending).get("connection"),
+                                        "same_client_process": True,
+                                        "reset_line": int(reset["line"]),
                                         "server_log": str(self.server.log_path),
                                         "client_log": str(client.log_path)}
-        client.stop()
-        self.server.wait_marker("CLIENT_HANDSHAKE_SERVER_DISCONNECTED", 30)
 
     def silent_timeout(self) -> None:
-        previous_pending_line = max(entry["line"] for entry in self.server.entries()
-                                    if entry["marker"] == "CLIENT_HANDSHAKE_SERVER_PENDING")
+        previous_pending_line = self.server.cursor()
         client = self.start_client("silent-timeout", "PRSilent", mode="SILENT")
         pending = self.server.wait_marker("CLIENT_HANDSHAKE_SERVER_PENDING", 90, previous_pending_line)
         received = client.wait_marker("CLIENT_HANDSHAKE_CLIENT_HELLO_RECEIVED", 90)
@@ -329,7 +365,15 @@ class Acceptance:
                 errors.append(str(exc))
         try:
             if RUN_ROOT.exists():
-                shutil.rmtree(RUN_ROOT)
+                deadline = time.monotonic() + 15
+                while RUN_ROOT.exists() and time.monotonic() < deadline:
+                    try:
+                        shutil.rmtree(RUN_ROOT)
+                    except OSError as exc:
+                        last_error = exc
+                        time.sleep(.5)
+                if RUN_ROOT.exists():
+                    errors.append(str(locals().get("last_error", "owned run root remains")))
         except Exception as exc:
             errors.append(str(exc))
         self.cleanup_result = {"status": "passed" if not errors else "failed",
@@ -337,15 +381,21 @@ class Acceptance:
                                                               for item in [self.server, *self.clients]),
                                "rcon_port_released": not port_open(self.rcon_port), "errors": errors}
 
-    def run(self) -> dict[str, object]:
+    def run(self, selected: set[str] | None = None) -> dict[str, object]:
         self.start_server()
         try:
-            self.compatible(); self.reconnect(); self.silent_timeout(); self.absent(); self.connected_commit()
+            selected = selected or {"compatible", "reconnect", "silent_timeout", "absent_client_allowed", "connected_commit_still_blocked"}
+            if "compatible" in selected: self.compatible()
+            if "reconnect" in selected: self.reconnect()
+            if "silent_timeout" in selected: self.silent_timeout()
+            if "absent_client_allowed" in selected: self.absent()
+            if "connected_commit_still_blocked" in selected: self.connected_commit()
         finally:
             self.cleanup()
-        passed = len(self.scenarios) == 5 and all(item.get("status") == "passed" for item in self.scenarios.values())
+        full = selected == {"compatible", "reconnect", "silent_timeout", "absent_client_allowed", "connected_commit_still_blocked"}
+        passed = all(item.get("status") == "passed" for item in self.scenarios.values())
         return {"status": "passed" if passed and self.cleanup_result["status"] == "passed" else "failed",
-                "complete_run": passed and self.cleanup_result["status"] == "passed",
+                "complete_run": full and passed and self.cleanup_result["status"] == "passed",
                 "scenarios": self.scenarios, "cleanup": self.cleanup_result}
 
 
@@ -356,19 +406,31 @@ def port_open(port: int) -> bool:
 
 
 def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--scenarios", default=None)
+    parser.add_argument("--report", default=None)
+    args = parser.parse_args()
     LOG_ROOT.mkdir(parents=True, exist_ok=True)
     acceptance = Acceptance()
+    selected = None if not args.scenarios else set(args.scenarios.split(","))
     try:
-        report = acceptance.run()
+        report = acceptance.run(selected)
     except Exception as exc:
         acceptance.cleanup()
         report = {"status": "failed", "complete_run": False, "scenarios": acceptance.scenarios,
-                  "cleanup": acceptance.cleanup_result, "error": str(exc)}
-    REPORT.parent.mkdir(parents=True, exist_ok=True)
-    REPORT.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    print("CLIENT_HANDSHAKE_FOUNDATION_ACCEPTANCE_PASSED" if report["status"] == "passed"
+                  "cleanup": acceptance.cleanup_result, "error": str(exc),
+                  "failed_scenario": next((name for name in (selected or []) if name not in acceptance.scenarios), None),
+                  "expected_marker": str(exc), "last_server_markers": acceptance.server.entries()[-80:] if acceptance.server else [],
+                  "last_client_markers": acceptance.clients[-1].entries()[-80:] if acceptance.clients else []}
+    if selected is not None and report.get("status") == "passed":
+        report["status"] = "diagnostic_passed"
+    output = pathlib.Path(args.report) if args.report else REPORT
+    output = output if output.is_absolute() else ROOT / output
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    print("CLIENT_HANDSHAKE_FOUNDATION_ACCEPTANCE_PASSED" if report["status"] == "passed" and report.get("complete_run")
           else "CLIENT_HANDSHAKE_FOUNDATION_ACCEPTANCE_FAILED")
-    return 0 if report["status"] == "passed" else 1
+    return 0 if report["status"] in {"passed", "diagnostic_passed"} else 1
 
 
 if __name__ == "__main__":

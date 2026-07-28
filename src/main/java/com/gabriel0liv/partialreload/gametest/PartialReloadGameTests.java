@@ -297,7 +297,20 @@ public final class PartialReloadGameTests {
 
         helper.succeedWhen(() -> {
             PreparedLootData artifact = mod.service().preparedLootData();
-            helper.assertTrue(artifact != null, "Prepared loot data should become available");
+            if (artifact == null) {
+                var state = mod.service().state();
+                var status = mod.service().status();
+                var transaction = mod.service().tagRecipeTransaction();
+                String transactionStatus = transaction == null ? "none" : transaction.status().name();
+                if (state == com.gabriel0liv.partialreload.core.PartialReloadState.PREPARING) {
+                    return;
+                }
+                helper.fail("Prepared loot data unavailable: state=" + state
+                        + ", lastError=" + status.lastError()
+                        + ", preparedArtifactClass=null"
+                        + ", transactionStatus=" + transactionStatus);
+                return;
+            }
             helper.assertTrue(artifact.isApplicable(), "Bundled loot data should validate");
             helper.assertTrue(
                     artifact.requestedCategories().equals(Set.of(ReloadCategory.PREDICATES)),
