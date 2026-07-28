@@ -24,20 +24,16 @@ public final class PartialReloadNetwork {
     public static final SimpleChannel CHANNEL = NetworkRegistry.newSimpleChannel(
             ClientSyncProtocol.CHANNEL_ID,
             () -> Integer.toString(ClientSyncProtocol.PROTOCOL_VERSION),
-            NetworkRegistry.acceptMissingOr(PartialReloadNetwork::acceptsVersion),
-            NetworkRegistry.acceptMissingOr(PartialReloadNetwork::acceptsVersion));
+            NetworkRegistry.acceptMissingOr(PartialReloadNetwork::acceptsNegotiatedVersion),
+            NetworkRegistry.acceptMissingOr(PartialReloadNetwork::acceptsNegotiatedVersion));
 
     private static boolean registered;
 
     private PartialReloadNetwork() {
     }
 
-    private static boolean acceptsVersion(String version) {
-        return version != null
-                && (version.equals(Integer.toString(ClientSyncProtocol.PROTOCOL_VERSION))
-                        || NetworkRegistry.ACCEPTVANILLA.equals(version)
-                        || "ABSENT".equals(version)
-                        || "ACCEPTVANILLA".equals(version));
+    static boolean acceptsNegotiatedVersion(String version) {
+        return PartialReloadChannelCompatibility.acceptsNegotiatedVersion(version);
     }
 
     public static synchronized void register() {
@@ -87,5 +83,18 @@ public final class PartialReloadNetwork {
 
     public static boolean isRemotePresent(Connection connection) {
         return CHANNEL.isRemotePresent(connection);
+    }
+}
+
+final class PartialReloadChannelCompatibility {
+    private PartialReloadChannelCompatibility() {
+    }
+
+    static boolean acceptsNegotiatedVersion(String version) {
+        return version != null
+                && (version.equals(Integer.toString(ClientSyncProtocol.PROTOCOL_VERSION))
+                        || NetworkRegistry.ACCEPTVANILLA.equals(version)
+                        || "ABSENT".equals(version)
+                        || "ACCEPTVANILLA".equals(version));
     }
 }
