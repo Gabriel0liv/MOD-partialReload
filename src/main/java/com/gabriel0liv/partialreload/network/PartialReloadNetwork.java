@@ -24,8 +24,8 @@ public final class PartialReloadNetwork {
     public static final SimpleChannel CHANNEL = NetworkRegistry.newSimpleChannel(
             ClientSyncProtocol.CHANNEL_ID,
             () -> Integer.toString(ClientSyncProtocol.PROTOCOL_VERSION),
-            PartialReloadNetwork::acceptsVersion,
-            PartialReloadNetwork::acceptsVersion);
+            NetworkRegistry.acceptMissingOr(PartialReloadNetwork::acceptsVersion),
+            NetworkRegistry.acceptMissingOr(PartialReloadNetwork::acceptsVersion));
 
     private static boolean registered;
 

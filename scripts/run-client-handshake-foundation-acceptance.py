@@ -29,7 +29,7 @@ SERVER_MARKERS = {"CLIENT_HANDSHAKE_SERVER_ABSENT", "CLIENT_HANDSHAKE_SERVER_PEN
 @dataclass(frozen=True)
 class LoginEvidence:
     client_ready_seen: bool
-    connect_requested_seen: bool
+    initial_connect_triggered: bool
     network_login_seen: bool
     server_pending_seen: bool
     server_compatible_seen: bool
@@ -166,10 +166,10 @@ def fields(entry: dict[str, object]) -> dict[str, str]:
     return entry["fields"]
 
 
-def classify_failure(evidence: LoginEvidence) -> str:
-    if not evidence.client_ready_seen:
+def classify_failure(evidence: LoginEvidence, mode: str = "CONTROL") -> str:
+    if not evidence.client_ready_seen and mode == "CONTROL":
         return "CLIENT_BOOT_NOT_READY"
-    if not evidence.connect_requested_seen:
+    if not evidence.initial_connect_triggered:
         return "CLIENT_CONNECT_NOT_TRIGGERED"
     if not evidence.network_login_seen:
         return "FORGE_LOGIN_NOT_COMPLETED"
@@ -180,12 +180,21 @@ def classify_failure(evidence: LoginEvidence) -> str:
     return "UNKNOWN_ACCEPTANCE_FAILURE"
 
 
-def login_evidence(server: "OwnedProcess | None", client: "OwnedProcess | None") -> LoginEvidence:
+def login_evidence(server: "OwnedProcess | None", client: "OwnedProcess | None",
+                   mode: str = "CONTROL", server_port: int | None = None) -> LoginEvidence:
     client_markers = {e["marker"] for e in ([] if client is None else client.entries())}
     server_markers = {e["marker"] for e in ([] if server is None else server.entries())}
+    triggered = "HANDSHAKE_ACCEPTANCE_CLIENT_CONNECT_REQUESTED" in client_markers
+    if mode == "LAUNCH_ARGS" and client is not None and client.process is not None:
+        tree = process_tree(client.process.pid)
+        game = find_game_process(tree, "client")
+        command = str(game.get("command_line") if game else "")
+        triggered = bool(re.search(r"(?:^|\s)--server\s+127\.0\.0\.1(?:\s|$)", command)
+                        and server_port is not None
+                        and re.search(rf"(?:^|\s)--port\s+{int(server_port)}(?:\s|$)", command))
     return LoginEvidence(
         "HANDSHAKE_ACCEPTANCE_CLIENT_READY" in client_markers,
-        "HANDSHAKE_ACCEPTANCE_CLIENT_CONNECT_REQUESTED" in client_markers,
+        triggered,
         "HANDSHAKE_ACCEPTANCE_CLIENT_NETWORK_LOGIN" in client_markers,
         "CLIENT_HANDSHAKE_SERVER_PENDING" in server_markers,
         "CLIENT_HANDSHAKE_SERVER_COMPATIBLE" in server_markers)
@@ -203,48 +212,91 @@ def login_diagnostics(server: "OwnedProcess | None", client: "OwnedProcess | Non
         "client_error_candidates": [line for line in client_lines if keywords.search(line)][-40:],
         "server_error_candidates": [line for line in server_lines if keywords.search(line)][-40:],
         "client_ready_seen": any(e["marker"] == "HANDSHAKE_ACCEPTANCE_CLIENT_READY" for e in client_entries),
-        "connect_requested_seen": any(e["marker"] == "HANDSHAKE_ACCEPTANCE_CLIENT_CONNECT_REQUESTED" for e in client_entries),
+        "initial_connect_triggered": any(e["marker"] == "HANDSHAKE_ACCEPTANCE_CLIENT_CONNECT_REQUESTED" for e in client_entries),
         "network_login_seen": any(e["marker"] == "HANDSHAKE_ACCEPTANCE_CLIENT_NETWORK_LOGIN" for e in client_entries),
     }
 
 
-def process_tree(root_pid: int | None) -> list[dict[str, object]]:
-    if root_pid is None:
+def descendant_processes(root_pid: int, processes: list[dict[str, object]]) -> list[dict[str, object]]:
+    if root_pid <= 0:
         return []
+    by_parent: dict[int, list[dict[str, object]]] = {}
+    for item in processes:
+        try:
+            pid, parent = int(item.get("pid", 0)), int(item.get("parent_pid", 0))
+        except (TypeError, ValueError):
+            continue
+        if pid > 0 and parent > 0:
+            by_parent.setdefault(parent, []).append({"pid": pid, "parent_pid": parent,
+                                                       "command_line": item.get("command_line"),
+                                                       "creation_time": item.get("creation_time")})
+    result: list[dict[str, object]] = []
+    pending, seen = [root_pid], {root_pid}
+    while pending:
+        parent = pending.pop(0)
+        for child in by_parent.get(parent, []):
+            pid = int(child["pid"])
+            if pid in seen:
+                continue
+            seen.add(pid)
+            result.append(child)
+            pending.append(pid)
+    return result
 
 
-def process_summary(process: OwnedProcess | None) -> dict[str, object]:
-    if process is None or process.process is None:
-        return {"wrapper_pid": None, "game_pid": None, "descendant_pids": []}
-    tree = process_tree(process.process.pid)
-    game = next((item for item in tree
-                 if any(token in str(item.get("command_line", ""))
-                        for token in ("forgeclientuserdev", "forgeserveruserdev", "BootstrapLauncher"))), None)
-    return {"wrapper_pid": process.process.pid,
-            "game_pid": game.get("pid") if game else None,
-            "descendant_pids": [item.get("pid") for item in tree]}
-    script = "Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,CommandLine,CreationDate | ConvertTo-Json -Compress"
+def process_tree(root_pid: int | None) -> list[dict[str, object]]:
+    if root_pid is None or root_pid <= 0:
+        return []
+    script = ("Get-CimInstance Win32_Process | "
+              "Select-Object ProcessId,ParentProcessId,CommandLine,CreationDate | "
+              "ConvertTo-Json -Compress")
     try:
         raw = subprocess.check_output(["powershell", "-NoProfile", "-Command", script], text=True,
                                       stderr=subprocess.DEVNULL)
         values = json.loads(raw) if raw.strip() else []
         values = values if isinstance(values, list) else [values]
-        by_parent: dict[int, list[dict[str, object]]] = {}
-        for value in values:
-            by_parent.setdefault(int(value.get("ParentProcessId", 0)), []).append(value)
-        result: list[dict[str, object]] = []
-        pending = [int(root_pid)]
-        while pending:
-            parent = pending.pop()
-            for child in by_parent.get(parent, []):
-                pid = int(child.get("ProcessId", 0))
-                result.append({"pid": pid, "parent_pid": parent,
-                               "command_line": child.get("CommandLine"),
-                               "creation_time": child.get("CreationDate")})
-                pending.append(pid)
-        return result
+        normalized = [{"pid": value.get("ProcessId"), "parent_pid": value.get("ParentProcessId"),
+                       "command_line": value.get("CommandLine"), "creation_time": value.get("CreationDate")}
+                      for value in values if isinstance(value, dict)]
+        return descendant_processes(int(root_pid), normalized)
     except Exception:
         return []
+
+
+def find_game_process(tree: list[dict[str, object]], role: str) -> dict[str, object] | None:
+    if role not in {"client", "server"}:
+        return None
+    tokens = (("forgeclientuserdev", "net.minecraft.client.main.Main", "launchtarget forgeclient")
+              if role == "client" else
+              ("forgeserveruserdev", "net.minecraft.server.Main", "launchtarget forgeserver"))
+    for item in tree:
+        command = str(item.get("command_line") or "").lower()
+        if any(token in command for token in tokens):
+            return item
+    return None
+
+
+def launch_args_evidence(process: OwnedProcess | None, server_port: int) -> dict[str, object]:
+    command = ""
+    if process is not None and process.process is not None:
+        game = find_game_process(process_tree(process.process.pid), "client")
+        command = str(game.get("command_line") if game else "")
+    server_match = re.search(r"(?:^|\s)--server\s+(\S+)", command)
+    port_match = re.search(r"(?:^|\s)--port\s+(\d+)", command)
+    return {"server_arg_present": server_match is not None,
+            "server_value_matches": bool(server_match and server_match.group(1) == "127.0.0.1"),
+            "port_arg_present": port_match is not None,
+            "port_value_matches": bool(port_match and int(port_match.group(1)) == server_port),
+            "launch_target": "forgeclientuserdev" if "forgeclientuserdev" in command else None}
+
+
+def process_summary(process: OwnedProcess | None, role: str) -> dict[str, object]:
+    if process is None or process.process is None:
+        return {"wrapper_pid": None, "game_pid": None, "descendant_pids": []}
+    tree = process_tree(process.process.pid)
+    game = find_game_process(tree, role)
+    return {"wrapper_pid": process.process.pid, "game_pid": game.get("pid") if game else None,
+            "descendant_pids": [item.get("pid") for item in tree]}
 
 
 def capture_thread_dumps(run_log_root: pathlib.Path, client: OwnedProcess | None,
@@ -269,26 +321,35 @@ def capture_thread_dumps(run_log_root: pathlib.Path, client: OwnedProcess | None
         if process is None or process.process is None:
             continue
         tree = process_tree(process.process.pid)
-        game = next((item["pid"] for item in tree if any(token in str(item.get("command_line"))
-                     for token in ("forgeclientuserdev", "forgeserveruserdev", "BootstrapLauncher"))),
-                    process.process.pid)
+        game_info = find_game_process(tree, "client" if label == "client" else "server")
+        if game_info is None:
+            errors.append(f"{label}: OWNED_GAME_PROCESS_NOT_FOUND")
+            continue
+        game = int(game_info["pid"])
         try:
             commands = [("thread", ["Thread.print", "-l"]),
-                        ("command-line", ["VM.command_line"]),
-                        ("system-properties", ["VM.system_properties"])]
-            chunks = []
+                        ("command-line", ["VM.command_line"])]
+            if label == "client":
+                commands.append(("system-properties", ["VM.system_properties"]))
             for suffix, arguments in commands:
                 output = subprocess.run([str(jcmd), str(game), *arguments], text=True,
                                         capture_output=True, timeout=30, check=False)
-                chunks.append(f"### {suffix}\n{output.stdout}{output.stderr}")
-            (dump_root / f"{label}.txt").write_text("\n\n".join(chunks), encoding="utf-8")
+                text = output.stdout
+                if label == "client" and suffix == "system-properties":
+                    text = "\n".join(line for line in text.splitlines()
+                                       if not any(secret in line.lower() for secret in
+                                                  ("rcon.password", "accessToken", "session", "token")))
+                (dump_root / f"{label}-{suffix}.txt").write_text(text, encoding="utf-8")
+                if output.returncode != 0:
+                    errors.append(f"{label} {suffix}: exit={output.returncode}: {output.stderr.strip()}")
         except Exception as exc:
             errors.append(f"{label}: {exc}")
     return errors
 
 
 def capture_tcp_state(run_log_root: pathlib.Path, server_port: int,
-                      client: OwnedProcess | None, server: OwnedProcess | None) -> dict[str, object]:
+                      client: OwnedProcess | None, server: OwnedProcess | None,
+                      filename: str = "tcp-state.json") -> dict[str, object]:
     """Capture only connections owned by this acceptance and the server port."""
     pids = set()
     for process in (client, server):
@@ -310,12 +371,13 @@ def capture_tcp_state(run_log_root: pathlib.Path, server_port: int,
         result = {"entries": filtered, "server_port": server_port}
     except Exception as exc:
         result = {"entries": [], "server_port": server_port, "error": str(exc)}
-    (run_log_root / "tcp-state.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
+    (run_log_root / filename).write_text(json.dumps(result, indent=2), encoding="utf-8")
     return result
 
 
 class Acceptance:
-    def __init__(self, initial_connect_mode: str = "CONTROL", cold_login_probes: int = 0) -> None:
+    def __init__(self, initial_connect_mode: str = "CONTROL", cold_login_probes: int = 0,
+                 client_mod_mode: str = "with_mod") -> None:
         self.run_id = uuid.uuid4().hex
         self.run_log_root = LOG_ROOT / self.run_id
         self.server_port, self.rcon_port = free_port(), free_port()
@@ -328,6 +390,7 @@ class Acceptance:
         self.attempt_ids: dict[str, str] = {}
         self.initial_connect_mode = initial_connect_mode
         self.cold_login_probes = cold_login_probes
+        self.client_mod_mode = client_mod_mode
         self.failure_capture_errors: list[str] = []
         self.failure_tcp_state: dict[str, object] = {}
         self.failure_process_tree: dict[str, object] = {}
@@ -549,32 +612,61 @@ class Acceptance:
         attempts = []
         for index in range(1, self.cold_login_probes + 1):
             name = f"cold-{index:02d}"
-            client = self.start_client(name, f"PRCold{index:02d}")
+            username = (f"PRWith{index:02d}" if self.client_mod_mode == "with_mod"
+                        else f"PRBase{index:02d}")
+            client = self.start_client(name, username,
+                                       with_mod=self.client_mod_mode == "with_mod")
             try:
-                ready = client.wait_marker("HANDSHAKE_ACCEPTANCE_CLIENT_READY", 120)
+                ready = client.wait_marker("HANDSHAKE_ACCEPTANCE_CLIENT_READY", 90)
                 client_cursor = client.cursor()
                 server_cursor = self.server.cursor()
+                capture_tcp_state(self.run_log_root, self.server_port, client, self.server,
+                                  f"tcp-before-connect-{name}.json")
                 if self.initial_connect_mode == "CONTROL":
                     control = RUN_ROOT / name / "control"
                     control.mkdir(parents=True, exist_ok=True)
                     (control / "connect.request").write_text("connect\n", encoding="utf-8")
                     client.wait_marker("HANDSHAKE_ACCEPTANCE_CLIENT_CONNECT_REQUESTED", 60, client_cursor)
-                login = client.wait_marker("HANDSHAKE_ACCEPTANCE_CLIENT_NETWORK_LOGIN", 120, client_cursor)
-                pending = self.server.wait_marker("CLIENT_HANDSHAKE_SERVER_PENDING", 90, server_cursor)
-                compatible = self.server.wait_marker("CLIENT_HANDSHAKE_SERVER_COMPATIBLE", 90, int(pending["line"]))
-                attempts.append({"attempt": index, "status": "passed", "ready": ready,
-                                 "login": login, "pending": pending, "compatible": compatible,
-                                 "log": str(client.log_path)})
+                    capture_tcp_state(self.run_log_root, self.server_port, client, self.server,
+                                      f"tcp-after-connect-request-{name}.json")
+                login = client.wait_marker("HANDSHAKE_ACCEPTANCE_CLIENT_NETWORK_LOGIN", 60, client_cursor)
+                if self.client_mod_mode == "without_mod":
+                    absent = self.server.wait_marker("CLIENT_HANDSHAKE_SERVER_ABSENT", 60, server_cursor)
+                    attempts.append({"attempt": index, "status": "passed", "ready": ready,
+                                     "login": login, "absent": absent, "log": str(client.log_path)})
+                else:
+                    pending = self.server.wait_marker("CLIENT_HANDSHAKE_SERVER_PENDING", 60, server_cursor)
+                    compatible = self.server.wait_marker("CLIENT_HANDSHAKE_SERVER_COMPATIBLE", 60, int(pending["line"]))
+                    attempts.append({"attempt": index, "status": "passed", "ready": ready,
+                                     "login": login, "pending": pending, "compatible": compatible,
+                                     "log": str(client.log_path)})
             except Exception as exc:
                 attempts.append({"attempt": index, "status": "failed", "error": str(exc),
                                  "log": str(client.log_path), "attempt_id": self.attempt_ids.get(name)})
                 self.scenarios["cold_login"] = {"status": "failed", "mode": self.initial_connect_mode,
                                                  "attempts": attempts, "attempt_count": len(attempts),
                                                  "passed": sum(item.get("status") == "passed" for item in attempts)}
-                raise
+                # Continue with the next fresh client when this attempt cleaned up.
             finally:
-                evidence = login_evidence(self.server, client)
-                if evidence.connect_requested_seen and not evidence.network_login_seen:
+                capture_tcp_state(self.run_log_root, self.server_port, client, self.server,
+                                  f"tcp-before-cleanup-{name}.json")
+                evidence = login_evidence(self.server, client, self.initial_connect_mode, self.server_port)
+                if attempts and attempts[-1].get("status") == "failed":
+                    launch = launch_args_evidence(client, self.server_port)
+                    classification = classify_failure(evidence, self.initial_connect_mode)
+                    if (self.initial_connect_mode == "LAUNCH_ARGS"
+                            and all(launch.get(key) for key in
+                                    ("server_arg_present", "server_value_matches",
+                                     "port_arg_present", "port_value_matches"))
+                            and not evidence.network_login_seen):
+                        classification = "LAUNCH_ARGS_PROPAGATED_BUT_NATIVE_CONNECT_NOT_STARTED"
+                    attempts[-1]["classification"] = classification
+                    attempts[-1]["login_diagnostics"] = login_diagnostics(self.server, client)
+                    attempts[-1]["launch_args"] = launch
+                    attempts[-1]["processes"] = {
+                        "client": process_summary(client, "client"),
+                        "server": process_summary(self.server, "server")}
+                if evidence.initial_connect_triggered and not evidence.network_login_seen:
                     self.failure_capture_errors = capture_thread_dumps(self.run_log_root, client, self.server)
                     self.failure_tcp_state = capture_tcp_state(self.run_log_root, self.server_port, client, self.server)
                     self.failure_process_tree = {
@@ -588,9 +680,13 @@ class Acceptance:
                 except Exception:
                     pass
                 client.stop()
-        self.scenarios["cold_login"] = {"status": "passed", "mode": self.initial_connect_mode,
+        passed_count = sum(item.get("status") == "passed" for item in attempts)
+        self.scenarios["cold_login"] = {"status": "passed" if passed_count == self.cold_login_probes else "failed",
+                                         "client_mod_mode": self.client_mod_mode,
+                                         "mode": self.initial_connect_mode,
                                          "attempts": attempts, "attempt_count": len(attempts),
-                                         "passed": len(attempts)}
+                                         "passed": passed_count,
+                                         "failed": len(attempts) - passed_count}
 
     def cleanup(self) -> None:
         errors = []
@@ -645,7 +741,8 @@ class Acceptance:
         finally:
             self.cleanup()
         if cold_mode:
-            return {"status": "diagnostic_passed", "complete_run": False,
+            cold_passed = self.scenarios.get("cold_login", {}).get("status") == "passed"
+            return {"status": "diagnostic_passed" if cold_passed else "failed", "complete_run": False,
                     "mode": self.initial_connect_mode, "scenarios": self.scenarios,
                     "cleanup": self.cleanup_result, "run_id": self.run_id,
                     "log_root": str(self.run_log_root), "attempt_ids": self.attempt_ids}
@@ -668,18 +765,20 @@ def main() -> int:
     parser.add_argument("--report", default=None)
     parser.add_argument("--initial-connect-mode", choices=("control", "launch_args"), default="control")
     parser.add_argument("--cold-login-probes", type=int, default=0)
+    parser.add_argument("--client-mod-mode", choices=("with_mod", "without_mod"), default="with_mod")
     args = parser.parse_args()
     LOG_ROOT.mkdir(parents=True, exist_ok=True)
-    acceptance = Acceptance(args.initial_connect_mode.upper(), args.cold_login_probes)
+    acceptance = Acceptance(args.initial_connect_mode.upper(), args.cold_login_probes, args.client_mod_mode)
     selected = None if not args.scenarios else set(args.scenarios.split(","))
     try:
         report = acceptance.run(selected)
     except Exception as exc:
         client_process = acceptance.clients[-1] if acceptance.clients else None
         server_process = acceptance.server
-        evidence = login_evidence(server_process, client_process)
+        evidence = login_evidence(server_process, client_process, acceptance.initial_connect_mode,
+                                  acceptance.server_port)
         diagnostic_errors = acceptance.failure_capture_errors
-        if evidence.connect_requested_seen and not evidence.network_login_seen and not diagnostic_errors:
+        if evidence.initial_connect_triggered and not evidence.network_login_seen and not diagnostic_errors:
             diagnostic_errors = capture_thread_dumps(acceptance.run_log_root, client_process, server_process)
         trees = acceptance.failure_process_tree or {
             "client": process_tree(client_process.process.pid) if client_process and client_process.process else [],
@@ -690,16 +789,19 @@ def main() -> int:
         report = {"status": "failed", "complete_run": False, "scenarios": acceptance.scenarios,
                   "cleanup": acceptance.cleanup_result, "error": str(exc),
                   "failed_scenario": next((name for name in (selected or []) if name not in acceptance.scenarios), None),
-                  "classification": classify_failure(login_evidence(acceptance.server,
-                                                                      acceptance.clients[-1] if acceptance.clients else None)),
+                  "classification": classify_failure(login_evidence(
+                      acceptance.server, acceptance.clients[-1] if acceptance.clients else None,
+                      acceptance.initial_connect_mode, acceptance.server_port),
+                      acceptance.initial_connect_mode),
                   "expected_marker": str(exc), "last_server_markers": acceptance.server.entries()[-80:] if acceptance.server else [],
                   "last_client_markers": acceptance.clients[-1].entries()[-80:] if acceptance.clients else [],
                   "login_diagnostics": login_diagnostics(acceptance.server,
                                                          acceptance.clients[-1] if acceptance.clients else None),
                   "diagnostic_capture_errors": diagnostic_errors,
                   "process_tree": trees,
-                  "processes": {"client": process_summary(client_process),
-                                "server": process_summary(server_process)},
+                  "processes": {"client": process_summary(client_process, "client"),
+                                "server": process_summary(server_process, "server")},
+                  "launch_args": launch_args_evidence(client_process, acceptance.server_port),
                   "tcp_state": tcp,
                   "run_id": acceptance.run_id,
                   "attempt_ids": acceptance.attempt_ids}
@@ -709,8 +811,12 @@ def main() -> int:
     output = output if output.is_absolute() else ROOT / output
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    print("CLIENT_HANDSHAKE_FOUNDATION_ACCEPTANCE_PASSED" if report["status"] == "passed" and report.get("complete_run")
-          else "CLIENT_HANDSHAKE_FOUNDATION_ACCEPTANCE_FAILED")
+    if report["status"] == "passed" and report.get("complete_run"):
+        print("CLIENT_HANDSHAKE_FOUNDATION_ACCEPTANCE_PASSED")
+    elif report["status"] == "diagnostic_passed":
+        print("CLIENT_HANDSHAKE_FOUNDATION_ACCEPTANCE_DIAGNOSTIC_PASSED")
+    else:
+        print("CLIENT_HANDSHAKE_FOUNDATION_ACCEPTANCE_FAILED")
     return 0 if report["status"] in {"passed", "diagnostic_passed"} else 1
 
 

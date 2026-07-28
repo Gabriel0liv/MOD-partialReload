@@ -79,6 +79,15 @@ public final class HandshakeAcceptanceClientMod {
                     runId(), attemptId(), state, previousScreen == null ? "null" : previousScreen, screen,
                     minecraft.getOverlay() != null, minecraft.getConnection() != null, minecraft.level != null,
                     Thread.currentThread().getName());
+            if ("DisconnectedScreen".equals(screen) && minecraft.screen != null) {
+                String narration = minecraft.screen.getNarrationMessage().getString()
+                        .replace('\n', ' ').replace('\r', ' ');
+                if (narration.length() > 512) {
+                    narration = narration.substring(0, 512);
+                }
+                LOGGER.info("HANDSHAKE_ACCEPTANCE_CLIENT_DISCONNECTED_SCREEN run={} attempt={} state={} screen={} narration={} ticksSinceRequest={}",
+                        runId(), attemptId(), state, screen, narration, ticksSinceRequest);
+            }
             previousScreen = screen;
         }
         if (state == AcceptanceClientState.CONNECTING || state == AcceptanceClientState.RECONNECTING) {

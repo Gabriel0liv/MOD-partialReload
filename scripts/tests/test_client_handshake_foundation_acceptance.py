@@ -91,6 +91,14 @@ class HandshakeAcceptanceReportTest(unittest.TestCase):
                          "PARTIALRELOAD_HANDSHAKE_NOT_STARTED")
         self.assertEqual(MODULE.classify_failure(MODULE.LoginEvidence(True, True, True, True, False)),
                          "PARTIALRELOAD_HANDSHAKE_FAILED")
+        self.assertEqual(MODULE.classify_failure(
+            MODULE.LoginEvidence(False, True, True, True, True), "LAUNCH_ARGS"),
+            "UNKNOWN_ACCEPTANCE_FAILURE")
+
+    def test_launch_args_does_not_require_ready(self):
+        self.assertEqual(MODULE.classify_failure(
+            MODULE.LoginEvidence(False, True, False, False, False), "LAUNCH_ARGS"),
+            "FORGE_LOGIN_NOT_COMPLETED")
 
     def test_cursor_is_snapshot_before_trigger(self):
         process = self.process(["CLIENT_HANDSHAKE_SERVER_PENDING player=old"])
@@ -109,6 +117,30 @@ class HandshakeAcceptanceReportTest(unittest.TestCase):
     def test_diagnostic_report_cannot_be_complete(self):
         value = report(status="diagnostic_passed", complete=False)
         self.assertFalse(MODULE.validate_report(value)[0])
+
+    def test_descendant_processes_are_transitive_and_cycle_safe(self):
+        processes = [
+            {"pid": 2, "parent_pid": 1, "command_line": "gradle", "creation_time": "a"},
+            {"pid": 3, "parent_pid": 2, "command_line": "forgeclientuserdev", "creation_time": "b"},
+            {"pid": 4, "parent_pid": 1, "command_line": "other", "creation_time": "c"},
+            {"pid": 5, "parent_pid": 99, "command_line": "forgeclientuserdev", "creation_time": "d"},
+            {"pid": 6, "parent_pid": 7, "command_line": "cycle", "creation_time": "e"},
+            {"pid": 7, "parent_pid": 6, "command_line": "cycle", "creation_time": "f"},
+        ]
+        self.assertEqual([item["pid"] for item in MODULE.descendant_processes(1, processes)], [2, 4, 3])
+
+    def test_find_game_process_is_role_strict(self):
+        tree = [{"pid": 2, "parent_pid": 1, "command_line": "BootstrapLauncher --launchTarget forgeclientuserdev", "creation_time": "a"},
+                {"pid": 3, "parent_pid": 1, "command_line": "BootstrapLauncher --launchTarget forgeserveruserdev", "creation_time": "b"}]
+        self.assertEqual(MODULE.find_game_process(tree, "client")["pid"], 2)
+        self.assertEqual(MODULE.find_game_process(tree, "server")["pid"], 3)
+        self.assertIsNone(MODULE.find_game_process(tree, "other"))
+
+    def test_process_tree_none_and_launch_args_evidence(self):
+        self.assertEqual(MODULE.process_tree(None), [])
+        process = self.process([])
+        process.process = type("P", (), {"pid": 1})()
+        self.assertEqual(MODULE.launch_args_evidence(process, 25565)["server_arg_present"], False)
 
 
 if __name__ == "__main__":
