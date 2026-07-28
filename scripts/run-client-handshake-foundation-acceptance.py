@@ -481,7 +481,7 @@ class Acceptance:
     def __init__(self, initial_connect_mode: str = "CONTROL", cold_login_probes: int = 0,
                  client_mod_mode: str = "with_mod", strict_client_isolation: bool = False,
                  require_attempt_cleanup: bool = False, fresh_server_per_probe: bool = False,
-                 cycles: int = 0) -> None:
+                 cycles: int = 0, server_mod_mode: str = "with_mod") -> None:
         self.run_id = uuid.uuid4().hex
         self.run_log_root = LOG_ROOT / self.run_id
         self.server_port, self.rcon_port = free_port(), free_port()
@@ -500,6 +500,8 @@ class Acceptance:
         self.require_attempt_cleanup = require_attempt_cleanup
         self.fresh_server_per_probe = fresh_server_per_probe
         self.cycles = cycles
+        self.server_mod_mode = server_mod_mode
+        self.server_task = "runServer" if server_mod_mode == "with_mod" else "runHandshakeControlServer"
         self.failure_capture_errors: list[str] = []
         self.failure_tcp_state: dict[str, object] = {}
         self.failure_process_tree: dict[str, object] = {}
@@ -544,10 +546,11 @@ class Acceptance:
         server_env["PARTIALRELOAD_ACCEPTANCE_RUN_ID"] = self.run_id
         server_env["PARTIALRELOAD_ACCEPTANCE_RUN_DIR"] = str(RUN_ROOT / self.server_directory_name)
         self.server = OwnedProcess("server", [str(ROOT / "gradlew.bat"), "--no-daemon", "--console=plain",
-                                               "runServer"], server_env, ROOT,
+                                               self.server_task], server_env, ROOT,
                                    self.run_log_root / "server.stdout.log")
         self.server.start()
-        self.server.wait_marker("CLIENT_HANDSHAKE_FOUNDATION_CHANNEL_REGISTERED", 180)
+        if self.server_mod_mode == "with_mod":
+            self.server.wait_marker("CLIENT_HANDSHAKE_FOUNDATION_CHANNEL_REGISTERED", 180)
         self.server.wait_marker("Done", 180)
         deadline = time.monotonic() + 180
         while time.monotonic() < deadline:
@@ -1000,13 +1003,18 @@ class Acceptance:
             cold_passed = self.scenarios.get("cold_login", {}).get("status") == "passed"
             return {"status": "diagnostic_passed" if cold_passed else "failed", "complete_run": False,
                     "mode": self.initial_connect_mode, "scenarios": self.scenarios,
+                    "server_mod_mode": self.server_mod_mode, "server_task": self.server_task,
+                    "server_main_mod_present": self.server_mod_mode == "with_mod",
                     "cleanup": self.cleanup_result, "run_id": self.run_id,
                     "log_root": str(self.run_log_root), "attempt_ids": self.attempt_ids}
         full = selected == {"compatible", "reconnect", "silent_timeout", "absent_client_allowed", "connected_commit_still_blocked"}
         passed = all(item.get("status") == "passed" for item in self.scenarios.values())
         return {"status": "passed" if passed and self.cleanup_result["status"] == "passed" else "failed",
                 "complete_run": full and passed and self.cleanup_result["status"] == "passed",
-                "scenarios": self.scenarios, "cleanup": self.cleanup_result}
+                "scenarios": self.scenarios, "server_mod_mode": self.server_mod_mode,
+                "server_task": self.server_task,
+                "server_main_mod_present": self.server_mod_mode == "with_mod",
+                "cleanup": self.cleanup_result}
 
 
 def port_open(port: int) -> bool:
@@ -1022,6 +1030,7 @@ def main() -> int:
     parser.add_argument("--initial-connect-mode", choices=("control", "launch_args"), default="control")
     parser.add_argument("--cold-login-probes", type=int, default=0)
     parser.add_argument("--client-mod-mode", choices=("with_mod", "without_mod"), default="with_mod")
+    parser.add_argument("--server-mod-mode", choices=("with_mod", "without_mod"), default="with_mod")
     parser.add_argument("--strict-client-isolation", action="store_true")
     parser.add_argument("--require-attempt-cleanup", action="store_true")
     parser.add_argument("--fresh-server-per-probe", action="store_true")
@@ -1030,7 +1039,7 @@ def main() -> int:
     LOG_ROOT.mkdir(parents=True, exist_ok=True)
     acceptance = Acceptance(args.initial_connect_mode.upper(), args.cold_login_probes, args.client_mod_mode,
                             args.strict_client_isolation, args.require_attempt_cleanup,
-                            args.fresh_server_per_probe, args.cycles)
+                            args.fresh_server_per_probe, args.cycles, args.server_mod_mode)
     selected = None if not args.scenarios else set(args.scenarios.split(","))
     try:
         report = acceptance.run(selected)

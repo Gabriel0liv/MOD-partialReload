@@ -31,6 +31,9 @@ public final class ClientHandshakeRegistry {
                 && current.state() != ClientHandshakeState.DISCONNECTED) {
             return new DiscoveryResult(current, false);
         }
+        if (current != null) {
+            presenceNonces.remove(playerId);
+        }
         ClientHandshakeSession created = beginDiscovery(playerId, connectionIdentity, currentTick, deadlineTick);
         return new DiscoveryResult(created, true);
     }
@@ -173,7 +176,7 @@ public final class ClientHandshakeRegistry {
     public synchronized void disconnect(UUID playerId, int connectionIdentity) {
         ClientHandshakeSession current = sessions.get(playerId);
         if (current != null && current.connectionIdentity() == connectionIdentity) {
-        sessions.remove(playerId);
+            sessions.remove(playerId);
             presenceNonces.remove(playerId);
         }
     }
