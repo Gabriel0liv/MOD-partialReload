@@ -20,7 +20,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 RUN_ROOT = ROOT / "run" / "handshake-acceptance" / uuid.uuid4().hex
 REPORT = ROOT / "build" / "reports" / "client-handshake-foundation-acceptance.json"
 LOG_ROOT = ROOT / "build" / "reports" / "client-handshake-foundation-acceptance"
-MARKER = re.compile(r"(?P<marker>CLIENT_HANDSHAKE_[A-Z_]+)(?:\s+|:)(?P<rest>.*)")
+MARKER = re.compile(r"(?P<marker>(?:CLIENT_HANDSHAKE|HANDSHAKE_ACCEPTANCE_CLIENT)_[A-Z_]+)(?:\s+|:|$)(?P<rest>.*)")
 SERVER_MARKERS = {"CLIENT_HANDSHAKE_SERVER_ABSENT", "CLIENT_HANDSHAKE_SERVER_PENDING",
                   "CLIENT_HANDSHAKE_SERVER_COMPATIBLE", "CLIENT_HANDSHAKE_SERVER_INCOMPATIBLE",
                   "CLIENT_HANDSHAKE_SERVER_TIMED_OUT", "CLIENT_HANDSHAKE_SERVER_DISCONNECTED"}
@@ -66,7 +66,7 @@ class OwnedProcess:
                     expected_fields: dict[str, str] | None = None) -> dict[str, object]:
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
-            values = marker_entries(self.lines, marker) if marker.startswith("CLIENT_HANDSHAKE_") else [
+            values = marker_entries(self.lines, marker) if marker.startswith(("CLIENT_HANDSHAKE_", "HANDSHAKE_ACCEPTANCE_CLIENT_")) else [
                 {"marker": marker, "line": index, "fields": {}}
                 for index, line in enumerate(self.lines) if marker in line
             ]
@@ -157,6 +157,35 @@ def fields(entry: dict[str, object]) -> dict[str, str]:
     return entry["fields"]
 
 
+def classify_failure(message: str, client_entries: list[dict[str, object]]) -> str:
+    if "HANDSHAKE_ACCEPTANCE_CLIENT_READY" in message:
+        return "CLIENT_BOOT_NOT_READY"
+    if "CLIENT_CONNECT_REQUESTED" in message:
+        return "CLIENT_CONNECT_NOT_TRIGGERED"
+    if any(entry["marker"] == "HANDSHAKE_ACCEPTANCE_CLIENT_NETWORK_LOGIN" for entry in client_entries):
+        return "PARTIALRELOAD_HANDSHAKE_NOT_STARTED"
+    if "NETWORK_LOGIN" in message or "CLIENT_HANDSHAKE_SERVER_PENDING" in message:
+        return "FORGE_LOGIN_NOT_COMPLETED"
+    return "PARTIALRELOAD_HANDSHAKE_FAILED"
+
+
+def login_diagnostics(server: "OwnedProcess | None", client: "OwnedProcess | None") -> dict[str, object]:
+    keywords = re.compile(r"Failed to connect|Connection Lost|Disconnected|Internal Exception|Exception|"
+                          r"Mod mismatch|Channel|Registry|Handshake", re.IGNORECASE)
+    client_lines = [] if client is None else client.lines
+    server_lines = [] if server is None else server.lines
+    client_entries = [] if client is None else client.entries()
+    return {
+        "client_tail": client_lines[-80:],
+        "server_tail": server_lines[-80:],
+        "client_error_candidates": [line for line in client_lines if keywords.search(line)][-40:],
+        "server_error_candidates": [line for line in server_lines if keywords.search(line)][-40:],
+        "client_ready_seen": any(e["marker"] == "HANDSHAKE_ACCEPTANCE_CLIENT_READY" for e in client_entries),
+        "connect_requested_seen": any(e["marker"] == "HANDSHAKE_ACCEPTANCE_CLIENT_CONNECT_REQUESTED" for e in client_entries),
+        "network_login_seen": any(e["marker"] == "HANDSHAKE_ACCEPTANCE_CLIENT_NETWORK_LOGIN" for e in client_entries),
+    }
+
+
 class Acceptance:
     def __init__(self) -> None:
         self.server_port, self.rcon_port = free_port(), free_port()
@@ -228,6 +257,9 @@ class Acceptance:
         if directory.exists():
             shutil.rmtree(directory)
         directory.mkdir(parents=True, exist_ok=True)
+        # Forge's first-run accessibility onboarding otherwise blocks the real title screen.
+        # This file is owned by the disposable acceptance directory.
+        (directory / "options.txt").write_text("onboardAccessibility:false\n", encoding="utf-8")
         environment.update({"PARTIALRELOAD_ACCEPTANCE_HOST": "127.0.0.1",
                             "PARTIALRELOAD_ACCEPTANCE_PORT": str(self.server_port),
                             "PARTIALRELOAD_ACCEPTANCE_USERNAME": username,
@@ -249,9 +281,15 @@ class Acceptance:
         return value if value and value != "-" else None
 
     def compatible(self) -> None:
-        server_cursor = self.server.cursor()
         client = self.start_client("compatible-reconnect", "PRCompat")
+        client.wait_marker("HANDSHAKE_ACCEPTANCE_CLIENT_READY", 120)
         client_cursor = client.cursor()
+        server_cursor = self.server.cursor()
+        control = RUN_ROOT / "compatible-reconnect" / "control"
+        control.mkdir(parents=True, exist_ok=True)
+        (control / "connect.request").write_text("connect\n", encoding="utf-8")
+        client.wait_marker("HANDSHAKE_ACCEPTANCE_CLIENT_CONNECT_REQUESTED", 60, client_cursor)
+        network_login = client.wait_marker("HANDSHAKE_ACCEPTANCE_CLIENT_NETWORK_LOGIN", 120, client_cursor)
         pending = self.server.wait_marker("CLIENT_HANDSHAKE_SERVER_PENDING", 90, server_cursor)
         server_ok = self.server.wait_marker("CLIENT_HANDSHAKE_SERVER_COMPATIBLE", 90, int(pending["line"]))
         received = client.wait_marker("CLIENT_HANDSHAKE_CLIENT_HELLO_RECEIVED", 90, client_cursor)
@@ -264,6 +302,9 @@ class Acceptance:
         self.scenarios["compatible"] = {"status": "passed", "challenge": challenge,
                                          "connection": fields(pending).get("connection"),
                                          "player": fields(pending).get("player"),
+                                         "client_ready_seen": True,
+                                         "network_login_seen": True,
+                                         "network_login_line": int(network_login["line"]),
                                          "client_pid": client.process.pid if client.process else None,
                                          "server_log": str(self.server.log_path),
                                          "client_log": str(client.log_path)}
@@ -278,8 +319,11 @@ class Acceptance:
         (control / "disconnect.request").write_text("disconnect\n", encoding="utf-8")
         requested = client.wait_marker("HANDSHAKE_ACCEPTANCE_CLIENT_DISCONNECT_REQUESTED", 60, client_cursor)
         reset = client.wait_marker("CLIENT_HANDSHAKE_CLIENT_RESET", 60, int(requested["line"]))
+        logout = client.wait_marker("HANDSHAKE_ACCEPTANCE_CLIENT_NETWORK_LOGOUT", 60, int(requested["line"]))
         disconnected = self.server.wait_marker("CLIENT_HANDSHAKE_SERVER_DISCONNECTED", 60, server_cursor)
         server_cursor = self.server.cursor(); client_cursor = client.cursor()
+        client.wait_marker("HANDSHAKE_ACCEPTANCE_CLIENT_RECONNECT_READY", 60, client_cursor)
+        client_cursor = client.cursor()
         (control / "reconnect.request").write_text("reconnect\n", encoding="utf-8")
         reconnect_requested = client.wait_marker("HANDSHAKE_ACCEPTANCE_CLIENT_RECONNECT_REQUESTED", 60, client_cursor)
         pending = self.server.wait_marker("CLIENT_HANDSHAKE_SERVER_PENDING", 90, server_cursor)
@@ -301,14 +345,21 @@ class Acceptance:
                                         "connection": fields(pending).get("connection"),
                                         "same_client_process": True,
                                         "reset_line": int(reset["line"]),
+                                        "network_logout_line": int(logout["line"]),
                                         "server_log": str(self.server.log_path),
                                         "client_log": str(client.log_path)}
 
     def silent_timeout(self) -> None:
-        previous_pending_line = self.server.cursor()
         client = self.start_client("silent-timeout", "PRSilent", mode="SILENT")
+        client.wait_marker("HANDSHAKE_ACCEPTANCE_CLIENT_READY", 120)
+        client_cursor = client.cursor(); previous_pending_line = self.server.cursor()
+        control = RUN_ROOT / "silent-timeout" / "control"
+        control.mkdir(parents=True, exist_ok=True)
+        (control / "connect.request").write_text("connect\n", encoding="utf-8")
+        client.wait_marker("HANDSHAKE_ACCEPTANCE_CLIENT_CONNECT_REQUESTED", 60, client_cursor)
+        client.wait_marker("HANDSHAKE_ACCEPTANCE_CLIENT_NETWORK_LOGIN", 120, client_cursor)
         pending = self.server.wait_marker("CLIENT_HANDSHAKE_SERVER_PENDING", 90, previous_pending_line)
-        received = client.wait_marker("CLIENT_HANDSHAKE_CLIENT_HELLO_RECEIVED", 90)
+        received = client.wait_marker("CLIENT_HANDSHAKE_CLIENT_HELLO_RECEIVED", 90, client_cursor)
         timed = self.server.wait_marker("CLIENT_HANDSHAKE_SERVER_TIMED_OUT", 40, int(pending["line"]))
         challenge = self.challenge(pending)
         if self.challenge(timed) != challenge or fields(timed).get("error") != "TAG_RECIPE_CLIENT_READY_TIMEOUT":
@@ -325,7 +376,14 @@ class Acceptance:
 
     def absent(self) -> None:
         client = self.start_client("absent", "PRAbsent", with_mod=False)
-        absent = self.server.wait_marker("CLIENT_HANDSHAKE_SERVER_ABSENT", 120)
+        client.wait_marker("HANDSHAKE_ACCEPTANCE_CLIENT_READY", 120)
+        client_cursor = client.cursor(); server_cursor = self.server.cursor()
+        control = RUN_ROOT / "absent" / "control"
+        control.mkdir(parents=True, exist_ok=True)
+        (control / "connect.request").write_text("connect\n", encoding="utf-8")
+        client.wait_marker("HANDSHAKE_ACCEPTANCE_CLIENT_CONNECT_REQUESTED", 60, client_cursor)
+        client.wait_marker("HANDSHAKE_ACCEPTANCE_CLIENT_NETWORK_LOGIN", 120, client_cursor)
+        absent = self.server.wait_marker("CLIENT_HANDSHAKE_SERVER_ABSENT", 120, server_cursor)
         player = fields(absent).get("player")
         if any(entry["marker"] in SERVER_MARKERS - {"CLIENT_HANDSHAKE_SERVER_ABSENT",
                                                      "CLIENT_HANDSHAKE_SERVER_DISCONNECTED"}
@@ -420,8 +478,11 @@ def main() -> int:
         report = {"status": "failed", "complete_run": False, "scenarios": acceptance.scenarios,
                   "cleanup": acceptance.cleanup_result, "error": str(exc),
                   "failed_scenario": next((name for name in (selected or []) if name not in acceptance.scenarios), None),
+                  "classification": classify_failure(str(exc), acceptance.clients[-1].entries() if acceptance.clients else []),
                   "expected_marker": str(exc), "last_server_markers": acceptance.server.entries()[-80:] if acceptance.server else [],
-                  "last_client_markers": acceptance.clients[-1].entries()[-80:] if acceptance.clients else []}
+                  "last_client_markers": acceptance.clients[-1].entries()[-80:] if acceptance.clients else [],
+                  "login_diagnostics": login_diagnostics(acceptance.server,
+                                                         acceptance.clients[-1] if acceptance.clients else None)}
     if selected is not None and report.get("status") == "passed":
         report["status"] = "diagnostic_passed"
     output = pathlib.Path(args.report) if args.report else REPORT

@@ -6,4 +6,5 @@ license="MIT"
 modId="partialreload_handshake_acceptance"
 version="1.0.0"
 displayName="Partial Reload Handshake Acceptance Client"
+displayTest="IGNORE_ALL_VERSION"
 description='''Disposable client-only connector for the 4F-A real handshake acceptance.'''

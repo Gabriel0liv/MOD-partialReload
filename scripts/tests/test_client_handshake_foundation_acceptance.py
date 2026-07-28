@@ -47,6 +47,11 @@ class HandshakeAcceptanceReportTest(unittest.TestCase):
                                     expected_fields={"connection": "2"})
         self.assertEqual(value["fields"]["player"], "b")
 
+    def test_marker_without_fields_is_parsed(self):
+        process = self.process(["HANDSHAKE_ACCEPTANCE_CLIENT_CONNECT_REQUESTED"])
+        value = process.wait_marker("HANDSHAKE_ACCEPTANCE_CLIENT_CONNECT_REQUESTED", timeout=.01)
+        self.assertEqual(value["line"], 0)
+
     def test_timeout_contains_observed_tail(self):
         process = self.process(["CLIENT_HANDSHAKE_SERVER_ABSENT player=a"])
         with self.assertRaises(TimeoutError) as failure:
@@ -74,6 +79,13 @@ class HandshakeAcceptanceReportTest(unittest.TestCase):
         value = report(); value["scenarios"]["reconnect"].update(
             {"challenge": "same", "previous_challenge": "same", "connection": "1"})
         self.assertFalse(MODULE.validate_report(value)[0])
+
+    def test_login_failure_classification(self):
+        self.assertEqual(MODULE.classify_failure("timeout NETWORK_LOGIN", []),
+                         "FORGE_LOGIN_NOT_COMPLETED")
+        self.assertEqual(MODULE.classify_failure("timeout SERVER_PENDING", [
+            {"marker": "HANDSHAKE_ACCEPTANCE_CLIENT_NETWORK_LOGIN"}]),
+                         "PARTIALRELOAD_HANDSHAKE_NOT_STARTED")
 
 
 if __name__ == "__main__":
