@@ -77,17 +77,32 @@ class MatrixExpectation:
 
 def classify_attempt(evidence: AttemptEvidence, expectation: MatrixExpectation,
                      cleanup: dict[str, object], diagnostics: dict[str, object]) -> AttemptClassification:
-    if cleanup.get("status") != "passed" or diagnostics.get("channel_rejection_seen") or diagnostics.get("unknown_custom_packet_seen"):
-        return AttemptClassification.HARNESS_FAILURE if cleanup.get("status") != "passed" else AttemptClassification.PRODUCT_FAILURE
-    if expectation.server_mod_mode == "without_mod":
-        if expectation.client_mod_mode == "with_mod":
-            valid = evidence.network_login_seen and bool(diagnostics.get("presence_skipped_seen"))
-        else:
-            valid = evidence.network_login_seen and evidence.player is not None
-    elif expectation.client_mod_mode == "without_mod":
-        valid = evidence.network_login_seen and evidence.server_absent_seen and not evidence.server_pending_seen
+    if cleanup.get("status") != "passed" or cleanup.get("identity_mismatches") or cleanup.get("residual_owned_pids"):
+        return AttemptClassification.HARNESS_FAILURE
+    if diagnostics.get("channel_rejection_seen") or diagnostics.get("unknown_custom_packet_seen"):
+        return AttemptClassification.PRODUCT_FAILURE
+    server_mod, client_mod = expectation.server_mod_mode, expectation.client_mod_mode
+    if server_mod == "with_mod" and client_mod == "with_mod":
+        valid = (evidence.network_login_seen and evidence.server_discovering_seen
+                 and evidence.client_presence_sent_seen and evidence.server_presence_received_seen
+                 and evidence.server_pending_seen and evidence.server_compatible_seen)
+        prohibited = evidence.server_absent_seen or evidence.server_timed_out_seen
+    elif server_mod == "with_mod" and client_mod == "without_mod":
+        valid = evidence.network_login_seen and evidence.server_discovering_seen and evidence.server_absent_seen
+        prohibited = (evidence.client_presence_sent_seen or evidence.server_presence_received_seen
+                      or evidence.server_pending_seen or evidence.server_compatible_seen or evidence.server_timed_out_seen)
+    elif server_mod == "without_mod" and client_mod == "with_mod":
+        valid = evidence.network_login_seen and evidence.client_presence_skipped_seen and evidence.player_present_in_rcon
+        prohibited = evidence.client_presence_sent_seen or evidence.server_discovering_seen or evidence.server_pending_seen
+    elif server_mod == "without_mod" and client_mod == "without_mod":
+        valid = evidence.client_ready_seen and evidence.connect_requested_seen and evidence.network_login_seen and evidence.player_present_in_rcon
+        prohibited = any((evidence.server_discovering_seen, evidence.server_presence_received_seen,
+                          evidence.server_absent_seen, evidence.server_pending_seen,
+                          evidence.server_compatible_seen, evidence.server_timed_out_seen))
     else:
-        valid = evidence.network_login_seen and evidence.server_pending_seen and evidence.server_compatible_seen
+        return AttemptClassification.HARNESS_FAILURE
+    if prohibited:
+        return AttemptClassification.PRODUCT_FAILURE
     if valid:
         return AttemptClassification.VALID_PASS
     if evidence.network_login_seen:
@@ -248,6 +263,7 @@ def attempt_marker_evidence(server: "OwnedProcess | None", client: "OwnedProcess
                                        run_id, attempt_id)
     server_markers = {entry["marker"] for entry in server_entries}
     client_markers = {entry["marker"] for entry in client_entries}
+    client_text = "\n".join(str(entry) for entry in client_entries)
     return {
         "server_entries": server_entries,
         "client_entries": client_entries,
@@ -259,6 +275,11 @@ def attempt_marker_evidence(server: "OwnedProcess | None", client: "OwnedProcess
         "server_compatible": "CLIENT_HANDSHAKE_SERVER_COMPATIBLE" in server_markers,
         "network_logout": "HANDSHAKE_ACCEPTANCE_CLIENT_NETWORK_LOGOUT" in client_markers,
         "server_disconnected": "CLIENT_HANDSHAKE_SERVER_DISCONNECTED" in server_markers,
+        "server_discovering": "CLIENT_HANDSHAKE_SERVER_DISCOVERING" in server_markers,
+        "server_presence_received": "CLIENT_HANDSHAKE_SERVER_PRESENCE_RECEIVED" in server_markers,
+        "client_presence_sent": any(str(marker).endswith("CLIENT_PRESENCE_SENT") for marker in client_markers),
+        "client_presence_skipped": "CLIENT_HANDSHAKE_CLIENT_PRESENCE_SKIPPED_REMOTE_ABSENT" in client_markers,
+        "server_timed_out": "CLIENT_HANDSHAKE_SERVER_TIMED_OUT" in server_markers,
     }
 
 
@@ -277,7 +298,10 @@ def attempt_evidence(server: "OwnedProcess | None", client: "OwnedProcess | None
         bool(evidence["network_login"]), bool(evidence["server_absent"]),
         bool(evidence["server_pending"]), bool(evidence["server_compatible"]),
         bool(evidence["network_logout"]), bool(evidence["server_disconnected"]),
-        player, connection)
+        player, connection,
+        bool(evidence["server_discovering"]), bool(evidence["server_presence_received"]),
+        bool(evidence["client_presence_sent"]), bool(evidence["client_presence_skipped"]),
+        bool(evidence["server_timed_out"]), False, False, False)
 
 
 def first_network_divergence(successful_lines: list[str], failed_lines: list[str]) -> dict[str, object]:
@@ -345,23 +369,38 @@ def command_fingerprint(command: list[str]) -> str:
 def process_creation_time(pid: int) -> str | None:
     try:
         script = f"(Get-CimInstance Win32_Process -Filter 'ProcessId={int(pid)}').CreationDate"
-        return subprocess.check_output(["powershell", "-NoProfile", "-Command", script], text=True,
-                                       stderr=subprocess.DEVNULL).strip() or None
+        value = subprocess.check_output(["powershell", "-NoProfile", "-Command", script], text=True,
+                                         stderr=subprocess.DEVNULL).strip()
+        return normalize_creation_time(value) if value else None
     except Exception:
         return None
 
 
 def process_alive(pid: int) -> bool:
+    if not isinstance(pid, int) or pid <= 0:
+        return False
     try:
-        return subprocess.run(["powershell", "-NoProfile", "-Command", f"Get-Process -Id {int(pid)} -ErrorAction SilentlyContinue"],
-                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False).returncode == 0
+        script = f"Get-CimInstance Win32_Process -Filter 'ProcessId={pid}' | Select-Object -ExpandProperty ProcessId"
+        output = subprocess.check_output(["powershell", "-NoProfile", "-Command", script], text=True,
+                                         stderr=subprocess.DEVNULL)
+        return any(line.strip() == str(pid) for line in output.splitlines())
     except Exception:
         return False
 
 
+def normalize_creation_time(value: object) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    return text.replace(".", "").replace("+", "")
+
+
 def identity_matches(expected: OwnedProcessIdentity, actual_process: dict[str, object]) -> bool:
     return (int(actual_process.get("pid", -1)) == expected.pid
-            and actual_process.get("creation_time") == expected.creation_time
+            and expected.creation_time is not None
+            and normalize_creation_time(actual_process.get("creation_time")) == normalize_creation_time(expected.creation_time)
             and command_fingerprint([str(actual_process.get("command_line") or "")]) == expected.command_fingerprint)
 
 
@@ -404,6 +443,21 @@ class OwnedProcess:
         self.thread = threading.Thread(target=read, name=f"handshake-reader-{self.name}", daemon=False)
         self.thread.start()
 
+    def refresh_owned_identities(self) -> None:
+        if self.process is None:
+            return
+        snapshot = current_process_snapshot()
+        descendants = process_tree(self.process.pid)
+        for item in descendants:
+            pid = int(item.get("pid", 0) or 0)
+            if pid <= 0 or pid in self.owned_identities:
+                continue
+            command = [str(item.get("command_line") or "")]
+            fingerprint = command_fingerprint(command)
+            role = "client" if fingerprint == "FORGE_CLIENT_USERDEV" else "server" if fingerprint == "FORGE_SERVER_USERDEV" else "worker"
+            self.owned_identities[pid] = OwnedProcessIdentity(pid, int(item.get("parent_pid") or 0),
+                                                               normalize_creation_time(item.get("creation_time")), role, fingerprint)
+
     def cursor(self) -> int:
         return len(self.lines) - 1
 
@@ -411,6 +465,7 @@ class OwnedProcess:
                     expected_fields: dict[str, str] | None = None) -> dict[str, object]:
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
+            self.refresh_owned_identities()
             values = marker_entries(self.lines, marker) if marker.startswith(("CLIENT_HANDSHAKE_", "HANDSHAKE_ACCEPTANCE_CLIENT_")) else [
                 {"marker": marker, "line": index, "fields": {}}
                 for index, line in enumerate(self.lines) if marker in line
@@ -432,14 +487,17 @@ class OwnedProcess:
     def stop(self, timeout: float = 40.0) -> "ProcessStopResult":
         if self.process is None:
             return ProcessStopResult("passed", True, True, True, True, (), ())
+        self.refresh_owned_identities()
         graceful = True
         if self.process.poll() is None:
             try:
                 self.process.wait(timeout=timeout)
             except subprocess.TimeoutExpired:
                 graceful = False
-                for pid in sorted(self.owned_identities, reverse=True):
-                    actual = next((p for p in process_tree(self.process.pid) if int(p.get("pid", -1)) == pid), None)
+                snapshot = current_process_snapshot()
+                by_pid = {int(p.get("pid", -1)): p for p in snapshot}
+                for pid in sorted(self.owned_identities, key=lambda value: value, reverse=True):
+                    actual = by_pid.get(pid)
                     expected = self.owned_identities[pid]
                     if actual is not None and identity_matches(expected, actual):
                         subprocess.run(["taskkill", "/PID", str(pid), "/F"], stdout=subprocess.DEVNULL,
@@ -450,12 +508,13 @@ class OwnedProcess:
             pass
         if self.thread is not None:
             self.thread.join(timeout=timeout)
-        residual = tuple(pid for pid in self.owned_identities if process_alive(pid))
+        snapshot = current_process_snapshot()
+        by_pid = {int(p.get("pid", -1)): p for p in snapshot}
+        residual = tuple(pid for pid in self.owned_identities if pid in by_pid)
+        mismatches = tuple(pid for pid in residual if not identity_matches(self.owned_identities[pid], by_pid[pid]))
         reader_stopped = self.thread is None or not self.thread.is_alive()
         result = ProcessStopResult("passed" if self.process.poll() is not None and not residual and reader_stopped else "failed",
-                                   graceful, self.process.poll() is not None, not residual, reader_stopped, residual, ())
-        if result.status != "passed":
-            raise RuntimeError(f"owned process cleanup failed: {result}")
+                                   graceful, self.process.poll() is not None, not residual, reader_stopped, residual, mismatches)
         return result
 
     def entries(self) -> list[dict[str, object]]:
@@ -616,6 +675,21 @@ def process_tree(root_pid: int | None) -> list[dict[str, object]]:
                        "command_line": value.get("CommandLine"), "creation_time": value.get("CreationDate")}
                       for value in values if isinstance(value, dict)]
         return descendant_processes(int(root_pid), normalized)
+    except Exception:
+        return []
+
+
+def current_process_snapshot() -> list[dict[str, object]]:
+    script = ("Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,CommandLine,CreationDate | "
+              "ConvertTo-Json -Compress")
+    try:
+        raw = subprocess.check_output(["powershell", "-NoProfile", "-Command", script], text=True,
+                                      stderr=subprocess.DEVNULL)
+        values = json.loads(raw) if raw.strip() else []
+        values = values if isinstance(values, list) else [values]
+        return [{"pid": value.get("ProcessId"), "parent_pid": value.get("ParentProcessId"),
+                 "command_line": value.get("CommandLine"), "creation_time": normalize_creation_time(value.get("CreationDate"))}
+                for value in values if isinstance(value, dict)]
     except Exception:
         return []
 
@@ -1189,11 +1263,42 @@ class Acceptance:
     def server_absent_client_mod_reconnect(self) -> None:
         if self.server_mod_mode != "without_mod":
             raise RuntimeError("INVALID_SCENARIO_SERVER_MODE")
-        # The full three-cycle exercise is intentionally driven by the same
-        # control-file lifecycle as absent_reconnect_stress; this marker keeps
-        # the scenario explicit for the composite orchestrator.
+        if self.client_mod_mode not in {"with_mod", ""}:
+            raise RuntimeError("INVALID_SCENARIO_CLIENT_MODE")
+        cycles = self.cycles or 3
+        client = self.start_client("server-absent-client-mod-reconnect", "PRClientModReconnect", with_mod=True)
+        client.wait_marker("HANDSHAKE_ACCEPTANCE_CLIENT_READY", 120)
+        control = self.run_root / "server-absent-client-mod-reconnect" / "control"
+        connections: list[str] = []
+        skips = 0
+        for cycle in range(cycles):
+            cursor = client.cursor()
+            request = "connect.request" if cycle == 0 else "reconnect.request"
+            (control / request).write_text("connect\n", encoding="utf-8")
+            client.wait_marker("HANDSHAKE_ACCEPTANCE_CLIENT_CONNECT_REQUESTED" if cycle == 0 else
+                               "HANDSHAKE_ACCEPTANCE_CLIENT_RECONNECT_REQUESTED", 60, cursor)
+            login = client.wait_marker("HANDSHAKE_ACCEPTANCE_CLIENT_NETWORK_LOGIN", 120, cursor)
+            connection = fields(login).get("connection")
+            if connection:
+                connections.append(connection)
+            skipped = client.wait_marker("CLIENT_HANDSHAKE_CLIENT_PRESENCE_SKIPPED_REMOTE_ABSENT", 60, cursor)
+            skips += 1
+            if any(str(e["marker"]).endswith("CLIENT_PRESENCE_SENT") for e in client.entries()):
+                raise AssertionError("presence sent to control server")
+            if cycle < cycles - 1:
+                disconnect_cursor = client.cursor()
+                (control / "disconnect.request").write_text("disconnect\n", encoding="utf-8")
+                client.wait_marker("HANDSHAKE_ACCEPTANCE_CLIENT_DISCONNECT_REQUESTED", 60, disconnect_cursor)
+                client.wait_marker("HANDSHAKE_ACCEPTANCE_CLIENT_NETWORK_LOGOUT", 60, disconnect_cursor)
+                client.wait_marker("HANDSHAKE_ACCEPTANCE_CLIENT_RECONNECT_READY", 60, disconnect_cursor)
+            self.scenarios.setdefault("server_absent_client_mod_reconnect_cycles", []).append({"cycle": cycle + 1, "skip": skipped})
+        cleanup = self.cleanup_attempt(client, "server-absent-client-mod-reconnect", "PRClientModReconnect", True, False)
         self.scenarios["server_absent_client_mod_reconnect"] = {
-            "status": "failed", "error_code": "SCENARIO_NOT_EXECUTED_IN_SHORT_HARNESS"}
+            "status": "passed" if cleanup["status"] == "passed" and skips == cycles else "failed",
+            "same_client_process": True, "cycles": cycles, "connections": connections,
+            "presence_skipped": skips, "presence_sent": False, "cleanup": cleanup}
+        if cleanup["status"] != "passed":
+            raise AssertionError("control-server reconnect cleanup failed")
 
     def absent_reconnect_stress(self) -> None:
         cycles = self.cycles or 5
@@ -1415,8 +1520,29 @@ class Acceptance:
                                "lock_released": not ACCEPTANCE_LOCK.exists(),
                                "errors": errors}
 
-    def run(self, selected: set[str] | None = None) -> dict[str, object]:
-        self.acquire_lock()
+    def full_composite(self) -> dict[str, object]:
+        with_mod = Acceptance(self.initial_connect_mode, 0, "with_mod", self.strict_client_isolation,
+                               self.require_attempt_cleanup, False, self.cycles, "with_mod", False, 0, 0)
+        without_mod = Acceptance(self.initial_connect_mode, 0, "with_mod", self.strict_client_isolation,
+                                 self.require_attempt_cleanup, False, self.cycles, "without_mod", False, 0, 0)
+        with_report = with_mod.run({"compatible", "reconnect", "silent_timeout", "absent_client_allowed",
+                                    "connected_commit_still_blocked"}, manage_lock=False)
+        without_report = without_mod.run({"server_absent_client_mod_allowed", "server_absent_client_mod_reconnect"},
+                                         manage_lock=False)
+        scenarios = {}
+        scenarios.update(with_report.get("scenarios", {}))
+        scenarios.update(without_report.get("scenarios", {}))
+        passed = (with_report.get("status") in {"passed", "diagnostic_passed"}
+                  and without_report.get("status") in {"passed", "diagnostic_passed"}
+                  and with_report.get("cleanup", {}).get("status") == "passed"
+                  and without_report.get("cleanup", {}).get("status") == "passed")
+        return {"status": "passed" if passed else "failed", "complete_run": passed,
+                "subruns": {"with_mod": with_report, "without_mod": without_report},
+                "scenarios": scenarios, "cleanup": {"status": "passed" if passed else "failed"}}
+
+    def run(self, selected: set[str] | None = None, manage_lock: bool = True) -> dict[str, object]:
+        if manage_lock:
+            self.acquire_lock()
         self.start_server()
         if self.server_smoke_only:
             smoke_report = None
@@ -1434,7 +1560,8 @@ class Acceptance:
                         "partialreload_loaded": (not isolated) or bool(self.control_classpath_result and self.control_classpath_result.get("partialreload_module_present"))}
             finally:
                 self.cleanup()
-                self.release_lock()
+                if manage_lock:
+                    self.release_lock()
             smoke_report["cleanup"] = self.cleanup_result
             if self.cleanup_result.get("status") != "passed":
                 smoke_report["status"] = "failed"
@@ -1442,7 +1569,9 @@ class Acceptance:
             return smoke_report
         cold_mode = False
         try:
-            selected = selected or {"compatible", "reconnect", "silent_timeout", "absent_client_allowed", "connected_commit_still_blocked"}
+            selected = selected or {"compatible", "reconnect", "silent_timeout", "absent_client_allowed",
+                                    "server_absent_client_mod_allowed", "server_absent_client_mod_reconnect",
+                                    "connected_commit_still_blocked"}
             if self.cold_login_probes:
                 self.cold_login()
                 cold_mode = True
@@ -1452,11 +1581,13 @@ class Acceptance:
                 if "silent_timeout" in selected: self.silent_timeout()
                 if "absent_client_allowed" in selected: self.absent()
                 if "server_absent_client_mod_allowed" in selected: self.server_absent_client_mod_allowed()
+                if "server_absent_client_mod_reconnect" in selected: self.server_absent_client_mod_reconnect()
                 if "connected_commit_still_blocked" in selected: self.connected_commit()
                 if "absent_reconnect_stress" in selected: self.absent_reconnect_stress()
         finally:
             self.cleanup()
-            self.release_lock()
+            if manage_lock:
+                self.release_lock()
         if cold_mode:
             cold_passed = self.scenarios.get("cold_login", {}).get("status") == "passed"
             return {"status": "diagnostic_passed" if cold_passed else "failed", "complete_run": False,
@@ -1470,7 +1601,8 @@ class Acceptance:
                     "cleanup": self.cleanup_result, "run_id": self.run_id,
                     "log_root": str(self.run_log_root), "attempt_ids": self.attempt_ids}
         full = selected == {"compatible", "reconnect", "silent_timeout", "absent_client_allowed",
-                           "server_absent_client_mod_allowed", "connected_commit_still_blocked"}
+                           "server_absent_client_mod_allowed", "server_absent_client_mod_reconnect",
+                           "connected_commit_still_blocked"}
         passed = all(item.get("status") == "passed" for item in self.scenarios.values())
         return {"status": "passed" if passed and self.cleanup_result["status"] == "passed" else "failed",
                 "complete_run": full and passed and self.cleanup_result["status"] == "passed",
@@ -1504,6 +1636,7 @@ def main() -> int:
     parser.add_argument("--required-valid-trials", type=int, default=0)
     parser.add_argument("--maximum-launch-attempts", type=int, default=0)
     parser.add_argument("--authorize-infrastructure-from", default=None)
+    parser.add_argument("--full-composite", action="store_true")
     args = parser.parse_args()
     if args.required_valid_trials < 0 or args.maximum_launch_attempts < 0 or (
             args.required_valid_trials > 0 and args.maximum_launch_attempts < args.required_valid_trials):
@@ -1522,7 +1655,14 @@ def main() -> int:
                             args.maximum_launch_attempts, authorized)
     selected = None if not args.scenarios else set(args.scenarios.split(","))
     try:
-        report = acceptance.run(selected)
+        if args.full_composite:
+            acceptance.acquire_lock()
+            try:
+                report = acceptance.full_composite()
+            finally:
+                acceptance.release_lock()
+        else:
+            report = acceptance.run(selected)
     except Exception as exc:
         client_process = acceptance.clients[-1] if acceptance.clients else None
         server_process = acceptance.server
