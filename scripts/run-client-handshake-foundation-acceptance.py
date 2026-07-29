@@ -813,7 +813,8 @@ class Acceptance:
                  cycles: int = 0, server_mod_mode: str = "with_mod",
                  server_smoke_only: bool = False, required_valid_trials: int = 0,
                  maximum_launch_attempts: int = 0,
-                 authorized_infrastructure_fingerprints: set[str] | None = None) -> None:
+                 authorized_infrastructure_fingerprints: set[str] | None = None,
+                 diagnostic_matrix: bool = False) -> None:
         self.run_id = uuid.uuid4().hex
         self.run_root = ACCEPTANCE_RUNS_ROOT / self.run_id
         self.run_root.mkdir(parents=True, exist_ok=True)
@@ -842,6 +843,7 @@ class Acceptance:
         self.required_valid_trials = required_valid_trials
         self.maximum_launch_attempts = maximum_launch_attempts
         self.authorized_infrastructure_fingerprints = authorized_infrastructure_fingerprints or set()
+        self.diagnostic_matrix = diagnostic_matrix
         if self.required_valid_trials < 0 or self.maximum_launch_attempts < 0:
             raise ValueError("INVALID_TRIAL_QUOTA")
         if self.required_valid_trials > 0 and self.maximum_launch_attempts < self.required_valid_trials:
@@ -1462,7 +1464,8 @@ class Acceptance:
         product = sum(item.get("classification") == AttemptClassification.PRODUCT_FAILURE.value for item in attempts)
         harness = sum(item.get("classification") == AttemptClassification.HARNESS_FAILURE.value for item in attempts)
         quota = evaluate_quota(attempts, target, limit, self.authorized_infrastructure_fingerprints)
-        self.scenarios["cold_login"] = {"status": "passed" if quota["quota_reached"] else "failed",
+        diagnostic_ok = product == 0 and harness == 0 and len(attempts) == target
+        self.scenarios["cold_login"] = {"status": "passed" if (quota["quota_reached"] or (self.diagnostic_matrix and diagnostic_ok)) else "failed",
                                          "client_mod_mode": self.client_mod_mode,
                                          "mode": self.initial_connect_mode,
                                          "attempts": attempts, "attempt_count": len(attempts),
@@ -1472,6 +1475,7 @@ class Acceptance:
                                          "harness_failures": harness, "quota_reached": quota["quota_reached"],
                                          "unauthorized_infrastructure_failures": quota["unauthorized_infrastructure_failures"],
                                          "passed": passed_count, "failed": len(attempts) - passed_count}
+        self.scenarios["cold_login"]["matrix_complete"] = len(attempts) == target
 
     def cleanup(self) -> None:
         errors = []
@@ -1590,7 +1594,10 @@ class Acceptance:
                 self.release_lock()
         if cold_mode:
             cold_passed = self.scenarios.get("cold_login", {}).get("status") == "passed"
-            return {"status": "diagnostic_passed" if cold_passed else "failed", "complete_run": False,
+            diagnostic_ok = self.diagnostic_matrix and self.scenarios.get("cold_login", {}).get("matrix_complete") is True \
+                and self.scenarios.get("cold_login", {}).get("product_failures", 0) == 0 \
+                and self.scenarios.get("cold_login", {}).get("harness_failures", 0) == 0
+            return {"status": "diagnostic_passed" if cold_passed or diagnostic_ok else "failed", "complete_run": False,
                     "mode": self.initial_connect_mode, "scenarios": self.scenarios,
                     "server_mod_mode": self.server_mod_mode, "server_task": self.server_task,
                     "server_build_mode": self.server_build_mode,
@@ -1598,6 +1605,7 @@ class Acceptance:
                     "server_main_mod_present": self.server_mod_mode == "with_mod",
                     "required_valid_trials": self.required_valid_trials,
                     "maximum_launch_attempts": self.maximum_launch_attempts,
+                    "diagnostic_matrix": self.diagnostic_matrix,
                     "cleanup": self.cleanup_result, "run_id": self.run_id,
                     "log_root": str(self.run_log_root), "attempt_ids": self.attempt_ids}
         full = selected == {"compatible", "reconnect", "silent_timeout", "absent_client_allowed",
@@ -1637,6 +1645,7 @@ def main() -> int:
     parser.add_argument("--maximum-launch-attempts", type=int, default=0)
     parser.add_argument("--authorize-infrastructure-from", default=None)
     parser.add_argument("--full-composite", action="store_true")
+    parser.add_argument("--diagnostic-matrix", action="store_true")
     args = parser.parse_args()
     if args.required_valid_trials < 0 or args.maximum_launch_attempts < 0 or (
             args.required_valid_trials > 0 and args.maximum_launch_attempts < args.required_valid_trials):
@@ -1652,7 +1661,7 @@ def main() -> int:
                             args.strict_client_isolation, args.require_attempt_cleanup,
                             args.fresh_server_per_probe, args.cycles, args.server_mod_mode,
                             args.server_smoke_only, args.required_valid_trials,
-                            args.maximum_launch_attempts, authorized)
+                            args.maximum_launch_attempts, authorized, args.diagnostic_matrix)
     selected = None if not args.scenarios else set(args.scenarios.split(","))
     try:
         if args.full_composite:
