@@ -13,6 +13,7 @@ import time
 import uuid
 import argparse
 from dataclasses import dataclass, field
+from enum import Enum
 
 from minecraft_rcon import RconClient
 
@@ -56,6 +57,52 @@ class AttemptEvidence:
     server_disconnected_seen: bool
     player: str | None
     connection: str | None
+
+
+class AttemptClassification(str, Enum):
+    VALID_PASS = "VALID_PASS"
+    PRODUCT_FAILURE = "PRODUCT_FAILURE"
+    INFRASTRUCTURE_FAILURE = "INFRASTRUCTURE_FAILURE"
+    HARNESS_FAILURE = "HARNESS_FAILURE"
+
+
+def classify_control_classpath_entry(entry: str, repository_root: pathlib.Path) -> str | None:
+    value = pathlib.Path(entry).resolve()
+    root = repository_root.resolve()
+    if value == root / "build" / "classes" / "java" / "main":
+        return "ROOT_MAIN_CLASSES"
+    if value == root / "build" / "resources" / "main":
+        return "ROOT_MAIN_RESOURCES"
+    if value == root / "src" / "main" / "resources" / "META-INF" / "mods.toml":
+        return "ROOT_MODS_TOML"
+    if value.parent == root / "build" / "libs" and value.name.lower().startswith("partialreload-") and value.suffix.lower() == ".jar":
+        return "ROOT_PARTIALRELOAD_JAR"
+    normalized = str(value).replace("\\", "/").lower()
+    if "/com/gabriel0liv/partialreload/" in normalized:
+        return "PARTIALRELOAD_MODULE"
+    return None
+
+
+def evaluate_quota(attempts: list[dict[str, object]], required_valid_trials: int,
+                   maximum_launch_attempts: int,
+                   authorized_infrastructure_fingerprints: set[str] | None = None) -> dict[str, object]:
+    if required_valid_trials < 0 or maximum_launch_attempts < 0 or (
+            required_valid_trials > 0 and maximum_launch_attempts < required_valid_trials):
+        raise ValueError("INVALID_TRIAL_QUOTA")
+    authorized = authorized_infrastructure_fingerprints or set()
+    valid = sum(item.get("classification") == AttemptClassification.VALID_PASS.value for item in attempts)
+    product = sum(item.get("classification") == AttemptClassification.PRODUCT_FAILURE.value for item in attempts)
+    harness = sum(item.get("classification") == AttemptClassification.HARNESS_FAILURE.value for item in attempts)
+    unauthorized = [item for item in attempts
+                    if item.get("classification") == AttemptClassification.INFRASTRUCTURE_FAILURE.value
+                    and item.get("fingerprint") not in authorized]
+    return {"required_valid_trials": required_valid_trials,
+            "maximum_launch_attempts": maximum_launch_attempts,
+            "launch_attempts": len(attempts), "valid_trials": valid,
+            "infrastructure_failures": sum(item.get("classification") == AttemptClassification.INFRASTRUCTURE_FAILURE.value for item in attempts),
+            "product_failures": product, "harness_failures": harness,
+            "quota_reached": valid >= required_valid_trials and len(attempts) <= maximum_launch_attempts,
+            "unauthorized_infrastructure_failures": len(unauthorized)}
 
 
 def entries_in_window(process: "OwnedProcess | None", start: int, end: int | None,
@@ -509,6 +556,11 @@ class Acceptance:
         self.server_smoke_only = server_smoke_only
         self.required_valid_trials = required_valid_trials
         self.maximum_launch_attempts = maximum_launch_attempts
+        if self.required_valid_trials < 0 or self.maximum_launch_attempts < 0:
+            raise ValueError("INVALID_TRIAL_QUOTA")
+        if self.required_valid_trials > 0 and self.maximum_launch_attempts < self.required_valid_trials:
+            raise ValueError("INVALID_TRIAL_QUOTA")
+        self.control_classpath_result: dict[str, object] | None = None
         self.failure_capture_errors: list[str] = []
         self.failure_tcp_state: dict[str, object] = {}
         self.failure_process_tree: dict[str, object] = {}
@@ -578,7 +630,12 @@ class Acceptance:
             self.server.wait_marker("CLIENT_HANDSHAKE_FOUNDATION_CHANNEL_REGISTERED", 180)
         self.server.wait_marker("Done", 180)
         if self.server_mod_mode == "without_mod":
-            self.inspect_control_classpath()
+            self.control_classpath_result = self.inspect_control_classpath()
+            required = ("game_pid_found", "argfiles_expanded", "legacy_classpath_found", "isolated")
+            if (not all(bool(self.control_classpath_result.get(key)) for key in required)
+                    or self.control_classpath_result.get("forbidden_entries")
+                    or self.control_classpath_result.get("partialreload_module_present")):
+                raise RuntimeError("CONTROL_SERVER_CLASSPATH_NOT_ISOLATED")
         deadline = time.monotonic() + 180
         while time.monotonic() < deadline:
             try:
@@ -594,14 +651,16 @@ class Acceptance:
         entries = []
         if classpath_file.exists():
             entries = [line.strip() for line in classpath_file.read_text(encoding="utf-8", errors="replace").splitlines() if line.strip()]
-        root_main = str((ROOT / "build" / "classes" / "java" / "main")).lower()
-        root_resources = str((ROOT / "build" / "resources" / "main")).lower()
-        forbidden = [entry for entry in entries if entry.lower().startswith(root_main) or entry.lower().startswith(root_resources)
-                     or (entry.lower().endswith("partialreload.jar") and str(ROOT).lower() in entry.lower())]
-        result = {"game_pid_found": self.server is not None, "argfiles_expanded": classpath_file.exists(),
+        tree = process_tree(self.server.process.pid if self.server and self.server.process else None)
+        game = find_game_process(tree, "server")
+        forbidden = [kind for entry in entries if (kind := classify_control_classpath_entry(entry, ROOT)) is not None]
+        result = {"game_pid_found": game is not None and bool(game.get("pid")),
+                  "game_pid_owned": game is not None,
+                  "launch_target": "forgeserveruserdev" if game and "forgeserveruserdev" in str(game.get("command_line", "")).lower() else None,
+                  "argfiles_expanded": classpath_file.exists(),
                   "legacy_classpath_found": bool(entries), "forbidden_entries": forbidden,
-                  "partialreload_module_present": any("partialreload" in entry.lower() for entry in entries),
-                  "isolated": classpath_file.exists() and not forbidden and not any("partialreload" in entry.lower() for entry in entries)}
+                  "partialreload_module_present": "PARTIALRELOAD_MODULE" in forbidden,
+                  "isolated": classpath_file.exists() and bool(game) and not forbidden}
         report = ROOT / "build" / "reports" / "control-server-effective-classpath.json"
         report.parent.mkdir(parents=True, exist_ok=True)
         report.write_text(json.dumps(result, indent=2), encoding="utf-8")
@@ -614,6 +673,7 @@ class Acceptance:
         if directory.exists():
             shutil.rmtree(directory)
         directory.mkdir(parents=True, exist_ok=True)
+        (directory / "control").mkdir(parents=True, exist_ok=True)
         attempt_id = uuid.uuid4().hex
         self.attempt_ids[name] = attempt_id
         # Forge's first-run accessibility onboarding otherwise blocks the real title screen.
@@ -838,6 +898,21 @@ class Acceptance:
             raise AssertionError(f"commit was not blocked: {response}")
         self.scenarios["connected_commit_still_blocked"] = {"status": "passed", "response": response.strip()}
 
+    def server_absent_client_mod_allowed(self) -> None:
+        client = self.start_client("server-absent-client-mod", "PRClientModControl", with_mod=True)
+        client.wait_marker("HANDSHAKE_ACCEPTANCE_CLIENT_READY", 120)
+        cursor = client.cursor()
+        control = RUN_ROOT / "server-absent-client-mod" / "control"
+        control.mkdir(parents=True, exist_ok=True)
+        (control / "connect.request").write_text("connect\n", encoding="utf-8")
+        client.wait_marker("HANDSHAKE_ACCEPTANCE_CLIENT_CONNECT_REQUESTED", 60, cursor)
+        client.wait_marker("HANDSHAKE_ACCEPTANCE_CLIENT_NETWORK_LOGIN", 120, cursor)
+        skipped = client.wait_marker("CLIENT_HANDSHAKE_CLIENT_PRESENCE_SKIPPED_REMOTE_ABSENT", 60, cursor)
+        if any(entry["marker"] == "CLIENT_HANDSHAKE_CLIENT_PRESENCE_SENT" for entry in client.entries()):
+            raise AssertionError("presence was sent to a server without the channel")
+        self.scenarios["server_absent_client_mod_allowed"] = {"status": "passed", "marker": skipped}
+        client.stop()
+
     def absent_reconnect_stress(self) -> None:
         cycles = self.cycles or 5
         client = self.start_client("absent-reconnect-stress", "PRAbsentStress", with_mod=False)
@@ -883,7 +958,11 @@ class Acceptance:
 
     def cold_login(self) -> None:
         attempts = []
-        for index in range(1, self.cold_login_probes + 1):
+        target = self.required_valid_trials if self.required_valid_trials > 0 else self.cold_login_probes
+        limit = self.maximum_launch_attempts if self.maximum_launch_attempts > 0 else target
+        index = 0
+        while index < limit and sum(item.get("classification") == AttemptClassification.VALID_PASS.value for item in attempts) < target:
+            index += 1
             if index > 1 and self.fresh_server_per_probe:
                 if self.rcon is not None:
                     self.rcon.close()
@@ -917,16 +996,16 @@ class Acceptance:
                 login = client.wait_marker("HANDSHAKE_ACCEPTANCE_CLIENT_NETWORK_LOGIN", 60, client_cursor)
                 if self.client_mod_mode == "without_mod":
                     absent = self.server.wait_marker("CLIENT_HANDSHAKE_SERVER_ABSENT", 60, server_cursor)
-                    attempts.append({"attempt": index, "status": "passed", "ready": ready,
+                    attempts.append({"attempt": index, "status": "passed", "classification": AttemptClassification.VALID_PASS.value, "functional_trial": sum(item.get("classification") == AttemptClassification.VALID_PASS.value for item in attempts) + 1, "ready": ready,
                                      "login": login, "absent": absent, "log": str(client.log_path)})
                 else:
                     pending = self.server.wait_marker("CLIENT_HANDSHAKE_SERVER_PENDING", 60, server_cursor)
                     compatible = self.server.wait_marker("CLIENT_HANDSHAKE_SERVER_COMPATIBLE", 60, int(pending["line"]))
-                    attempts.append({"attempt": index, "status": "passed", "ready": ready,
+                    attempts.append({"attempt": index, "status": "passed", "classification": AttemptClassification.VALID_PASS.value, "functional_trial": sum(item.get("classification") == AttemptClassification.VALID_PASS.value for item in attempts) + 1, "ready": ready,
                                      "login": login, "pending": pending, "compatible": compatible,
                                      "log": str(client.log_path)})
             except Exception as exc:
-                attempts.append({"attempt": index, "status": "failed", "error": str(exc),
+                attempts.append({"attempt": index, "status": "failed", "classification": AttemptClassification.INFRASTRUCTURE_FAILURE.value, "functional_trial": None, "error": str(exc),
                                  "log": str(client.log_path), "attempt_id": self.attempt_ids.get(name)})
                 self.scenarios["cold_login"] = {"status": "failed", "mode": self.initial_connect_mode,
                                                  "attempts": attempts, "attempt_count": len(attempts),
@@ -953,7 +1032,9 @@ class Acceptance:
                                      "port_arg_present", "port_value_matches"))
                             and not evidence.network_login_seen):
                         classification = "LAUNCH_ARGS_PROPAGATED_BUT_NATIVE_CONNECT_NOT_STARTED"
-                    attempts[-1]["classification"] = classification
+                    attempts[-1]["classification"] = (AttemptClassification.HARNESS_FAILURE.value
+                                                         if "CLEANUP" in classification or "CONTROL_SERVER" in classification
+                                                         else AttemptClassification.INFRASTRUCTURE_FAILURE.value)
                     attempts[-1]["login_diagnostics"] = login_diagnostics(self.server, client)
                     attempts[-1]["launch_args"] = launch
                     attempts[-1]["processes"] = {
@@ -983,13 +1064,19 @@ class Acceptance:
                     if attempt_cleanup["status"] != "passed":
                         attempts[-1]["status"] = "failed"
                         attempts[-1]["classification"] = "ATTEMPT_CLEANUP_FAILED"
-        passed_count = sum(item.get("status") == "passed" for item in attempts)
-        self.scenarios["cold_login"] = {"status": "passed" if passed_count == self.cold_login_probes else "failed",
+        passed_count = sum(item.get("classification") == AttemptClassification.VALID_PASS.value for item in attempts)
+        infrastructure = sum(item.get("classification") == AttemptClassification.INFRASTRUCTURE_FAILURE.value for item in attempts)
+        product = sum(item.get("classification") == AttemptClassification.PRODUCT_FAILURE.value for item in attempts)
+        harness = sum(item.get("classification") == AttemptClassification.HARNESS_FAILURE.value for item in attempts)
+        self.scenarios["cold_login"] = {"status": "passed" if passed_count == target and product == 0 and harness == 0 else "failed",
                                          "client_mod_mode": self.client_mod_mode,
                                          "mode": self.initial_connect_mode,
                                          "attempts": attempts, "attempt_count": len(attempts),
-                                         "passed": passed_count,
-                                         "failed": len(attempts) - passed_count}
+                                         "launch_attempts": len(attempts), "valid_trials": passed_count,
+                                         "required_valid_trials": target, "maximum_launch_attempts": limit,
+                                         "infrastructure_failures": infrastructure, "product_failures": product,
+                                         "harness_failures": harness, "quota_reached": passed_count == target,
+                                         "passed": passed_count, "failed": len(attempts) - passed_count}
 
     def cleanup(self) -> None:
         errors = []
@@ -1030,17 +1117,26 @@ class Acceptance:
     def run(self, selected: set[str] | None = None) -> dict[str, object]:
         self.start_server()
         if self.server_smoke_only:
+            smoke_report = None
             try:
-                return {"status": "diagnostic_passed", "complete_run": False,
+                isolated = bool(self.control_classpath_result and self.control_classpath_result.get("isolated"))
+                smoke_report = {"status": "diagnostic_passed", "complete_run": False,
                         "server_mod_mode": self.server_mod_mode,
                         "server_build_mode": self.server_build_mode,
                         "server_project_directory": self.server_project_directory,
                         "server_task": self.server_task, "server_booted": True,
                         "rcon_ready": self.rcon is not None,
-                        "partialreload_loaded": self.server_mod_mode == "with_mod",
-                        "classpath_isolated": self.server_mod_mode == "without_mod"}
+                        "game_pid_found": bool(self.control_classpath_result and self.control_classpath_result.get("game_pid_found")),
+                        "classpath_isolated": isolated,
+                        "partialreload_markers_seen": any(entry["marker"].startswith("CLIENT_HANDSHAKE_SERVER_") for entry in self.server.entries()),
+                        "partialreload_loaded": (not isolated) or bool(self.control_classpath_result and self.control_classpath_result.get("partialreload_module_present"))}
             finally:
                 self.cleanup()
+            smoke_report["cleanup"] = self.cleanup_result
+            if self.cleanup_result.get("status") != "passed":
+                smoke_report["status"] = "failed"
+                smoke_report["classification"] = "CONTROL_SERVER_ISOLATION_FAILED"
+            return smoke_report
         cold_mode = False
         try:
             selected = selected or {"compatible", "reconnect", "silent_timeout", "absent_client_allowed", "connected_commit_still_blocked"}
@@ -1052,6 +1148,7 @@ class Acceptance:
                 if "reconnect" in selected: self.reconnect()
                 if "silent_timeout" in selected: self.silent_timeout()
                 if "absent_client_allowed" in selected: self.absent()
+                if "server_absent_client_mod_allowed" in selected: self.server_absent_client_mod_allowed()
                 if "connected_commit_still_blocked" in selected: self.connected_commit()
                 if "absent_reconnect_stress" in selected: self.absent_reconnect_stress()
         finally:
@@ -1068,7 +1165,8 @@ class Acceptance:
                     "maximum_launch_attempts": self.maximum_launch_attempts,
                     "cleanup": self.cleanup_result, "run_id": self.run_id,
                     "log_root": str(self.run_log_root), "attempt_ids": self.attempt_ids}
-        full = selected == {"compatible", "reconnect", "silent_timeout", "absent_client_allowed", "connected_commit_still_blocked"}
+        full = selected == {"compatible", "reconnect", "silent_timeout", "absent_client_allowed",
+                           "server_absent_client_mod_allowed", "connected_commit_still_blocked"}
         passed = all(item.get("status") == "passed" for item in self.scenarios.values())
         return {"status": "passed" if passed and self.cleanup_result["status"] == "passed" else "failed",
                 "complete_run": full and passed and self.cleanup_result["status"] == "passed",
@@ -1102,6 +1200,9 @@ def main() -> int:
     parser.add_argument("--required-valid-trials", type=int, default=0)
     parser.add_argument("--maximum-launch-attempts", type=int, default=0)
     args = parser.parse_args()
+    if args.required_valid_trials < 0 or args.maximum_launch_attempts < 0 or (
+            args.required_valid_trials > 0 and args.maximum_launch_attempts < args.required_valid_trials):
+        parser.error("INVALID_TRIAL_QUOTA")
     LOG_ROOT.mkdir(parents=True, exist_ok=True)
     acceptance = Acceptance(args.initial_connect_mode.upper(), args.cold_login_probes, args.client_mod_mode,
                             args.strict_client_isolation, args.require_attempt_cleanup,
