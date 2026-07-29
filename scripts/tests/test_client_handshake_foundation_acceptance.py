@@ -183,6 +183,12 @@ class HandshakeAcceptanceReportTest(unittest.TestCase):
         self.assertFalse(MODULE.evaluate_quota([], 1, 1)["quota_reached"])
     def test_quota_rejects_product(self):
         self.assertFalse(MODULE.evaluate_quota([{"classification": "PRODUCT_FAILURE"}], 0, 1)["quota_reached"])
+    def test_quota_rejects_harness_cleanup_failure(self):
+        attempt = {"classification": MODULE.AttemptClassification.HARNESS_FAILURE.value,
+                   "error_code": "ATTEMPT_CLEANUP_FAILED"}
+        result = MODULE.evaluate_quota([attempt], 0, 1)
+        self.assertFalse(result["quota_reached"])
+        self.assertEqual(result["harness_failures"], 1)
     def test_quota_accepts_authorized_infra(self):
         item = {"classification": "INFRASTRUCTURE_FAILURE", "fingerprint": "x"}
         self.assertTrue(MODULE.evaluate_quota([item, {"classification": "VALID_PASS"}], 1, 2, {"x"})["quota_reached"])

@@ -1099,6 +1099,19 @@ class Acceptance:
                 "identity_mismatches": list(stop_result.identity_mismatches),
                 "stop_result": stop_result.__dict__}
 
+    def wait_player_present(self, username: str, timeout: float = 20.0) -> bool:
+        if self.rcon is None:
+            return False
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                if username in self.rcon.command("list"):
+                    return True
+            except Exception:
+                pass
+            time.sleep(.25)
+        return False
+
     @staticmethod
     def challenge(entry: dict[str, object]) -> str | None:
         value = fields(entry).get("challenge")
@@ -1369,6 +1382,7 @@ class Acceptance:
             client = self.start_client(name, username,
                                        with_mod=self.client_mod_mode == "with_mod")
             client_start_line = client.cursor()
+            stop_after_attempt = False
             try:
                 ready = client.wait_marker("HANDSHAKE_ACCEPTANCE_CLIENT_READY", 90)
                 client_cursor = client.cursor()
@@ -1383,16 +1397,31 @@ class Acceptance:
                     capture_tcp_state(self.run_log_root, self.server_port, client, self.server,
                                       f"tcp-after-connect-request-{name}.json")
                 login = client.wait_marker("HANDSHAKE_ACCEPTANCE_CLIENT_NETWORK_LOGIN", 60, client_cursor)
-                if self.client_mod_mode == "without_mod":
-                    absent = self.server.wait_marker("CLIENT_HANDSHAKE_SERVER_ABSENT", 60, server_cursor)
-                    attempts.append({"attempt": index, "status": "passed", "classification": AttemptClassification.VALID_PASS.value, "functional_trial": sum(item.get("classification") == AttemptClassification.VALID_PASS.value for item in attempts) + 1, "ready": ready,
-                                     "login": login, "absent": absent, "log": str(client.log_path)})
-                else:
-                    pending = self.server.wait_marker("CLIENT_HANDSHAKE_SERVER_PENDING", 60, server_cursor)
+                player_present = self.wait_player_present(username)
+                trial = {"attempt": index, "status": "passed",
+                         "classification": AttemptClassification.VALID_PASS.value,
+                         "functional_trial": sum(item.get("classification") == AttemptClassification.VALID_PASS.value for item in attempts) + 1,
+                         "ready": ready, "login": login, "player_present_in_rcon": player_present,
+                         "log": str(client.log_path)}
+                if not player_present:
+                    raise AssertionError("player did not appear in RCON list")
+                if self.server_mod_mode == "with_mod" and self.client_mod_mode == "without_mod":
+                    discovering = self.server.wait_marker("CLIENT_HANDSHAKE_SERVER_DISCOVERING", 60, server_cursor)
+                    absent = self.server.wait_marker("CLIENT_HANDSHAKE_SERVER_ABSENT", 60, int(discovering["line"]))
+                    trial.update({"discovering": discovering, "absent": absent})
+                elif self.server_mod_mode == "with_mod" and self.client_mod_mode == "with_mod":
+                    presence_sent = client.wait_marker("CLIENT_HANDSHAKE_CLIENT_PRESENCE_SENT", 60, client_cursor)
+                    presence_received = self.server.wait_marker("CLIENT_HANDSHAKE_SERVER_PRESENCE_RECEIVED", 60, server_cursor)
+                    pending = self.server.wait_marker("CLIENT_HANDSHAKE_SERVER_PENDING", 60, int(presence_received["line"]))
                     compatible = self.server.wait_marker("CLIENT_HANDSHAKE_SERVER_COMPATIBLE", 60, int(pending["line"]))
-                    attempts.append({"attempt": index, "status": "passed", "classification": AttemptClassification.VALID_PASS.value, "functional_trial": sum(item.get("classification") == AttemptClassification.VALID_PASS.value for item in attempts) + 1, "ready": ready,
-                                     "login": login, "pending": pending, "compatible": compatible,
-                                     "log": str(client.log_path)})
+                    trial.update({"presence_sent": presence_sent, "presence_received": presence_received,
+                                  "pending": pending, "compatible": compatible})
+                elif self.server_mod_mode == "without_mod" and self.client_mod_mode == "with_mod":
+                    skipped = client.wait_marker("CLIENT_HANDSHAKE_CLIENT_PRESENCE_SKIPPED_REMOTE_ABSENT", 60, client_cursor)
+                    trial.update({"presence_skipped": skipped})
+                elif self.server_mod_mode != "without_mod" or self.client_mod_mode != "without_mod":
+                    raise AssertionError("invalid server/client mod mode combination")
+                attempts.append(trial)
             except Exception as exc:
                 attempts.append({"attempt": index, "status": "failed", "classification": AttemptClassification.INFRASTRUCTURE_FAILURE.value, "functional_trial": None, "error": str(exc),
                                  "log": str(client.log_path), "attempt_id": self.attempt_ids.get(name)})
@@ -1449,7 +1478,7 @@ class Acceptance:
                 entered = evidence.network_login_seen
                 attempt_cleanup = self.cleanup_attempt(
                     client, name, username, entered,
-                    entered)
+                    entered and self.server_mod_mode == "with_mod")
                 if attempts:
                     attempts[-1]["cleanup"] = attempt_cleanup
                     final_window = AttemptWindow(window.server_start_line, window.client_start_line,
@@ -1458,7 +1487,23 @@ class Acceptance:
                         self.server, client, final_window, self.run_id, self.attempt_ids.get(name, ""))
                     if attempt_cleanup["status"] != "passed":
                         attempts[-1]["status"] = "failed"
-                        attempts[-1]["classification"] = "ATTEMPT_CLEANUP_FAILED"
+                        attempts[-1]["classification"] = AttemptClassification.HARNESS_FAILURE.value
+                        attempts[-1]["error_code"] = "ATTEMPT_CLEANUP_FAILED"
+                if attempts:
+                    latest_classification = attempts[-1].get("classification")
+                    if latest_classification in {
+                        AttemptClassification.PRODUCT_FAILURE.value,
+                        AttemptClassification.HARNESS_FAILURE.value,
+                    }:
+                        stop_after_attempt = True
+                    if (self.required_valid_trials > 0
+                            and latest_classification == AttemptClassification.INFRASTRUCTURE_FAILURE.value
+                            and attempts[-1].get("fingerprint") not in self.authorized_infrastructure_fingerprints
+                            and not self.diagnostic_matrix):
+                        attempts[-1]["unauthorized_infrastructure_failure"] = True
+                        stop_after_attempt = True
+            if stop_after_attempt:
+                break
         passed_count = sum(item.get("classification") == AttemptClassification.VALID_PASS.value for item in attempts)
         infrastructure = sum(item.get("classification") == AttemptClassification.INFRASTRUCTURE_FAILURE.value for item in attempts)
         product = sum(item.get("classification") == AttemptClassification.PRODUCT_FAILURE.value for item in attempts)
@@ -1576,7 +1621,7 @@ class Acceptance:
             selected = selected or {"compatible", "reconnect", "silent_timeout", "absent_client_allowed",
                                     "server_absent_client_mod_allowed", "server_absent_client_mod_reconnect",
                                     "connected_commit_still_blocked"}
-            if self.cold_login_probes:
+            if self.cold_login_probes or self.required_valid_trials > 0:
                 self.cold_login()
                 cold_mode = True
             else:
@@ -1597,12 +1642,16 @@ class Acceptance:
             diagnostic_ok = self.diagnostic_matrix and self.scenarios.get("cold_login", {}).get("matrix_complete") is True \
                 and self.scenarios.get("cold_login", {}).get("product_failures", 0) == 0 \
                 and self.scenarios.get("cold_login", {}).get("harness_failures", 0) == 0
+            isolated = bool(self.control_classpath_result and self.control_classpath_result.get("isolated"))
             return {"status": "diagnostic_passed" if cold_passed or diagnostic_ok else "failed", "complete_run": False,
                     "mode": self.initial_connect_mode, "scenarios": self.scenarios,
                     "server_mod_mode": self.server_mod_mode, "server_task": self.server_task,
                     "server_build_mode": self.server_build_mode,
                     "server_project_directory": self.server_project_directory,
                     "server_main_mod_present": self.server_mod_mode == "with_mod",
+                    "classpath_isolated": isolated if self.server_mod_mode == "without_mod" else None,
+                    "partialreload_markers_seen": any(entry["marker"].startswith("CLIENT_HANDSHAKE_SERVER_") for entry in self.server.entries()) if self.server else False,
+                    "partialreload_loaded": ((not isolated) or bool(self.control_classpath_result and self.control_classpath_result.get("partialreload_module_present"))) if self.server_mod_mode == "without_mod" else self.server_mod_mode == "with_mod",
                     "required_valid_trials": self.required_valid_trials,
                     "maximum_launch_attempts": self.maximum_launch_attempts,
                     "diagnostic_matrix": self.diagnostic_matrix,
@@ -1612,6 +1661,7 @@ class Acceptance:
                            "server_absent_client_mod_allowed", "server_absent_client_mod_reconnect",
                            "connected_commit_still_blocked"}
         passed = all(item.get("status") == "passed" for item in self.scenarios.values())
+        isolated = bool(self.control_classpath_result and self.control_classpath_result.get("isolated"))
         return {"status": "passed" if passed and self.cleanup_result["status"] == "passed" else "failed",
                 "complete_run": full and passed and self.cleanup_result["status"] == "passed",
                 "scenarios": self.scenarios, "server_mod_mode": self.server_mod_mode,
@@ -1619,6 +1669,9 @@ class Acceptance:
                 "server_build_mode": self.server_build_mode,
                 "server_project_directory": self.server_project_directory,
                 "server_main_mod_present": self.server_mod_mode == "with_mod",
+                "classpath_isolated": isolated if self.server_mod_mode == "without_mod" else None,
+                "partialreload_markers_seen": any(entry["marker"].startswith("CLIENT_HANDSHAKE_SERVER_") for entry in self.server.entries()) if self.server else False,
+                "partialreload_loaded": ((not isolated) or bool(self.control_classpath_result and self.control_classpath_result.get("partialreload_module_present"))) if self.server_mod_mode == "without_mod" else self.server_mod_mode == "with_mod",
                 "cleanup": self.cleanup_result}
 
 
