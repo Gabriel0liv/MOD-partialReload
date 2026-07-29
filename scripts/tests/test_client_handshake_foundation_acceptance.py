@@ -16,6 +16,7 @@ SPEC.loader.exec_module(MODULE)
 def report(status="passed", complete=True, scenarios=None, cleanup="passed"):
     scenarios = scenarios or {name: {"status": "passed"} for name in (
         "compatible", "reconnect", "silent_timeout", "absent_client_allowed",
+        "server_absent_client_mod_allowed", "server_absent_client_mod_reconnect",
         "connected_commit_still_blocked")}
     scenarios["compatible"].update({"challenge": "one", "connection": "1"})
     scenarios["reconnect"].update({"challenge": "two", "previous_challenge": "one",
@@ -24,7 +25,9 @@ def report(status="passed", complete=True, scenarios=None, cleanup="passed"):
     scenarios["silent_timeout"].update({"response_sent": False})
     scenarios["absent_client_allowed"].update({"pending_seen": False})
     return {"status": status, "complete_run": complete, "scenarios": scenarios,
-            "cleanup": {"status": cleanup}}
+            "cleanup": {"status": cleanup},
+            "subruns": {"with_mod": {"cleanup": {"status": cleanup}},
+                        "without_mod": {"cleanup": {"status": cleanup}}}}
 
 
 class HandshakeAcceptanceReportTest(unittest.TestCase):

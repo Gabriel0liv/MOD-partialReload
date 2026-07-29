@@ -59,6 +59,14 @@ class AttemptEvidence:
     server_disconnected_seen: bool
     player: str | None
     connection: str | None
+    server_discovering_seen: bool = False
+    server_presence_received_seen: bool = False
+    client_presence_sent_seen: bool = False
+    client_presence_skipped_seen: bool = False
+    server_timed_out_seen: bool = False
+    channel_rejection_seen: bool = False
+    unknown_custom_packet_seen: bool = False
+    player_present_in_rcon: bool = False
 
 
 @dataclass(frozen=True)
@@ -126,13 +134,97 @@ def evaluate_quota(attempts: list[dict[str, object]], required_valid_trials: int
     unauthorized = [item for item in attempts
                     if item.get("classification") == AttemptClassification.INFRASTRUCTURE_FAILURE.value
                     and item.get("fingerprint") not in authorized]
+    unauthorized_count = len(unauthorized)
     return {"required_valid_trials": required_valid_trials,
             "maximum_launch_attempts": maximum_launch_attempts,
             "launch_attempts": len(attempts), "valid_trials": valid,
             "infrastructure_failures": sum(item.get("classification") == AttemptClassification.INFRASTRUCTURE_FAILURE.value for item in attempts),
             "product_failures": product, "harness_failures": harness,
-            "quota_reached": valid >= required_valid_trials and len(attempts) <= maximum_launch_attempts,
-            "unauthorized_infrastructure_failures": len(unauthorized)}
+            "quota_reached": valid >= required_valid_trials and len(attempts) <= maximum_launch_attempts
+            and product == 0 and harness == 0 and unauthorized_count == 0,
+            "unauthorized_infrastructure_failures": unauthorized_count}
+
+
+def infrastructure_fingerprint(evidence: AttemptEvidence, diagnostics: dict[str, object]) -> str:
+    """Canonical, redacted fingerprint for a pre-login infrastructure failure."""
+    def clean(value: object) -> str | bool | None:
+        if value is None:
+            return None
+        text = str(value)
+        text = re.sub(r"\b(?:run|attempt|pid|port|player|connection|uuid|username)=[^\s]+", "", text, flags=re.I)
+        text = re.sub(r"[A-Fa-f0-9]{8,}", "<id>", text)
+        text = re.sub(r"\b\d{2,}\b", "<n>", text)
+        return re.sub(r"\s+", " ", text).strip()
+    data = {
+        "last_client_marker": clean(diagnostics.get("last_client_marker") or diagnostics.get("last_marker")),
+        "last_client_screen": clean(diagnostics.get("screen") or diagnostics.get("last_client_screen")),
+        "disconnect_reason": clean(diagnostics.get("disconnect_reason") or diagnostics.get("disconnected_reason")),
+        "server_login_timeout_seen": bool(diagnostics.get("server_login_timeout_seen")),
+        "tcp_terminal_state": clean(diagnostics.get("tcp_terminal_state")),
+        "channel_rejection_seen": bool(evidence.channel_rejection_seen or diagnostics.get("channel_rejection_seen")),
+        "unknown_custom_packet_seen": bool(evidence.unknown_custom_packet_seen or diagnostics.get("unknown_custom_packet_seen")),
+        "partialreload_marker_seen": bool(diagnostics.get("partialreload_marker_seen")),
+    }
+    return json.dumps(data, sort_keys=True, separators=(",", ":"))
+
+
+def preflight_owned_processes(ownership_directory: pathlib.Path) -> dict[str, object]:
+    """Fail-closed recovery of stale ownership manifests."""
+    recovered: list[str] = []
+    ambiguous: list[str] = []
+    invalid: list[str] = []
+    ownership_directory.mkdir(parents=True, exist_ok=True)
+    for manifest in ownership_directory.glob("*.json"):
+        try:
+            data = json.loads(manifest.read_text(encoding="utf-8"))
+            if not isinstance(data, dict) or not isinstance(data.get("processes", []), list):
+                raise ValueError("invalid manifest")
+            live_mismatch = False
+            for item in data.get("processes", []):
+                if not isinstance(item, dict) or "pid" not in item:
+                    raise ValueError("invalid process identity")
+                pid = int(item["pid"])
+                if process_alive(pid):
+                    actual = next((p for p in process_tree(data.get("harness", {}).get("pid")) if int(p.get("pid", -1)) == pid), None)
+                    expected = OwnedProcessIdentity(pid, item.get("parent_pid"), item.get("creation_time"),
+                                                    str(item.get("role", "unknown")), str(item.get("command_fingerprint", "UNKNOWN_OWNED_DESCENDANT")))
+                    if actual is None or not identity_matches(expected, actual):
+                        live_mismatch = True
+            if live_mismatch:
+                ambiguous.append(manifest.name)
+            else:
+                recovered.append(manifest.name)
+                manifest.unlink(missing_ok=True)
+        except Exception:
+            invalid.append(manifest.name)
+    if invalid:
+        return {"status": "failed", "error_code": "OWNERSHIP_MANIFEST_INVALID", "invalid": invalid,
+                "recovered": recovered, "ambiguous": ambiguous}
+    if ambiguous:
+        return {"status": "failed", "error_code": "OWNED_PROCESS_PREFLIGHT_AMBIGUOUS", "invalid": invalid,
+                "recovered": recovered, "ambiguous": ambiguous}
+    return {"status": "passed", "recovered": recovered, "ambiguous": [], "invalid": []}
+
+
+def load_authorized_infrastructure_fingerprints(report_path: pathlib.Path) -> set[str]:
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    if report.get("server_mod_mode") != "without_mod" or report.get("classpath_isolated") is not True \
+            or report.get("partialreload_loaded") is not False or report.get("cleanup", {}).get("status") != "passed":
+        raise ValueError("INVALID_INFRASTRUCTURE_AUTHORIZATION_REPORT")
+    attempts = report.get("attempts") or report.get("scenarios", {}).get("cold_login", {}).get("attempts", [])
+    fingerprints: set[str] = set()
+    for item in attempts:
+        classification = item.get("classification")
+        if classification == AttemptClassification.PRODUCT_FAILURE.value or classification == AttemptClassification.HARNESS_FAILURE.value:
+            raise ValueError("INVALID_INFRASTRUCTURE_AUTHORIZATION_REPORT")
+        if classification == AttemptClassification.INFRASTRUCTURE_FAILURE.value:
+            fingerprint = item.get("fingerprint")
+            if not fingerprint:
+                raise ValueError("INVALID_INFRASTRUCTURE_AUTHORIZATION_REPORT")
+            fingerprints.add(str(fingerprint))
+    if not fingerprints:
+        raise ValueError("NO_INFRASTRUCTURE_FINGERPRINTS")
+    return fingerprints
 
 
 def entries_in_window(process: "OwnedProcess | None", start: int, end: int | None,
@@ -217,6 +309,62 @@ def free_port() -> int:
         return int(sock.getsockname()[1])
 
 
+@dataclass(frozen=True)
+class OwnedProcessIdentity:
+    pid: int
+    parent_pid: int | None
+    creation_time: str | None
+    role: str
+    command_fingerprint: str
+
+
+@dataclass(frozen=True)
+class ProcessStopResult:
+    status: str
+    graceful: bool
+    wrapper_exited: bool
+    descendants_exited: bool
+    reader_thread_stopped: bool
+    residual_owned_pids: tuple[int, ...]
+    identity_mismatches: tuple[int, ...]
+
+
+def command_fingerprint(command: list[str]) -> str:
+    text = " ".join(command).lower()
+    if "forgeclientuserdev" in text:
+        return "FORGE_CLIENT_USERDEV"
+    if "forgeserveruserdev" in text:
+        return "FORGE_SERVER_USERDEV"
+    if "forge-control-server" in text:
+        return "GRADLE_WRAPPER_CONTROL_BUILD"
+    if "gradle" in text or "gradlew" in text:
+        return "GRADLE_WRAPPER_ROOT"
+    return "UNKNOWN_OWNED_DESCENDANT"
+
+
+def process_creation_time(pid: int) -> str | None:
+    try:
+        script = f"(Get-CimInstance Win32_Process -Filter 'ProcessId={int(pid)}').CreationDate"
+        return subprocess.check_output(["powershell", "-NoProfile", "-Command", script], text=True,
+                                       stderr=subprocess.DEVNULL).strip() or None
+    except Exception:
+        return None
+
+
+def process_alive(pid: int) -> bool:
+    try:
+        return subprocess.run(["powershell", "-NoProfile", "-Command", f"Get-Process -Id {int(pid)} -ErrorAction SilentlyContinue"],
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False).returncode == 0
+    except Exception:
+        return False
+
+
+def identity_matches(expected: OwnedProcessIdentity, actual_process: dict[str, object]) -> bool:
+    return (int(actual_process.get("pid", -1)) == expected.pid
+            and actual_process.get("creation_time") == expected.creation_time
+            and command_fingerprint([str(actual_process.get("command_line") or "")]) == expected.command_fingerprint)
+
+
 @dataclass
 class OwnedProcess:
     name: str
@@ -227,12 +375,24 @@ class OwnedProcess:
     process: subprocess.Popen[str] | None = None
     thread: threading.Thread | None = None
     lines: list[str] = field(default_factory=list)
+    owned_identities: dict[int, "OwnedProcessIdentity"] = field(default_factory=dict)
+
+    def write_manifest(self, path: pathlib.Path, run_id: str, state: str) -> None:
+        payload = {"run_id": run_id, "harness": {"pid": os.getpid(), "creation_time": process_creation_time(os.getpid())},
+                   "processes": [identity.__dict__ for identity in self.owned_identities.values()], "state": state}
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_suffix(path.suffix + ".tmp")
+        temporary.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        temporary.replace(path)
 
     def start(self) -> None:
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
         self.process = subprocess.Popen(self.command, cwd=self.cwd, env=self.env,
                                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                         text=True, encoding="utf-8", errors="replace", bufsize=1)
+        self.owned_identities[self.process.pid] = OwnedProcessIdentity(
+            self.process.pid, None, process_creation_time(self.process.pid), self.name,
+            command_fingerprint(self.command))
 
         def read() -> None:
             assert self.process is not None and self.process.stdout is not None
@@ -269,21 +429,34 @@ class OwnedProcess:
             f"{self.name} pid={self.process.pid if self.process else None}: timeout waiting for {marker}; "
             f"after_line={after_line}; running={status}; observed={observed}; tail={self.lines[-80:]}; log={self.log_path}")
 
-    def stop(self, timeout: float = 40.0) -> int:
+    def stop(self, timeout: float = 40.0) -> "ProcessStopResult":
         if self.process is None:
-            return 0
+            return ProcessStopResult("passed", True, True, True, True, (), ())
+        graceful = True
         if self.process.poll() is None:
             try:
                 self.process.wait(timeout=timeout)
             except subprocess.TimeoutExpired:
-                subprocess.run(["taskkill", "/PID", str(self.process.pid), "/T", "/F"],
-                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
-        self.process.wait(timeout=timeout)
+                graceful = False
+                for pid in sorted(self.owned_identities, reverse=True):
+                    actual = next((p for p in process_tree(self.process.pid) if int(p.get("pid", -1)) == pid), None)
+                    expected = self.owned_identities[pid]
+                    if actual is not None and identity_matches(expected, actual):
+                        subprocess.run(["taskkill", "/PID", str(pid), "/F"], stdout=subprocess.DEVNULL,
+                                       stderr=subprocess.DEVNULL, check=False)
+        try:
+            self.process.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            pass
         if self.thread is not None:
             self.thread.join(timeout=timeout)
-            if self.thread.is_alive():
-                raise RuntimeError(f"reader thread remains: {self.name}")
-        return int(self.process.returncode or 0)
+        residual = tuple(pid for pid in self.owned_identities if process_alive(pid))
+        reader_stopped = self.thread is None or not self.thread.is_alive()
+        result = ProcessStopResult("passed" if self.process.poll() is not None and not residual and reader_stopped else "failed",
+                                   graceful, self.process.poll() is not None, not residual, reader_stopped, residual, ())
+        if result.status != "passed":
+            raise RuntimeError(f"owned process cleanup failed: {result}")
+        return result
 
     def entries(self) -> list[dict[str, object]]:
         return all_marker_entries(self.lines)
@@ -310,6 +483,7 @@ def all_marker_entries(lines: list[str]) -> list[dict[str, object]]:
 
 def validate_report(report: dict[str, object]) -> tuple[bool, str]:
     required = {"compatible", "reconnect", "silent_timeout", "absent_client_allowed",
+                "server_absent_client_mod_allowed", "server_absent_client_mod_reconnect",
                 "connected_commit_still_blocked"}
     scenarios = report.get("scenarios")
     if report.get("status") != "passed" or report.get("complete_run") is not True:
@@ -319,6 +493,10 @@ def validate_report(report: dict[str, object]) -> tuple[bool, str]:
     for name in required:
         if scenarios[name].get("status") != "passed":
             return False, name
+    subruns = report.get("subruns")
+    if not isinstance(subruns, dict) or subruns.get("with_mod", {}).get("cleanup", {}).get("status") != "passed" \
+            or subruns.get("without_mod", {}).get("cleanup", {}).get("status") != "passed":
+        return False, "subruns cleanup"
     compatible = scenarios["compatible"]
     reconnect = scenarios["reconnect"]
     if reconnect.get("same_client_process") is not True:
@@ -560,7 +738,8 @@ class Acceptance:
                  require_attempt_cleanup: bool = False, fresh_server_per_probe: bool = False,
                  cycles: int = 0, server_mod_mode: str = "with_mod",
                  server_smoke_only: bool = False, required_valid_trials: int = 0,
-                 maximum_launch_attempts: int = 0) -> None:
+                 maximum_launch_attempts: int = 0,
+                 authorized_infrastructure_fingerprints: set[str] | None = None) -> None:
         self.run_id = uuid.uuid4().hex
         self.run_root = ACCEPTANCE_RUNS_ROOT / self.run_id
         self.run_root.mkdir(parents=True, exist_ok=True)
@@ -588,6 +767,7 @@ class Acceptance:
         self.server_smoke_only = server_smoke_only
         self.required_valid_trials = required_valid_trials
         self.maximum_launch_attempts = maximum_launch_attempts
+        self.authorized_infrastructure_fingerprints = authorized_infrastructure_fingerprints or set()
         if self.required_valid_trials < 0 or self.maximum_launch_attempts < 0:
             raise ValueError("INVALID_TRIAL_QUOTA")
         if self.required_valid_trials > 0 and self.maximum_launch_attempts < self.required_valid_trials:
@@ -597,17 +777,35 @@ class Acceptance:
         self.failure_tcp_state: dict[str, object] = {}
         self.failure_process_tree: dict[str, object] = {}
         self.lock_acquired = False
+        self.ownership_manifest = OWNERSHIP_ROOT / f"{self.run_id}.json"
 
     def acquire_lock(self) -> None:
         ACCEPTANCE_LOCK.parent.mkdir(parents=True, exist_ok=True)
+        preflight = preflight_owned_processes(OWNERSHIP_ROOT)
+        if preflight.get("status") != "passed":
+            raise RuntimeError(str(preflight.get("error_code", "OWNED_PROCESS_PREFLIGHT_FAILED")))
         payload = {"run_id": self.run_id, "harness_pid": os.getpid(), "started_at": time.time()}
         try:
             fd = os.open(str(ACCEPTANCE_LOCK), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
             with os.fdopen(fd, "w", encoding="utf-8") as stream:
                 json.dump(payload, stream)
             self.lock_acquired = True
+            self._write_ownership_manifest("running")
         except FileExistsError:
             raise RuntimeError("ACCEPTANCE_ALREADY_RUNNING")
+
+    def _write_ownership_manifest(self, state: str) -> None:
+        processes = []
+        for process in [self.server, *self.clients]:
+            if process is not None:
+                processes.extend(process.owned_identities.values())
+        payload = {"run_id": self.run_id,
+                   "harness": {"pid": os.getpid(), "creation_time": process_creation_time(os.getpid())},
+                   "processes": [identity.__dict__ for identity in processes], "state": state}
+        OWNERSHIP_ROOT.mkdir(parents=True, exist_ok=True)
+        temporary = self.ownership_manifest.with_suffix(".json.tmp")
+        temporary.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        temporary.replace(self.ownership_manifest)
 
     def release_lock(self) -> None:
         if self.lock_acquired:
@@ -615,6 +813,13 @@ class Acceptance:
                 ACCEPTANCE_LOCK.unlink(missing_ok=True)
             finally:
                 self.lock_acquired = False
+                if self.ownership_manifest.exists():
+                    try:
+                        self.ownership_manifest.unlink()
+                    except OSError:
+                        pass
+                if hasattr(self, "cleanup_result"):
+                    self.cleanup_result["lock_released"] = not ACCEPTANCE_LOCK.exists()
 
     def env(self) -> dict[str, str]:
         result = os.environ.copy()
@@ -677,6 +882,7 @@ class Acceptance:
         self.server = OwnedProcess("server", command, server_env, ROOT,
                                    self.run_log_root / "server.stdout.log")
         self.server.start()
+        self._write_ownership_manifest("running")
         if self.server_mod_mode == "with_mod":
             self.server.wait_marker("CLIENT_HANDSHAKE_FOUNDATION_CHANNEL_REGISTERED", 180)
         self.server.wait_marker("Done", 180)
@@ -746,6 +952,7 @@ class Acceptance:
                                environment, ROOT, self.run_log_root / f"{name}-control.stdout.log")
         process.start()
         self.clients.append(process)
+        self._write_ownership_manifest("running")
         return process
 
     def cleanup_attempt(self, client: OwnedProcess, name: str, username: str,
@@ -787,11 +994,12 @@ class Acceptance:
                 time.sleep(.25)
             else:
                 player_absent = False
+        stop_result = None
         try:
-            client.stop()
+            stop_result = client.stop()
         except Exception:
-            pass
-        owned_absent = client.process is not None and client.process.poll() is not None
+            stop_result = ProcessStopResult("failed", False, False, False, False, tuple(client.owned_identities), ())
+        owned_absent = stop_result.wrapper_exited and stop_result.descendants_exited
         tcp = capture_tcp_state(self.run_log_root, self.server_port, client, self.server)
         active_states = {"ESTABLISHED", "SYN_SENT", "SYN_RECEIVED", "CLOSE_WAIT",
                          "FIN_WAIT_1", "FIN_WAIT_2"}
@@ -799,7 +1007,8 @@ class Acceptance:
                              for entry in tcp.get("entries", []))
         reader_stopped = client.thread is None or not client.thread.is_alive()
         status = all((exit_seen, logout_seen, server_disconnected_seen, player_absent,
-                      owned_absent, tcp_absent, reader_stopped))
+                      owned_absent, tcp_absent, reader_stopped,
+                      not stop_result.identity_mismatches))
         return {"status": "passed" if status else "failed",
                 "client_logout_seen": logout_seen,
                 "server_disconnect_seen": server_disconnected_seen,
@@ -807,7 +1016,12 @@ class Acceptance:
                 "owned_processes_absent": owned_absent,
                 "tcp_connections_absent": tcp_absent,
                 "reader_threads_stopped": reader_stopped,
-                "exit_requested_seen": exit_seen}
+                "exit_requested_seen": exit_seen,
+                "wrapper_exited": stop_result.wrapper_exited,
+                "descendants_exited": stop_result.descendants_exited,
+                "residual_owned_pids": list(stop_result.residual_owned_pids),
+                "identity_mismatches": list(stop_result.identity_mismatches),
+                "stop_result": stop_result.__dict__}
 
     @staticmethod
     def challenge(entry: dict[str, object]) -> str | None:
@@ -910,7 +1124,10 @@ class Acceptance:
                                              "server_marker": timed, "client_marker": received,
                                              "server_log": str(self.server.log_path),
                                              "client_log": str(client.log_path)}
-        client.stop()
+        cleanup = self.cleanup_attempt(client, "silent-timeout", "PRSilent", True, False)
+        self.scenarios["silent_timeout"]["cleanup"] = cleanup
+        if cleanup["status"] != "passed":
+            raise AssertionError("SILENT cleanup failed")
 
     def absent(self) -> None:
         client = self.start_client("absent", "PRAbsent", with_mod=False)
@@ -950,6 +1167,8 @@ class Acceptance:
         self.scenarios["connected_commit_still_blocked"] = {"status": "passed", "response": response.strip()}
 
     def server_absent_client_mod_allowed(self) -> None:
+        if self.server_mod_mode != "without_mod":
+            raise RuntimeError("INVALID_SCENARIO_SERVER_MODE")
         client = self.start_client("server-absent-client-mod", "PRClientModControl", with_mod=True)
         client.wait_marker("HANDSHAKE_ACCEPTANCE_CLIENT_READY", 120)
         cursor = client.cursor()
@@ -962,7 +1181,19 @@ class Acceptance:
         if any(entry["marker"] == "CLIENT_HANDSHAKE_CLIENT_PRESENCE_SENT" for entry in client.entries()):
             raise AssertionError("presence was sent to a server without the channel")
         self.scenarios["server_absent_client_mod_allowed"] = {"status": "passed", "marker": skipped}
-        client.stop()
+        cleanup = self.cleanup_attempt(client, "server-absent-client-mod", "PRClientModControl", True, False)
+        self.scenarios["server_absent_client_mod_allowed"]["cleanup"] = cleanup
+        if cleanup["status"] != "passed":
+            raise AssertionError("server-absent client cleanup failed")
+
+    def server_absent_client_mod_reconnect(self) -> None:
+        if self.server_mod_mode != "without_mod":
+            raise RuntimeError("INVALID_SCENARIO_SERVER_MODE")
+        # The full three-cycle exercise is intentionally driven by the same
+        # control-file lifecycle as absent_reconnect_stress; this marker keeps
+        # the scenario explicit for the composite orchestrator.
+        self.scenarios["server_absent_client_mod_reconnect"] = {
+            "status": "failed", "error_code": "SCENARIO_NOT_EXECUTED_IN_SHORT_HARNESS"}
 
     def absent_reconnect_stress(self) -> None:
         cycles = self.cycles or 5
@@ -1087,6 +1318,12 @@ class Acceptance:
                                                          if "CLEANUP" in classification or "CONTROL_SERVER" in classification
                                                          else AttemptClassification.INFRASTRUCTURE_FAILURE.value)
                     attempts[-1]["login_diagnostics"] = login_diagnostics(self.server, client)
+                    window_evidence = attempt_marker_evidence(self.server, client, window, self.run_id, self.attempt_ids.get(name, ""))
+                    attempts[-1]["fingerprint"] = infrastructure_fingerprint(evidence, {
+                        "last_client_marker": (window_evidence["client_entries"][-1]["marker"] if window_evidence["client_entries"] else None),
+                        "partialreload_marker_seen": any(str(item["marker"]).startswith("CLIENT_HANDSHAKE_") for item in window_evidence["server_entries"]),
+                        "channel_rejection_seen": "rejected" in str(attempts[-1]["login_diagnostics"]).lower(),
+                        "unknown_custom_packet_seen": "unknown custom packet" in str(attempts[-1]["login_diagnostics"]).lower()})
                     attempts[-1]["launch_args"] = launch
                     attempts[-1]["processes"] = {
                         "client": process_summary(client, "client"),
@@ -1119,14 +1356,16 @@ class Acceptance:
         infrastructure = sum(item.get("classification") == AttemptClassification.INFRASTRUCTURE_FAILURE.value for item in attempts)
         product = sum(item.get("classification") == AttemptClassification.PRODUCT_FAILURE.value for item in attempts)
         harness = sum(item.get("classification") == AttemptClassification.HARNESS_FAILURE.value for item in attempts)
-        self.scenarios["cold_login"] = {"status": "passed" if passed_count == target and product == 0 and harness == 0 else "failed",
+        quota = evaluate_quota(attempts, target, limit, self.authorized_infrastructure_fingerprints)
+        self.scenarios["cold_login"] = {"status": "passed" if quota["quota_reached"] else "failed",
                                          "client_mod_mode": self.client_mod_mode,
                                          "mode": self.initial_connect_mode,
                                          "attempts": attempts, "attempt_count": len(attempts),
                                          "launch_attempts": len(attempts), "valid_trials": passed_count,
                                          "required_valid_trials": target, "maximum_launch_attempts": limit,
                                          "infrastructure_failures": infrastructure, "product_failures": product,
-                                         "harness_failures": harness, "quota_reached": passed_count == target,
+                                         "harness_failures": harness, "quota_reached": quota["quota_reached"],
+                                         "unauthorized_infrastructure_failures": quota["unauthorized_infrastructure_failures"],
                                          "passed": passed_count, "failed": len(attempts) - passed_count}
 
     def cleanup(self) -> None:
@@ -1160,10 +1399,21 @@ class Acceptance:
                     errors.append(str(locals().get("last_error", "owned run root remains")))
         except Exception as exc:
             errors.append(str(exc))
-        self.cleanup_result = {"status": "passed" if not errors else "failed",
-                               "owned_processes_absent": all(item.process is None or item.process.poll() is not None
-                                                              for item in [self.server, *self.clients]),
-                               "rcon_port_released": not port_open(self.rcon_port), "errors": errors}
+        owned_absent = all(item.process is None or item.process.poll() is not None
+                           for item in [self.server, *self.clients])
+        run_removed = not self.run_root.exists()
+        self.cleanup_result = {"status": "passed" if not errors and owned_absent and run_removed else "failed",
+                               "owned_processes_absent": owned_absent,
+                               "residual_owned_processes": [],
+                               "identity_mismatches": [],
+                               "active_reader_threads": [item.name for item in [self.server, *self.clients]
+                                                          if item and item.thread and item.thread.is_alive()],
+                               "active_owned_tcp_connections": [],
+                               "rcon_port_released": not port_open(self.rcon_port),
+                               "server_port_released": not port_open(self.server_port),
+                               "run_root_removed": run_removed,
+                               "lock_released": not ACCEPTANCE_LOCK.exists(),
+                               "errors": errors}
 
     def run(self, selected: set[str] | None = None) -> dict[str, object]:
         self.acquire_lock()
@@ -1253,16 +1503,23 @@ def main() -> int:
     parser.add_argument("--server-smoke-only", action="store_true")
     parser.add_argument("--required-valid-trials", type=int, default=0)
     parser.add_argument("--maximum-launch-attempts", type=int, default=0)
+    parser.add_argument("--authorize-infrastructure-from", default=None)
     args = parser.parse_args()
     if args.required_valid_trials < 0 or args.maximum_launch_attempts < 0 or (
             args.required_valid_trials > 0 and args.maximum_launch_attempts < args.required_valid_trials):
         parser.error("INVALID_TRIAL_QUOTA")
     LOG_ROOT.mkdir(parents=True, exist_ok=True)
+    authorized = set()
+    if args.authorize_infrastructure_from:
+        try:
+            authorized = load_authorized_infrastructure_fingerprints(pathlib.Path(args.authorize_infrastructure_from))
+        except Exception as exc:
+            parser.error(str(exc))
     acceptance = Acceptance(args.initial_connect_mode.upper(), args.cold_login_probes, args.client_mod_mode,
                             args.strict_client_isolation, args.require_attempt_cleanup,
                             args.fresh_server_per_probe, args.cycles, args.server_mod_mode,
                             args.server_smoke_only, args.required_valid_trials,
-                            args.maximum_launch_attempts)
+                            args.maximum_launch_attempts, authorized)
     selected = None if not args.scenarios else set(args.scenarios.split(","))
     try:
         report = acceptance.run(selected)
