@@ -619,7 +619,216 @@ class HandshakeAcceptanceReportTest(unittest.TestCase):
         target = full_matrix_report("with_mod", [{"classification": "VALID_PASS"} for _ in range(10)], "with_mod")
         quota = {"scenarios": {"cold_login": {"attempts": [hist]}}}
         self.assertEqual(adj.adjudicate(quota, control, target, "compatible_client")["decision"],
-                         "COMPATIBLE_CASE_UNRESOLVED")
+                         "COMPATIBLE_CASE_HISTORICAL_NOT_REPRODUCED")
+
+    def test_causal_signature_schema_version(self):
+        attempt = authorizable_attempt_with_causal()
+        payload = json.loads(attempt["causal_signature"])
+        self.assertEqual(payload["schema_version"], POLICY.CAUSAL_SIGNATURE_SCHEMA_VERSION)
+
+    def test_causal_timeline_uses_attempt_markers(self):
+        attempt = authorizable_attempt_with_causal()
+        markers = [event["marker"] for event in POLICY.causal_timeline(attempt)]
+        self.assertEqual(markers[:2], ["READY", "CONNECT_REQUESTED"])
+
+    def test_causal_timeline_ignores_unknown_markers(self):
+        attempt = authorizable_attempt_with_causal()
+        attempt["attempt_marker_evidence"]["client_entries"].append({"marker": "UNRELATED", "line": 3, "fields": {}})
+        self.assertNotIn("UNRELATED", [event["marker"] for event in POLICY.causal_timeline(attempt)])
+
+    def test_first_terminal_event_prefers_disconnected_screen_marker(self):
+        attempt = authorizable_attempt_with_causal()
+        terminal = POLICY.first_terminal_event(POLICY.causal_timeline(attempt), attempt["fingerprint_diagnostics"])
+        self.assertEqual(terminal["terminal_category"], "CLIENT_DISCONNECTED_SCREEN")
+
+    def test_first_terminal_event_detects_server_login_timeout(self):
+        attempt = authorizable_attempt_with_causal(client_terminal=False)
+        attempt["attempt_marker_evidence"]["server_entries"].append(
+            {"marker": "CLIENT_HANDSHAKE_SERVER_TIMED_OUT", "line": 2, "fields": {}})
+        terminal = POLICY.first_terminal_event(POLICY.causal_timeline(attempt), attempt["fingerprint_diagnostics"])
+        self.assertEqual(terminal["terminal_category"], "SERVER_LOGIN_TIMEOUT")
+
+    def test_first_terminal_event_detects_connection_refused(self):
+        attempt = authorizable_attempt_with_causal(client_terminal=False, diagnostics_overrides={
+            "last_client_error_signature": "Failed to connect: Connection refused",
+            "last_client_screen": None,
+        })
+        terminal = POLICY.first_terminal_event(POLICY.causal_timeline(attempt), attempt["fingerprint_diagnostics"])
+        self.assertEqual(terminal["terminal_category"], "SOCKET_REFUSED")
+
+    def test_first_terminal_event_detects_connection_reset(self):
+        attempt = authorizable_attempt_with_causal(client_terminal=False, diagnostics_overrides={
+            "last_client_error_signature": "Internal Exception: Connection reset",
+            "last_client_screen": None,
+        })
+        terminal = POLICY.first_terminal_event(POLICY.causal_timeline(attempt), attempt["fingerprint_diagnostics"])
+        self.assertEqual(terminal["terminal_category"], "SOCKET_RESET")
+
+    def test_first_terminal_event_detects_socket_timeout(self):
+        attempt = authorizable_attempt_with_causal(client_terminal=False, diagnostics_overrides={
+            "last_client_error_signature": "Timed out waiting for login",
+            "last_client_screen": None,
+        })
+        terminal = POLICY.first_terminal_event(POLICY.causal_timeline(attempt), attempt["fingerprint_diagnostics"])
+        self.assertEqual(terminal["terminal_category"], "SOCKET_TIMEOUT")
+
+    def test_first_terminal_event_detects_tcp_close(self):
+        attempt = authorizable_attempt_with_causal(client_terminal=False, diagnostics_overrides={
+            "tcp_state_summary": "CLOSE_WAIT,ESTABLISHED",
+            "last_client_screen": None,
+        })
+        terminal = POLICY.first_terminal_event(POLICY.causal_timeline(attempt), attempt["fingerprint_diagnostics"])
+        self.assertEqual(terminal["terminal_category"], "SOCKET_CLOSED")
+
+    def test_first_terminal_event_detects_dead_client_process(self):
+        attempt = authorizable_attempt_with_causal(client_terminal=False, diagnostics_overrides={
+            "client_game_process_alive": False,
+            "last_client_screen": None,
+        })
+        terminal = POLICY.first_terminal_event(POLICY.causal_timeline(attempt), attempt["fingerprint_diagnostics"])
+        self.assertEqual(terminal["terminal_category"], "CLIENT_PROCESS_EXITED")
+
+    def test_causal_transport_established(self):
+        attempt = authorizable_attempt_with_causal(diagnostics_overrides={"tcp_state_summary": "ESTABLISHED"})
+        self.assertEqual(POLICY.causal_signature_payload(attempt)["transport_category"], "ESTABLISHED_PRE_LOGIN")
+
+    def test_causal_transport_connecting(self):
+        attempt = authorizable_attempt_with_causal(diagnostics_overrides={"tcp_state_summary": "SYN_SENT"})
+        self.assertEqual(POLICY.causal_signature_payload(attempt)["transport_category"], "CONNECTING")
+
+    def test_causal_transport_terminal(self):
+        attempt = authorizable_attempt_with_causal(diagnostics_overrides={"tcp_state_summary": "CLOSED"})
+        self.assertEqual(POLICY.causal_signature_payload(attempt)["transport_category"], "TERMINAL_CLOSE")
+
+    def test_causal_transport_mixed(self):
+        attempt = authorizable_attempt_with_causal(diagnostics_overrides={"tcp_state_summary": "CLOSE_WAIT,ESTABLISHED"})
+        self.assertEqual(POLICY.causal_signature_payload(attempt)["transport_category"], "MIXED_PROGRESS_AND_TERMINAL")
+
+    def test_causal_progress_stage_connect_requested(self):
+        attempt = authorizable_attempt_with_causal(client_terminal=False)
+        self.assertEqual(POLICY.causal_signature_payload(attempt)["progress_stage"], "CONNECT_REQUESTED")
+
+    def test_causal_progress_stage_rejects_post_login(self):
+        attempt = authorizable_attempt_with_causal()
+        attempt["attempt_marker_evidence"]["client_entries"].append(
+            {"marker": "HANDSHAKE_ACCEPTANCE_CLIENT_NETWORK_LOGIN", "line": 3, "fields": {}})
+        attempt.pop("causal_timeline", None)
+        payload = POLICY.causal_signature_payload(attempt)
+        self.assertFalse(POLICY.causal_signature_authorizable(payload)[0])
+
+    def test_causal_signature_rejects_product_signal(self):
+        attempt = authorizable_attempt_with_causal(diagnostics_overrides={"channel_rejection_seen": True})
+        payload = POLICY.causal_signature_payload(attempt)
+        self.assertFalse(POLICY.causal_signature_authorizable(payload)[0])
+
+    def test_causal_signature_rejects_player_join(self):
+        attempt = authorizable_attempt_with_causal(diagnostics_overrides={"player_present_in_rcon": True})
+        payload = POLICY.causal_signature_payload(attempt)
+        self.assertFalse(POLICY.causal_signature_authorizable(payload)[0])
+
+    def test_causal_signature_requires_terminal_event(self):
+        attempt = authorizable_attempt_with_causal(client_terminal=False, diagnostics_overrides={
+            "tcp_state_summary": "ESTABLISHED",
+            "last_client_screen": None,
+            "last_client_error_signature": None,
+        })
+        payload = POLICY.causal_signature_payload(attempt)
+        self.assertFalse(POLICY.causal_signature_authorizable(payload)[0])
+
+    def test_authorizable_attempt_validates_causal_signature(self):
+        attempt = authorizable_attempt_with_causal()
+        self.assertTrue(POLICY.validate_authorizable_attempt(attempt)[0])
+
+    def test_authorizable_attempt_rejects_bad_causal_schema(self):
+        attempt = authorizable_attempt_with_causal()
+        attempt["causal_signature_schema_version"] = 99
+        self.assertEqual(POLICY.validate_authorizable_attempt(attempt)[1], "CAUSAL_SIGNATURE_SCHEMA_INVALID")
+
+    def test_authorizable_attempt_rejects_bad_causal_integrity(self):
+        attempt = authorizable_attempt_with_causal()
+        payload = json.loads(attempt["causal_signature"])
+        payload["terminal_category"] = "SOCKET_RESET"
+        attempt["causal_signature"] = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        self.assertEqual(POLICY.validate_authorizable_attempt(attempt)[1], "CAUSAL_SIGNATURE_INTEGRITY_MISMATCH")
+
+    def test_evaluate_quota_prefers_causal_authorization_when_present(self):
+        attempt = {"classification": "INFRASTRUCTURE_FAILURE", "fingerprint": "fp", "causal_signature": "other"}
+        quota = MODULE.evaluate_quota([attempt], 0, 1, {"fp"}, {"allowed"})
+        self.assertEqual(quota["unauthorized_infrastructure_failures"], 1)
+
+    def test_evaluate_quota_accepts_matching_causal_authorization(self):
+        attempt = {"classification": "INFRASTRUCTURE_FAILURE", "fingerprint": "fp", "causal_signature": "allowed"}
+        quota = MODULE.evaluate_quota([attempt], 0, 1, set(), {"allowed"})
+        self.assertEqual(quota["unauthorized_infrastructure_failures"], 0)
+
+    def test_evaluate_quota_falls_back_to_fingerprint_without_causal_baseline(self):
+        attempt = {"classification": "INFRASTRUCTURE_FAILURE", "fingerprint": "fp", "causal_signature": "other"}
+        quota = MODULE.evaluate_quota([attempt], 0, 1, {"fp"}, set())
+        self.assertEqual(quota["unauthorized_infrastructure_failures"], 0)
+
+    def test_high_causal_signatures_extracts_authorizable(self):
+        adj = load_adjudicator()
+        attempt = authorizable_attempt_with_causal()
+        report = full_matrix_report("without_mod", [attempt] + [{"classification": "VALID_PASS"} for _ in range(9)], "with_mod")
+        self.assertIn(attempt["causal_signature"], adj.high_causal_signatures(report))
+
+    def test_compatible_adjudicator_reports_historical_causal_not_reproduced(self):
+        adj = load_adjudicator()
+        quota = full_matrix_report("with_mod", [authorizable_attempt_with_causal()], "with_mod")
+        control = full_matrix_report("without_mod", [{"classification": "VALID_PASS"} for _ in range(10)], "with_mod")
+        target = full_matrix_report("with_mod", [{"classification": "VALID_PASS"} for _ in range(10)], "with_mod")
+        result = adj.adjudicate(quota, control, target, "compatible_client")
+        self.assertEqual(result["causal_decision"], "CAUSAL_HISTORICAL_NOT_REPRODUCED")
+
+    def test_compatible_adjudicator_reports_target_correlated_causal(self):
+        adj = load_adjudicator()
+        historical = authorizable_attempt_with_causal()
+        quota = full_matrix_report("with_mod", [historical], "with_mod")
+        control = full_matrix_report("without_mod", [{"classification": "VALID_PASS"} for _ in range(10)], "with_mod")
+        target = full_matrix_report("with_mod", [historical] + [{"classification": "VALID_PASS"} for _ in range(9)], "with_mod")
+        result = adj.adjudicate(quota, control, target, "compatible_client")
+        self.assertEqual(result["causal_decision"], "CAUSAL_TARGET_CORRELATED")
+
+    def test_compatible_adjudicator_reports_control_observed_causal(self):
+        adj = load_adjudicator()
+        historical = authorizable_attempt_with_causal()
+        quota = full_matrix_report("with_mod", [historical], "with_mod")
+        control = full_matrix_report("without_mod", [historical] + [{"classification": "VALID_PASS"} for _ in range(9)], "with_mod")
+        target = full_matrix_report("with_mod", [{"classification": "VALID_PASS"} for _ in range(10)], "with_mod")
+        result = adj.adjudicate(quota, control, target, "compatible_client")
+        self.assertEqual(result["causal_decision"], "CAUSAL_MATCH_CONTROL_OBSERVED")
+
+    def test_analyze_script_produces_causal_report(self):
+        module = load_causal_analyzer()
+        historical = full_matrix_report("with_mod", [authorizable_attempt_with_causal()], "with_mod")
+        control = full_matrix_report("without_mod", [{"classification": "VALID_PASS"} for _ in range(10)], "with_mod")
+        target = full_matrix_report("with_mod", [{"classification": "VALID_PASS"} for _ in range(10)], "with_mod")
+        result = module.analyze(historical, control, target)
+        self.assertEqual(result["status"], "passed")
+        self.assertIn("historical_causal_signature", result)
+
+    def test_causal_baseline_requires_two_control_runs(self):
+        module = load_causal_analyzer()
+        historical = full_matrix_report("with_mod", [authorizable_attempt_with_causal()], "with_mod")
+        analysis = module.analyze(historical, full_matrix_report("without_mod", [], "with_mod"),
+                                  full_matrix_report("with_mod", [], "with_mod"))
+        one = full_matrix_report("without_mod", [authorizable_attempt_with_causal()] + [{"classification": "VALID_PASS"} for _ in range(9)], "with_mod")
+        one["run_id"] = "one"
+        baseline = module.build_baseline(analysis, [one], "analysis")
+        self.assertEqual(baseline["status"], "failed")
+
+    def test_causal_baseline_accepts_two_control_runs(self):
+        module = load_causal_analyzer()
+        historical_attempt = authorizable_attempt_with_causal()
+        historical = full_matrix_report("with_mod", [historical_attempt], "with_mod")
+        analysis = module.analyze(historical, full_matrix_report("without_mod", [], "with_mod"),
+                                  full_matrix_report("with_mod", [], "with_mod"))
+        one = full_matrix_report("without_mod", [historical_attempt] + [{"classification": "VALID_PASS"} for _ in range(9)], "with_mod")
+        two = full_matrix_report("without_mod", [historical_attempt] + [{"classification": "VALID_PASS"} for _ in range(9)], "with_mod")
+        one["run_id"] = "one"
+        two["run_id"] = "two"
+        baseline = module.build_baseline(analysis, [one, two], "analysis")
+        self.assertEqual(baseline["status"], "passed")
 
 
 def dummy_evidence():
@@ -661,6 +870,31 @@ def authorizable_attempt(cleanup="DEFAULT"):
             "fingerprint": fingerprint,
             "fingerprint_quality": quality.value,
             "fingerprint_missing_fields": missing}
+
+
+def authorizable_attempt_with_causal(client_terminal=True, diagnostics_overrides=None):
+    attempt = authorizable_attempt()
+    diagnostics = dict(attempt["fingerprint_diagnostics"])
+    if diagnostics_overrides:
+        diagnostics.update(diagnostics_overrides)
+    attempt["fingerprint_diagnostics"] = diagnostics
+    attempt["fingerprint"] = POLICY.canonical_fingerprint(dummy_evidence(), diagnostics)
+    payload = json.loads(attempt["fingerprint"])
+    quality, missing = POLICY.assess_fingerprint_quality(payload)
+    attempt["fingerprint_quality"] = quality.value
+    attempt["fingerprint_missing_fields"] = missing
+    entries = [
+        {"marker": "HANDSHAKE_ACCEPTANCE_CLIENT_READY", "line": 0, "fields": {}},
+        {"marker": "HANDSHAKE_ACCEPTANCE_CLIENT_CONNECT_REQUESTED", "line": 1, "fields": {}},
+    ]
+    if client_terminal:
+        entries.append({"marker": "HANDSHAKE_ACCEPTANCE_CLIENT_DISCONNECTED_SCREEN", "line": 2, "fields": {}})
+    attempt["attempt_marker_evidence"] = {"client_entries": entries, "server_entries": []}
+    attempt["causal_timeline"] = POLICY.causal_timeline(attempt)
+    attempt["causal_signature"] = POLICY.canonical_causal_signature(attempt)
+    attempt["causal_signature_schema_version"] = POLICY.CAUSAL_SIGNATURE_SCHEMA_VERSION
+    attempt["causal_signature_diagnostics"] = POLICY.causal_signature_payload(attempt)
+    return attempt
 
 
 def test_versions(overrides=None):
@@ -705,6 +939,15 @@ def full_matrix_report(server_mode, attempts, client_mode="without_mod"):
 def load_adjudicator():
     script = pathlib.Path(__file__).resolve().parents[1] / "adjudicate-handshake-infrastructure.py"
     spec = importlib.util.spec_from_file_location("adjudicator", script)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
+def load_causal_analyzer():
+    script = pathlib.Path(__file__).resolve().parents[1] / "analyze-compatible-causal-a23.py"
+    spec = importlib.util.spec_from_file_location("causal_analyzer", script)
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
     spec.loader.exec_module(module)

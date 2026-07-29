@@ -143,17 +143,25 @@ def classify_control_classpath_entry(entry: str, repository_root: pathlib.Path) 
 
 def evaluate_quota(attempts: list[dict[str, object]], required_valid_trials: int,
                    maximum_launch_attempts: int,
-                   authorized_infrastructure_fingerprints: set[str] | None = None) -> dict[str, object]:
+                   authorized_infrastructure_fingerprints: set[str] | None = None,
+                   authorized_infrastructure_causal_signatures: set[str] | None = None) -> dict[str, object]:
     if required_valid_trials < 0 or maximum_launch_attempts < 0 or (
             required_valid_trials > 0 and maximum_launch_attempts < required_valid_trials):
         raise ValueError("INVALID_TRIAL_QUOTA")
     authorized = authorized_infrastructure_fingerprints or set()
+    authorized_causal = authorized_infrastructure_causal_signatures or set()
     valid = sum(item.get("classification") == AttemptClassification.VALID_PASS.value for item in attempts)
     product = sum(item.get("classification") == AttemptClassification.PRODUCT_FAILURE.value for item in attempts)
     harness = sum(item.get("classification") == AttemptClassification.HARNESS_FAILURE.value for item in attempts)
-    unauthorized = [item for item in attempts
-                    if item.get("classification") == AttemptClassification.INFRASTRUCTURE_FAILURE.value
-                    and item.get("fingerprint") not in authorized]
+    unauthorized = []
+    for item in attempts:
+        if item.get("classification") != AttemptClassification.INFRASTRUCTURE_FAILURE.value:
+            continue
+        if authorized_causal:
+            if item.get("causal_signature") not in authorized_causal:
+                unauthorized.append(item)
+        elif item.get("fingerprint") not in authorized:
+            unauthorized.append(item)
     unauthorized_count = len(unauthorized)
     return {"required_valid_trials": required_valid_trials,
             "maximum_launch_attempts": maximum_launch_attempts,
@@ -277,6 +285,16 @@ def load_authorized_infrastructure_baseline(report_path: pathlib.Path,
                                             expected_client_mod_mode: str | None = None
                                             ) -> infra_policy.AuthorizedInfrastructureBaseline:
     report = json.loads(report_path.read_text(encoding="utf-8"))
+    if isinstance(report.get("authorized_causal_signatures"), list):
+        scope_valid, scope_error, scope = infra_policy.validate_authorization_scope(report, expected_client_mod_mode)
+        if not scope_valid or scope is None:
+            raise ValueError(f"INVALID_INFRASTRUCTURE_AUTHORIZATION_REPORT:{scope_error}")
+        signatures = frozenset(str(value) for value in report.get("authorized_causal_signatures", []))
+        if not signatures:
+            raise ValueError("NO_INFRASTRUCTURE_CAUSAL_SIGNATURES")
+        return infra_policy.AuthorizedInfrastructureBaseline(
+            scope, frozenset(str(value) for value in report.get("associated_control_fingerprints", [])),
+            signatures, str(report_path))
     valid, error, baseline = infra_policy.load_authorized_infrastructure_baseline(
         report, str(report_path), expected_client_mod_mode)
     if not valid:
@@ -977,6 +995,7 @@ class Acceptance:
                  server_smoke_only: bool = False, required_valid_trials: int = 0,
                  maximum_launch_attempts: int = 0,
                  authorized_infrastructure_fingerprints: set[str] | None = None,
+                 authorized_infrastructure_causal_signatures: set[str] | None = None,
                  diagnostic_matrix: bool = False,
                  authorization_scope: infra_policy.InfrastructureAuthorizationScope | None = None) -> None:
         self.run_id = uuid.uuid4().hex
@@ -1007,6 +1026,7 @@ class Acceptance:
         self.required_valid_trials = required_valid_trials
         self.maximum_launch_attempts = maximum_launch_attempts
         self.authorized_infrastructure_fingerprints = authorized_infrastructure_fingerprints or set()
+        self.authorized_infrastructure_causal_signatures = authorized_infrastructure_causal_signatures or set()
         self.diagnostic_matrix = diagnostic_matrix
         self.authorization_scope = authorization_scope
         if self.required_valid_trials < 0 or self.maximum_launch_attempts < 0:
@@ -1642,6 +1662,14 @@ class Acceptance:
                     attempts[-1]["fingerprint_quality"] = quality.value
                     attempts[-1]["fingerprint_missing_fields"] = missing
                     attempts[-1]["fingerprint_diagnostics"] = fingerprint_diagnostics
+                    attempts[-1]["attempt_marker_evidence"] = window_evidence
+                    timeline = infra_policy.causal_timeline(attempts[-1])
+                    attempts[-1]["causal_timeline"] = timeline
+                    first_terminal = infra_policy.first_terminal_event(timeline, fingerprint_diagnostics)
+                    attempts[-1]["first_terminal_event"] = first_terminal
+                    attempts[-1]["causal_signature"] = infra_policy.canonical_causal_signature(attempts[-1])
+                    attempts[-1]["causal_signature_schema_version"] = infra_policy.CAUSAL_SIGNATURE_SCHEMA_VERSION
+                    attempts[-1]["causal_signature_diagnostics"] = infra_policy.causal_signature_payload(attempts[-1])
                     attempts[-1]["launch_args"] = launch
                     attempts[-1]["processes"] = {
                         "client": process_summary(client, "client"),
@@ -1700,17 +1728,22 @@ class Acceptance:
                         stop_after_attempt = True
                     if (self.required_valid_trials > 0
                             and latest_classification == AttemptClassification.INFRASTRUCTURE_FAILURE.value
-                            and attempts[-1].get("fingerprint") not in self.authorized_infrastructure_fingerprints
                             and not self.diagnostic_matrix):
-                        attempts[-1]["unauthorized_infrastructure_failure"] = True
-                        stop_after_attempt = True
+                        authorized_by_causal = (bool(self.authorized_infrastructure_causal_signatures)
+                                                and attempts[-1].get("causal_signature") in self.authorized_infrastructure_causal_signatures)
+                        authorized_by_fingerprint = (not self.authorized_infrastructure_causal_signatures
+                                                     and attempts[-1].get("fingerprint") in self.authorized_infrastructure_fingerprints)
+                        if not (authorized_by_causal or authorized_by_fingerprint):
+                            attempts[-1]["unauthorized_infrastructure_failure"] = True
+                            stop_after_attempt = True
             if stop_after_attempt:
                 break
         passed_count = sum(item.get("classification") == AttemptClassification.VALID_PASS.value for item in attempts)
         infrastructure = sum(item.get("classification") == AttemptClassification.INFRASTRUCTURE_FAILURE.value for item in attempts)
         product = sum(item.get("classification") == AttemptClassification.PRODUCT_FAILURE.value for item in attempts)
         harness = sum(item.get("classification") == AttemptClassification.HARNESS_FAILURE.value for item in attempts)
-        quota = evaluate_quota(attempts, target, limit, self.authorized_infrastructure_fingerprints)
+        quota = evaluate_quota(attempts, target, limit, self.authorized_infrastructure_fingerprints,
+                               self.authorized_infrastructure_causal_signatures)
         diagnostic_ok = product == 0 and harness == 0 and len(attempts) == target
         self.scenarios["cold_login"] = {"status": "passed" if (quota["quota_reached"] or (self.diagnostic_matrix and diagnostic_ok)) else "failed",
                                          "client_mod_mode": self.client_mod_mode,
@@ -1774,9 +1807,11 @@ class Acceptance:
 
     def full_composite(self) -> dict[str, object]:
         with_mod = Acceptance(self.initial_connect_mode, 0, "with_mod", self.strict_client_isolation,
-                               self.require_attempt_cleanup, False, self.cycles, "with_mod", False, 0, 0)
+                               self.require_attempt_cleanup, False, self.cycles, "with_mod", False, 0, 0,
+                               None, None, False, self.authorization_scope)
         without_mod = Acceptance(self.initial_connect_mode, 0, "with_mod", self.strict_client_isolation,
-                                 self.require_attempt_cleanup, False, self.cycles, "without_mod", False, 0, 0)
+                                 self.require_attempt_cleanup, False, self.cycles, "without_mod", False, 0, 0,
+                                 None, None, False, self.authorization_scope)
         with_report = with_mod.run({"compatible", "reconnect", "silent_timeout", "absent_client_allowed",
                                     "connected_commit_still_blocked"}, manage_lock=False)
         without_report = without_mod.run({"server_absent_client_mod_allowed", "server_absent_client_mod_reconnect"},
@@ -1915,6 +1950,7 @@ def main() -> int:
     execution_scope = expected_authorization_scope(
         args.client_mod_mode, args.initial_connect_mode.upper(), versions)
     authorized = set()
+    authorized_causal = set()
     if args.authorize_infrastructure_from:
         try:
             baseline = load_authorized_infrastructure_baseline(
@@ -1923,13 +1959,14 @@ def main() -> int:
             if not matches:
                 parser.error("INFRASTRUCTURE_AUTHORIZATION_SCOPE_MISMATCH:" + ",".join(changed))
             authorized = set(baseline.fingerprints)
+            authorized_causal = set(baseline.causal_signatures)
         except Exception as exc:
             parser.error(str(exc))
     acceptance = Acceptance(args.initial_connect_mode.upper(), args.cold_login_probes, args.client_mod_mode,
                             args.strict_client_isolation, args.require_attempt_cleanup,
                             args.fresh_server_per_probe, args.cycles, args.server_mod_mode,
                             args.server_smoke_only, args.required_valid_trials,
-                            args.maximum_launch_attempts, authorized, args.diagnostic_matrix,
+                            args.maximum_launch_attempts, authorized, authorized_causal, args.diagnostic_matrix,
                             execution_scope)
     selected = None if not args.scenarios else set(args.scenarios.split(","))
     try:

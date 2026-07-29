@@ -10,6 +10,7 @@ from types import SimpleNamespace
 FINGERPRINT_SCHEMA_VERSION = 2
 AUTHORIZATION_SCOPE_SCHEMA_VERSION = 1
 ATTEMPT_EVIDENCE_SCHEMA_VERSION = 2
+CAUSAL_SIGNATURE_SCHEMA_VERSION = 1
 
 
 class FingerprintQuality(str, Enum):
@@ -40,7 +41,21 @@ class InfrastructureAuthorizationScope:
 class AuthorizedInfrastructureBaseline:
     scope: InfrastructureAuthorizationScope
     fingerprints: frozenset[str]
+    causal_signatures: frozenset[str]
     source_report: str
+
+
+@dataclass(frozen=True)
+class InfrastructureCausalSignature:
+    schema_version: int
+    terminal_category: str
+    transport_category: str
+    progress_stage: str
+    timeout_category: str
+    client_process_category: str
+    server_process_category: str
+    server_join_category: str
+    product_signal_category: str
 
 
 TCP_PROGRESS_STATES = {"SYN_SENT", "SYN_RECEIVED", "ESTABLISHED", "BOUND"}
@@ -155,6 +170,204 @@ def compare_fingerprint_payloads(left: str, right: str) -> dict[str, object]:
     changed = {key: {"left": left_payload.get(key), "right": right_payload.get(key)}
                for key in keys if left_payload.get(key) != right_payload.get(key)}
     return {"equal": not changed, "changed_fields": changed}
+
+
+def _marker_name(marker: str) -> str:
+    mapping = {
+        "HANDSHAKE_ACCEPTANCE_CLIENT_READY": "READY",
+        "HANDSHAKE_ACCEPTANCE_CLIENT_CONNECT_REQUESTED": "CONNECT_REQUESTED",
+        "HANDSHAKE_ACCEPTANCE_CLIENT_CONNECT_CALL_ENTER": "CONNECT_CALL_ENTER",
+        "HANDSHAKE_ACCEPTANCE_CLIENT_CONNECT_CALL_RETURN": "CONNECT_CALL_RETURN",
+        "HANDSHAKE_ACCEPTANCE_CLIENT_NETWORK_LOGIN": "NETWORK_LOGIN",
+        "HANDSHAKE_ACCEPTANCE_CLIENT_DISCONNECTED_SCREEN": "DISCONNECTED_SCREEN",
+        "CLIENT_HANDSHAKE_SERVER_DISCOVERING": "SERVER_DISCOVERING",
+        "CLIENT_HANDSHAKE_CLIENT_PRESENCE_SENT": "PRESENCE_SENT",
+        "CLIENT_HANDSHAKE_SERVER_PRESENCE_RECEIVED": "PRESENCE_RECEIVED",
+        "CLIENT_HANDSHAKE_SERVER_PENDING": "PENDING",
+        "CLIENT_HANDSHAKE_SERVER_COMPATIBLE": "COMPATIBLE",
+        "CLIENT_HANDSHAKE_SERVER_TIMED_OUT": "SERVER_LOGIN_TIMEOUT",
+    }
+    return mapping.get(marker, marker)
+
+
+def causal_timeline(attempt: dict[str, object]) -> list[dict[str, object]]:
+    evidence = attempt.get("attempt_marker_evidence") if isinstance(attempt.get("attempt_marker_evidence"), dict) else {}
+    events: list[tuple[int, dict[str, object]]] = []
+    relevant = {
+        "HANDSHAKE_ACCEPTANCE_CLIENT_READY",
+        "HANDSHAKE_ACCEPTANCE_CLIENT_CONNECT_REQUESTED",
+        "HANDSHAKE_ACCEPTANCE_CLIENT_CONNECT_CALL_ENTER",
+        "HANDSHAKE_ACCEPTANCE_CLIENT_CONNECT_CALL_RETURN",
+        "HANDSHAKE_ACCEPTANCE_CLIENT_NETWORK_LOGIN",
+        "HANDSHAKE_ACCEPTANCE_CLIENT_DISCONNECTED_SCREEN",
+        "CLIENT_HANDSHAKE_SERVER_DISCOVERING",
+        "CLIENT_HANDSHAKE_CLIENT_PRESENCE_SENT",
+        "CLIENT_HANDSHAKE_SERVER_PRESENCE_RECEIVED",
+        "CLIENT_HANDSHAKE_SERVER_PENDING",
+        "CLIENT_HANDSHAKE_SERVER_COMPATIBLE",
+        "CLIENT_HANDSHAKE_SERVER_TIMED_OUT",
+    }
+    for source, entries_name in (("client", "client_entries"), ("server", "server_entries")):
+        entries = evidence.get(entries_name, [])
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if not isinstance(entry, dict) or entry.get("marker") not in relevant:
+                continue
+            events.append((int(entry.get("line", len(events))),
+                           {"source": source, "marker": _marker_name(str(entry.get("marker")))}))
+    events.sort(key=lambda item: item[0])
+    return [{"source": event["source"], "marker": event["marker"], "relative_order": index + 1}
+            for index, (_, event) in enumerate(events)]
+
+
+def first_terminal_event(timeline: list[dict[str, object]],
+                         diagnostics: dict[str, object]) -> dict[str, object] | None:
+    for event in timeline:
+        marker = event.get("marker")
+        if marker == "DISCONNECTED_SCREEN":
+            return {**event, "terminal_category": "CLIENT_DISCONNECTED_SCREEN"}
+        if marker == "SERVER_LOGIN_TIMEOUT":
+            return {**event, "terminal_category": "SERVER_LOGIN_TIMEOUT"}
+    client_error = str(diagnostics.get("last_client_error_signature") or "")
+    server_error = str(diagnostics.get("last_server_error_signature") or "")
+    error = f"{client_error} {server_error}"
+    if re.search(r"Connection refused", error, re.I):
+        return {"source": "log", "marker": "CONNECTION_REFUSED", "relative_order": None,
+                "terminal_category": "SOCKET_REFUSED"}
+    if re.search(r"Connection reset", error, re.I):
+        return {"source": "log", "marker": "CONNECTION_RESET", "relative_order": None,
+                "terminal_category": "SOCKET_RESET"}
+    if re.search(r"Connection timed out|Timed out waiting", error, re.I):
+        return {"source": "log", "marker": "SOCKET_TIMEOUT", "relative_order": None,
+                "terminal_category": "SOCKET_TIMEOUT"}
+    if diagnostics.get("server_login_timeout_seen") is True:
+        return {"source": "server", "marker": "SERVER_LOGIN_TIMEOUT", "relative_order": None,
+                "terminal_category": "SERVER_LOGIN_TIMEOUT"}
+    if tcp_terminal_evidence(diagnostics.get("tcp_state_summary")):
+        return {"source": "tcp", "marker": "TCP_TERMINAL", "relative_order": None,
+                "terminal_category": "SOCKET_CLOSED"}
+    if diagnostics.get("client_game_process_alive") is False:
+        return {"source": "process", "marker": "CLIENT_PROCESS_EXITED", "relative_order": None,
+                "terminal_category": "CLIENT_PROCESS_EXITED"}
+    if client_error:
+        return {"source": "log", "marker": "CLIENT_CONNECT_EXCEPTION", "relative_order": None,
+                "terminal_category": "CLIENT_CONNECT_EXCEPTION"}
+    return None
+
+
+def _transport_category(states: object) -> str:
+    summary = tcp_state_summary(states)
+    if summary is None:
+        return "UNKNOWN_TRANSPORT"
+    if summary == "NONE":
+        return "NO_SOCKET_OBSERVED"
+    values = set(summary.split(","))
+    progress = bool(values & TCP_PROGRESS_STATES)
+    terminal = bool(values & TCP_TERMINAL_STATES)
+    if progress and terminal:
+        return "MIXED_PROGRESS_AND_TERMINAL"
+    if terminal:
+        return "TERMINAL_CLOSE"
+    if values & {"SYN_SENT", "SYN_RECEIVED"}:
+        return "CONNECTING"
+    if values == {"ESTABLISHED"} or "ESTABLISHED" in values:
+        return "ESTABLISHED_PRE_LOGIN"
+    return "UNKNOWN_TRANSPORT"
+
+
+def _progress_stage(timeline: list[dict[str, object]]) -> str:
+    rank = {
+        "READY": "READY_ONLY",
+        "CONNECT_REQUESTED": "CONNECT_REQUESTED",
+        "CONNECT_CALL_ENTER": "CONNECT_CALL_ENTERED",
+        "CONNECT_CALL_RETURN": "CONNECT_CALL_RETURNED",
+        "NETWORK_LOGIN": "NETWORK_LOGIN",
+        "SERVER_DISCOVERING": "SERVER_DISCOVERING",
+        "PRESENCE_RECEIVED": "SERVER_PRESENCE_RECEIVED",
+        "PENDING": "SERVER_PENDING",
+        "COMPATIBLE": "HANDSHAKE_COMPLETED",
+    }
+    order = ["READY_ONLY", "CONNECT_REQUESTED", "CONNECT_CALL_ENTERED", "CONNECT_CALL_RETURNED",
+             "SOCKET_PROGRESS", "NETWORK_LOGIN", "SERVER_DISCOVERING", "SERVER_PRESENCE_RECEIVED",
+             "SERVER_PENDING", "HANDSHAKE_COMPLETED"]
+    best = "UNKNOWN_STAGE"
+    for event in timeline:
+        candidate = rank.get(str(event.get("marker")))
+        if candidate and (best == "UNKNOWN_STAGE" or order.index(candidate) > order.index(best)):
+            best = candidate
+    return best
+
+
+def _timeout_category(payload: dict[str, object], diagnostics: dict[str, object]) -> str:
+    if diagnostics.get("server_login_timeout_seen") is True:
+        return "SERVER_LOGIN_TIMEOUT"
+    if payload.get("elapsed_connect_bucket") == "GT_60_SECONDS":
+        return "CONNECT_GT_60_SECONDS"
+    if "timeout waiting" in str(diagnostics.get("error") or "").lower():
+        return "CLIENT_WAIT_TIMEOUT"
+    return "NO_TIMEOUT_SIGNAL"
+
+
+def _process_category(alive: object, prefix: str) -> str:
+    if alive is True:
+        return f"{prefix}_ALIVE"
+    if alive is False:
+        return f"{prefix}_EXITED_UNEXPECTEDLY"
+    return f"{prefix}_STATE_UNKNOWN"
+
+
+def _product_signal_category(payload: dict[str, object]) -> str:
+    values = []
+    if payload.get("partialreload_marker_seen"):
+        values.append("PARTIALRELOAD_MARKER")
+    if payload.get("channel_rejection_seen"):
+        values.append("CHANNEL_REJECTION")
+    if payload.get("unknown_custom_packet_seen"):
+        values.append("UNKNOWN_CUSTOM_PACKET")
+    if len(values) > 1:
+        return "MULTIPLE_PRODUCT_SIGNALS"
+    return values[0] if values else "NO_PRODUCT_SIGNAL"
+
+
+def causal_signature_payload(attempt: dict[str, object]) -> dict[str, object]:
+    diagnostics = attempt.get("fingerprint_diagnostics") if isinstance(attempt.get("fingerprint_diagnostics"), dict) else {}
+    payload = _stored_payload(attempt) or fingerprint_payload(SimpleNamespace(channel_rejection_seen=False, unknown_custom_packet_seen=False), diagnostics)
+    timeline = attempt.get("causal_timeline") if isinstance(attempt.get("causal_timeline"), list) else causal_timeline(attempt)
+    terminal = first_terminal_event(timeline, diagnostics)
+    return {
+        "schema_version": CAUSAL_SIGNATURE_SCHEMA_VERSION,
+        "terminal_category": (terminal or {}).get("terminal_category", "NO_TERMINAL_EVENT"),
+        "transport_category": _transport_category(payload.get("tcp_state_summary")),
+        "progress_stage": _progress_stage(timeline),
+        "timeout_category": _timeout_category(payload, diagnostics),
+        "client_process_category": _process_category(payload.get("client_game_process_alive"), "CLIENT"),
+        "server_process_category": _process_category(payload.get("server_game_process_alive"), "SERVER"),
+        "server_join_category": "PLAYER_JOINED" if payload.get("player_present_in_rcon") or payload.get("server_player_join_seen") else "PLAYER_NEVER_JOINED",
+        "product_signal_category": _product_signal_category(payload),
+    }
+
+
+def canonical_causal_signature(attempt: dict[str, object]) -> str:
+    return json.dumps(causal_signature_payload(attempt), sort_keys=True, separators=(",", ":"))
+
+
+def causal_signature_authorizable(signature_payload: dict[str, object]) -> tuple[bool, str | None]:
+    forbidden_values = {
+        "UNKNOWN_TERMINAL_EVENT", "NO_TERMINAL_EVENT", "UNKNOWN_TRANSPORT", "UNKNOWN_STAGE",
+        "CLIENT_STATE_UNKNOWN", "SERVER_STATE_UNKNOWN", "PLAYER_JOIN_STATE_UNKNOWN",
+    }
+    if any(value in forbidden_values for value in signature_payload.values()):
+        return False, "CAUSAL_SIGNATURE_INSUFFICIENT"
+    if signature_payload.get("progress_stage") in {"NETWORK_LOGIN", "SERVER_DISCOVERING",
+                                                    "SERVER_PRESENCE_RECEIVED", "SERVER_PENDING",
+                                                    "HANDSHAKE_COMPLETED"}:
+        return False, "CAUSAL_SIGNATURE_POST_LOGIN"
+    if signature_payload.get("product_signal_category") != "NO_PRODUCT_SIGNAL":
+        return False, "CAUSAL_SIGNATURE_PRODUCT_SIGNAL"
+    if signature_payload.get("server_join_category") != "PLAYER_NEVER_JOINED":
+        return False, "CAUSAL_SIGNATURE_PLAYER_JOINED"
+    return True, None
 
 
 def normalize_fingerprint_value(value: object) -> str | bool | None:
@@ -355,6 +568,15 @@ def validate_authorizable_attempt(attempt: dict[str, object]) -> tuple[bool, str
         return False, "FINGERPRINT_INTEGRITY_MISMATCH"
     if quality != FingerprintQuality.HIGH or missing:
         return False, "FINGERPRINT_NOT_HIGH"
+    if "causal_signature" in attempt:
+        if attempt.get("causal_signature_schema_version") != CAUSAL_SIGNATURE_SCHEMA_VERSION:
+            return False, "CAUSAL_SIGNATURE_SCHEMA_INVALID"
+        recomputed_causal = canonical_causal_signature(attempt)
+        if attempt.get("causal_signature") != recomputed_causal:
+            return False, "CAUSAL_SIGNATURE_INTEGRITY_MISMATCH"
+        ok, error = causal_signature_authorizable(json.loads(recomputed_causal))
+        if not ok:
+            return False, error
     return True, None
 
 
@@ -409,6 +631,7 @@ def validate_control_baseline_report(report: dict[str, object], expected_client_
     if int(cold.get("valid_trials", 0)) + int(cold.get("infrastructure_failures", 0)) != 10:
         return False, "CONTROL_COUNTS_INVALID", set()
     fingerprints: set[str] = set()
+    causal_signatures: set[str] = set()
     for attempt in attempts:
         cleanup = attempt.get("cleanup") if isinstance(attempt.get("cleanup"), dict) else {}
         if cleanup.get("status") != "passed":
@@ -418,6 +641,8 @@ def validate_control_baseline_report(report: dict[str, object], expected_client_
             if not valid:
                 return False, error, set()
             fingerprints.add(str(attempt.get("fingerprint")))
+            if attempt.get("causal_signature"):
+                causal_signatures.add(str(attempt.get("causal_signature")))
     if int(cold.get("infrastructure_failures", 0)) and not fingerprints:
         return False, "NO_INFRASTRUCTURE_FINGERPRINTS", set()
     return True, None, fingerprints
@@ -434,4 +659,9 @@ def load_authorized_infrastructure_baseline(report: dict[str, object], source_re
     scope_valid, scope_error, scope = validate_authorization_scope(report, expected_client_mod_mode)
     if not scope_valid or scope is None:
         return False, scope_error, None
-    return True, None, AuthorizedInfrastructureBaseline(scope, frozenset(fingerprints), source_report)
+    causal_signatures = {str(attempt.get("causal_signature")) for attempt in
+                         report.get("scenarios", {}).get("cold_login", {}).get("attempts", [])
+                         if isinstance(attempt, dict) and attempt.get("classification") == "INFRASTRUCTURE_FAILURE"
+                         and attempt.get("causal_signature")}
+    return True, None, AuthorizedInfrastructureBaseline(scope, frozenset(fingerprints),
+                                                        frozenset(causal_signatures), source_report)

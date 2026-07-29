@@ -43,6 +43,21 @@ def high_fingerprints(report: dict[str, object]) -> set[str]:
             if policy.validate_authorizable_attempt(item)[0]}
 
 
+def high_causal_signatures(report: dict[str, object]) -> set[str]:
+    result = set()
+    for item in cold_attempts(report):
+        if item.get("classification") != "INFRASTRUCTURE_FAILURE":
+            continue
+        try:
+            payload = policy.causal_signature_payload(item)
+            ok, _ = policy.causal_signature_authorizable(payload)
+            if ok:
+                result.add(json.dumps(payload, sort_keys=True, separators=(",", ":")))
+        except Exception:
+            pass
+    return result
+
+
 def expected_client_mode(profile: str) -> str:
     if profile == "compatible_client":
         return "with_mod"
@@ -90,8 +105,13 @@ def adjudicate(quota: dict[str, object], control: dict[str, object], target: dic
     control_summary = summarize(control)
     target_summary = summarize(target)
     target_high = high_fingerprints(target)
+    control_causal = high_causal_signatures(control)
+    target_causal = high_causal_signatures(target)
     history = historical_failure(quota)
     historical_fp = history.get("fingerprint") if history.get("fingerprint_quality") == "HIGH" else None
+    historical_attempt = next((item for item in cold_attempts(quota)
+                               if item.get("classification") == "INFRASTRUCTURE_FAILURE"), {})
+    historical_causal = policy.canonical_causal_signature(historical_attempt) if historical_attempt else None
     scope_match = False
     scope_differences: list[str] = []
     control_scope = target_scope = None
@@ -117,10 +137,22 @@ def adjudicate(quota: dict[str, object], control: dict[str, object], target: dic
             decision = "COMPATIBLE_CASE_D_RECONFIRMED"
         elif control_summary["valid"] == 10 and control_summary["infrastructure"] == 0 and historical_fp and historical_fp in target_high:
             decision = "COMPATIBLE_CASE_B_TARGET_CORRELATED"
-        elif control_fingerprints and target_high and not (control_fingerprints & target_high):
+        elif historical_fp and historical_fp in target_high and control_fingerprints and historical_fp not in control_fingerprints:
             decision = "COMPATIBLE_CASE_C_NON_EQUIVALENT"
+        elif historical_fp and historical_fp not in control_fingerprints and historical_fp not in target_high:
+            decision = "COMPATIBLE_CASE_HISTORICAL_NOT_REPRODUCED"
         else:
             decision = "COMPATIBLE_CASE_UNRESOLVED"
+        if historical_causal and historical_causal in control_causal:
+            causal_decision = "CAUSAL_MATCH_CONTROL_OBSERVED"
+        elif historical_causal and historical_causal in target_causal and historical_causal not in control_causal:
+            causal_decision = "CAUSAL_TARGET_CORRELATED"
+        elif historical_causal and historical_causal not in control_causal and historical_causal not in target_causal:
+            causal_decision = "CAUSAL_HISTORICAL_NOT_REPRODUCED"
+        elif control_causal & target_causal:
+            causal_decision = "CAUSAL_SHARED_INFRASTRUCTURE_CANDIDATE"
+        else:
+            causal_decision = "CAUSAL_EVIDENCE_INSUFFICIENT"
     elif not errors:
         if control_summary["valid"] == 10 and control_summary["infrastructure"] == 0 and target_summary["valid"] == 10 and target_summary["infrastructure"] == 0:
             decision = "CASE_D_RECONFIRMED"
@@ -146,6 +178,13 @@ def adjudicate(quota: dict[str, object], control: dict[str, object], target: dic
         "scope_differences": scope_differences,
         "expected_authorization_scope": policy.scope_to_dict(control_scope) if control_scope else None,
         "decision": decision,
+        "previous_fingerprint_decision": "COMPATIBLE_CASE_C_NON_EQUIVALENT" if comparison_profile == "compatible_client" else None,
+        "causal_decision": locals().get("causal_decision"),
+        "historical_causal_signature": historical_causal,
+        "additional_control_failure_modes": sorted(control_fingerprints - ({str(historical_fp)} if historical_fp else set())),
+        "additional_target_failure_modes": sorted(target_high - ({str(historical_fp)} if historical_fp else set())),
+        "control_causal_signatures": sorted(control_causal),
+        "target_causal_signatures": sorted(target_causal),
         "historical_failure": history,
         "control_baseline": {
             "valid_report": control_valid,
