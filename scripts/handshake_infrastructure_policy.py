@@ -69,6 +69,8 @@ def normalize_fingerprint_value(value: object) -> str | bool | None:
     text = str(value)
     text = re.sub(r"\[[^\]]+\]\s*", "", text)
     text = re.sub(r"\b(?:run|attempt|pid|port|player|connection|uuid|username)=[^\s]+", "", text, flags=re.I)
+    text = re.sub(r"@[A-Fa-f0-9]{4,16}\b", "@<addr>", text)
+    text = re.sub(r"\b\d{1,3}(?:\.\d{1,3}){3}\b", "<ip>", text)
     text = re.sub(r"[A-Fa-f0-9]{8,}(?:-[A-Fa-f0-9]{4,})*", "<id>", text)
     text = re.sub(r"0x[A-Fa-f0-9]+", "<addr>", text)
     text = re.sub(r"\b\d{2,}\b", "<n>", text)
@@ -107,6 +109,8 @@ def tcp_state_summary(tcp_or_states: object) -> str | None:
         values = [entry.get("State") or entry.get("state") for entry in tcp_or_states.get("entries", []) if isinstance(entry, dict)]
     elif isinstance(tcp_or_states, (list, tuple, set)):
         values = list(tcp_or_states)
+    elif isinstance(tcp_or_states, str) and "," in tcp_or_states:
+        values = [part.strip() for part in tcp_or_states.split(",")]
     else:
         values = [tcp_or_states]
     states = {state for state in (normalize_tcp_state(value) for value in values)
@@ -220,16 +224,26 @@ def validate_authorizable_attempt(attempt: dict[str, object]) -> tuple[bool, str
     evidence = attempt.get("attempt_evidence") if isinstance(attempt.get("attempt_evidence"), dict) else None
     if evidence is None:
         return False, "ATTEMPT_EVIDENCE_MISSING"
-    if evidence.get("network_login") or evidence.get("network_login_seen"):
+    canonical_keys = {
+        "client_ready_seen", "connect_requested_seen", "network_login_seen",
+        "server_absent_seen", "server_pending_seen", "server_compatible_seen",
+        "network_logout_seen", "server_disconnected_seen",
+    }
+    legacy_keys = {"ready", "client_ready", "connect_requested", "network_login"}
+    if attempt.get("attempt_evidence_schema_version") != FINGERPRINT_SCHEMA_VERSION:
+        return False, "ATTEMPT_EVIDENCE_SCHEMA_INVALID"
+    if not canonical_keys.issubset(evidence.keys()) or legacy_keys & set(evidence.keys()):
+        return False, "ATTEMPT_EVIDENCE_SCHEMA_INVALID"
+    if evidence.get("network_login_seen"):
         return False, "NETWORK_LOGIN_TRUE"
     diagnostics = attempt.get("fingerprint_diagnostics") if isinstance(attempt.get("fingerprint_diagnostics"), dict) else {}
     if diagnostics.get("partialreload_marker_seen") or diagnostics.get("channel_rejection_seen") or diagnostics.get("unknown_custom_packet_seen"):
         return False, "PRODUCT_SIGNAL_PRESENT"
     if diagnostics.get("player_present_in_rcon"):
         return False, "PLAYER_PRESENT_IN_RCON"
-    if not (evidence.get("client_ready") or evidence.get("client_ready_seen")):
+    if not evidence.get("client_ready_seen"):
         return False, "READY_MISSING"
-    if not (evidence.get("connect_requested") or evidence.get("connect_requested_seen")):
+    if not evidence.get("connect_requested_seen"):
         return False, "CONNECT_REQUESTED_MISSING"
     payload = _stored_payload(attempt)
     if payload is None or payload.get("schema_version") != FINGERPRINT_SCHEMA_VERSION:
@@ -249,6 +263,8 @@ def validate_authorizable_attempt(attempt: dict[str, object]) -> tuple[bool, str
 
 
 def validate_control_baseline_report(report: dict[str, object]) -> tuple[bool, str | None, set[str]]:
+    if report.get("status") == "failed" and report.get("bootstrap_completed") is False:
+        return False, "CONTROL_EXECUTION_FAILED", set()
     if report.get("server_mod_mode") != "without_mod":
         return False, "CONTROL_SERVER_MODE_INVALID", set()
     if report.get("server_build_mode") != "independent_gradle_build":

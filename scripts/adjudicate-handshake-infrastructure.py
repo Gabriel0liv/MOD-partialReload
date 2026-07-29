@@ -46,6 +46,8 @@ def high_fingerprints(report: dict[str, object]) -> set[str]:
 def validate_target_report(report: dict[str, object]) -> tuple[bool, str | None]:
     cold = cold_scenario(report)
     attempts = cold_attempts(report)
+    if report.get("status") == "failed" and report.get("bootstrap_completed") is False:
+        return False, "TARGET_EXECUTION_FAILED"
     if report.get("server_mod_mode") != "with_mod" or report.get("server_main_mod_present") is not True:
         return False, "TARGET_SERVER_MODE_INVALID"
     if report.get("diagnostic_matrix") is not True or report.get("cleanup", {}).get("status") != "passed":
@@ -127,8 +129,10 @@ def main() -> int:
     parser.add_argument("target_report")
     parser.add_argument("--out", default="build/reports/handshake-infrastructure-adjudication.json")
     args = parser.parse_args()
-    reports = [json.loads(pathlib.Path(path).read_text(encoding="utf-8"))
-               for path in (args.quota_report, args.control_report, args.target_report)]
+    quota_path = pathlib.Path(args.quota_report)
+    quota_report = json.loads(quota_path.read_text(encoding="utf-8")) if quota_path.exists() else {}
+    reports = [quota_report] + [json.loads(pathlib.Path(path).read_text(encoding="utf-8"))
+                                for path in (args.control_report, args.target_report)]
     result = adjudicate(*reports)
     output = pathlib.Path(args.out)
     output.parent.mkdir(parents=True, exist_ok=True)

@@ -296,6 +296,37 @@ def attempt_marker_evidence(server: "OwnedProcess | None", client: "OwnedProcess
     }
 
 
+def authorization_attempt_evidence(marker_evidence: dict[str, object]) -> dict[str, bool]:
+    return {
+        "client_ready_seen": bool(marker_evidence.get("ready")),
+        "connect_requested_seen": bool(marker_evidence.get("connect_requested")),
+        "network_login_seen": bool(marker_evidence.get("network_login")),
+        "server_absent_seen": bool(marker_evidence.get("server_absent")),
+        "server_pending_seen": bool(marker_evidence.get("server_pending")),
+        "server_compatible_seen": bool(marker_evidence.get("server_compatible")),
+        "network_logout_seen": bool(marker_evidence.get("network_logout")),
+        "server_disconnected_seen": bool(marker_evidence.get("server_disconnected")),
+    }
+
+
+def wait_evidence_inconsistency(ready_wait_seen: bool, connect_wait_seen: bool,
+                                login_wait_seen: bool, evidence: AttemptEvidence) -> str | None:
+    if ready_wait_seen and not evidence.client_ready_seen:
+        return "ATTEMPT_WINDOW_READY_INCONSISTENT"
+    if connect_wait_seen and not evidence.connect_requested_seen:
+        return "ATTEMPT_WINDOW_CONNECT_REQUESTED_INCONSISTENT"
+    if login_wait_seen and not evidence.network_login_seen:
+        return "ATTEMPT_WINDOW_NETWORK_LOGIN_INCONSISTENT"
+    return None
+
+
+def should_expect_exit_request(evidence: AttemptEvidence, diagnostics: dict[str, object]) -> bool:
+    terminal_screen = diagnostics.get("last_client_screen") or diagnostics.get("screen")
+    pre_login_terminal = (not evidence.network_login_seen
+                          and terminal_screen in {"DisconnectedScreen", "ModMismatchDisconnectedScreen"})
+    return bool(evidence.client_ready_seen and not pre_login_terminal)
+
+
 def attempt_evidence(server: "OwnedProcess | None", client: "OwnedProcess | None",
                      window: AttemptWindow, run_id: str, attempt_id: str,
                      expected_mode: str, expected_client_mod_mode: str) -> AttemptEvidence:
@@ -1461,13 +1492,17 @@ class Acceptance:
             username = (f"PRWith{index:02d}" if self.client_mod_mode == "with_mod"
                         else f"PRBase{index:02d}")
             server_start_line = self.server.cursor()
+            client_start_line = -1
             client = self.start_client(name, username,
                                        with_mod=self.client_mod_mode == "with_mod")
-            client_start_line = client.cursor()
             stop_after_attempt = False
             connect_started_at: float | None = None
+            ready_wait_seen = False
+            connect_wait_seen = False
+            login_wait_seen = False
             try:
                 ready = client.wait_marker("HANDSHAKE_ACCEPTANCE_CLIENT_READY", 90)
+                ready_wait_seen = True
                 client_cursor = client.cursor()
                 server_cursor = self.server.cursor()
                 capture_tcp_state(self.run_log_root, self.server_port, client, self.server,
@@ -1478,9 +1513,11 @@ class Acceptance:
                     connect_started_at = time.monotonic()
                     (control / "connect.request").write_text("connect\n", encoding="utf-8")
                     client.wait_marker("HANDSHAKE_ACCEPTANCE_CLIENT_CONNECT_REQUESTED", 60, client_cursor)
+                    connect_wait_seen = True
                     capture_tcp_state(self.run_log_root, self.server_port, client, self.server,
                                       f"tcp-after-connect-request-{name}.json")
                 login = client.wait_marker("HANDSHAKE_ACCEPTANCE_CLIENT_NETWORK_LOGIN", 60, client_cursor)
+                login_wait_seen = True
                 player_present = self.wait_player_present(username)
                 trial = {"attempt": index, "status": "passed",
                          "classification": AttemptClassification.VALID_PASS.value,
@@ -1518,6 +1555,7 @@ class Acceptance:
                                        self.server.cursor(), client.cursor())
                 pre_cleanup_tcp = capture_tcp_state(self.run_log_root, self.server_port, client, self.server,
                                                     f"tcp-before-cleanup-{name}.json")
+                fingerprint_diagnostics_for_cleanup: dict[str, object] = {}
                 evidence = attempt_evidence(
                     self.server, client, window, self.run_id,
                     self.attempt_ids.get(name, ""), self.initial_connect_mode,
@@ -1543,6 +1581,7 @@ class Acceptance:
                         self.server, client, evidence, window_evidence, window, pre_cleanup_tcp,
                         (time.monotonic() - connect_started_at) if connect_started_at is not None else None,
                         username, self.rcon)
+                    fingerprint_diagnostics_for_cleanup = fingerprint_diagnostics
                     attempts[-1]["fingerprint"] = infrastructure_fingerprint(evidence, fingerprint_diagnostics)
                     quality, missing = infrastructure_fingerprint_quality(evidence, fingerprint_diagnostics)
                     attempts[-1]["fingerprint_quality"] = quality.value
@@ -1557,6 +1596,12 @@ class Acceptance:
                         "client_start_line": window.client_start_line,
                         "server_end_line": window.server_end_line,
                         "client_end_line": window.client_end_line}
+                inconsistency = wait_evidence_inconsistency(
+                    ready_wait_seen, connect_wait_seen, login_wait_seen, evidence)
+                if inconsistency and attempts:
+                    attempts[-1]["status"] = "failed"
+                    attempts[-1]["classification"] = AttemptClassification.HARNESS_FAILURE.value
+                    attempts[-1]["error_code"] = inconsistency
                 if evidence.connect_requested_seen and not evidence.network_login_seen:
                     self.failure_capture_errors = capture_thread_dumps(self.run_log_root, client, self.server)
                     self.failure_tcp_state = capture_tcp_state(self.run_log_root, self.server_port, client, self.server)
@@ -1567,13 +1612,16 @@ class Acceptance:
                 attempt_cleanup = self.cleanup_attempt(
                     client, name, username, entered,
                     entered and self.server_mod_mode == "with_mod",
-                    evidence.client_ready_seen)
+                    should_expect_exit_request(evidence, fingerprint_diagnostics_for_cleanup))
                 if attempts:
                     attempts[-1]["cleanup"] = attempt_cleanup
                     final_window = AttemptWindow(window.server_start_line, window.client_start_line,
                                                  self.server.cursor(), client.cursor())
-                    attempts[-1]["attempt_evidence"] = attempt_marker_evidence(
+                    marker_evidence = attempt_marker_evidence(
                         self.server, client, final_window, self.run_id, self.attempt_ids.get(name, ""))
+                    attempts[-1]["attempt_marker_evidence"] = marker_evidence
+                    attempts[-1]["attempt_evidence"] = authorization_attempt_evidence(marker_evidence)
+                    attempts[-1]["attempt_evidence_schema_version"] = infra_policy.FINGERPRINT_SCHEMA_VERSION
                     if attempt_cleanup["status"] != "passed":
                         attempts[-1]["status"] = "failed"
                         attempts[-1]["classification"] = AttemptClassification.HARNESS_FAILURE.value
@@ -1830,6 +1878,15 @@ def main() -> int:
         acceptance.cleanup()
         acceptance.release_lock()
         report = {"status": "failed", "complete_run": False, "scenarios": acceptance.scenarios,
+                  "server_mod_mode": acceptance.server_mod_mode,
+                  "client_mod_mode": acceptance.client_mod_mode,
+                  "server_build_mode": acceptance.server_build_mode,
+                  "server_task": acceptance.server_task,
+                  "server_project_directory": acceptance.server_project_directory,
+                  "server_main_mod_present": acceptance.server_mod_mode == "with_mod",
+                  "diagnostic_matrix": acceptance.diagnostic_matrix,
+                  "bootstrap_completed": False,
+                  "error_code": "SERVER_BOOTSTRAP_FAILED",
                   "cleanup": acceptance.cleanup_result, "error": str(exc),
                   "failed_scenario": next((name for name in (selected or []) if name not in acceptance.scenarios), None),
                   "classification": classify_failure(login_evidence(

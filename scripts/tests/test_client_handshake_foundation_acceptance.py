@@ -295,6 +295,12 @@ class HandshakeAcceptanceReportTest(unittest.TestCase):
     def test_fingerprint_normalization_removes_ids(self):
         self.assertEqual(MODULE.normalize_fingerprint_value("run=abc12345 pid=12345 C:\\Users\\Sato\\x"),
                          "<path>")
+    def test_fingerprint_normalization_removes_gameprofile_identity_and_ip(self):
+        value = POLICY.normalize_fingerprint_value(
+            "com.mojang.authlib.GameProfile@360ca5e(/127.0.0.1:52135) lost connection")
+        self.assertNotIn("360ca5e", str(value))
+        self.assertNotIn("127.0.0.1", str(value))
+        self.assertIn("GameProfile@<addr>", str(value))
     def test_causally_different_fingerprints_differ(self):
         evidence = MODULE.AttemptEvidence(True, True, False, False, False, False, False, False, None, None)
         one = MODULE.infrastructure_fingerprint(evidence, {"last_meaningful_client_marker": "A", "client_connection_phase": "CONNECTING"})
@@ -341,9 +347,75 @@ class HandshakeAcceptanceReportTest(unittest.TestCase):
         ok, error = POLICY.validate_authorizable_attempt(attempt)
         self.assertFalse(ok); self.assertEqual(error, "ATTEMPT_EVIDENCE_MISSING")
     def test_loader_rejects_network_login_true(self):
-        attempt = authorizable_attempt(); attempt["attempt_evidence"]["network_login"] = True
+        attempt = authorizable_attempt(); attempt["attempt_evidence"]["network_login_seen"] = True
         ok, error = POLICY.validate_authorizable_attempt(attempt)
         self.assertFalse(ok); self.assertEqual(error, "NETWORK_LOGIN_TRUE")
+    def test_authorization_attempt_evidence_is_canonical_schema2(self):
+        evidence = MODULE.authorization_attempt_evidence(
+            {"ready": True, "connect_requested": True, "network_login": False,
+             "server_absent": True, "server_pending": False, "server_compatible": False,
+             "network_logout": False, "server_disconnected": False})
+        self.assertEqual(set(evidence), {
+            "client_ready_seen", "connect_requested_seen", "network_login_seen",
+            "server_absent_seen", "server_pending_seen", "server_compatible_seen",
+            "network_logout_seen", "server_disconnected_seen"})
+        self.assertTrue(evidence["client_ready_seen"])
+        self.assertTrue(evidence["connect_requested_seen"])
+        self.assertFalse(evidence["network_login_seen"])
+    def test_old_attempt_evidence_schema_is_rejected(self):
+        attempt = authorizable_attempt()
+        attempt["attempt_evidence"] = {"ready": True, "connect_requested": True, "network_login": False}
+        ok, error = POLICY.validate_authorizable_attempt(attempt)
+        self.assertFalse(ok); self.assertEqual(error, "ATTEMPT_EVIDENCE_SCHEMA_INVALID")
+    def test_missing_attempt_evidence_schema_version_is_rejected(self):
+        attempt = authorizable_attempt(); del attempt["attempt_evidence_schema_version"]
+        ok, error = POLICY.validate_authorizable_attempt(attempt)
+        self.assertFalse(ok); self.assertEqual(error, "ATTEMPT_EVIDENCE_SCHEMA_INVALID")
+    def test_ready_missing_does_not_occur_for_valid_schema2_dict(self):
+        ok, error = POLICY.validate_authorizable_attempt(authorizable_attempt())
+        self.assertTrue(ok, error)
+    def test_wait_evidence_inconsistency_ready(self):
+        evidence = MODULE.AttemptEvidence(False, True, False, False, False, False, False, False, None, None)
+        self.assertEqual(MODULE.wait_evidence_inconsistency(True, False, False, evidence),
+                         "ATTEMPT_WINDOW_READY_INCONSISTENT")
+    def test_wait_evidence_inconsistency_connect_requested(self):
+        evidence = MODULE.AttemptEvidence(True, False, False, False, False, False, False, False, None, None)
+        self.assertEqual(MODULE.wait_evidence_inconsistency(True, True, False, evidence),
+                         "ATTEMPT_WINDOW_CONNECT_REQUESTED_INCONSISTENT")
+    def test_wait_evidence_inconsistency_network_login(self):
+        evidence = MODULE.AttemptEvidence(True, True, False, False, False, False, False, False, None, None)
+        self.assertEqual(MODULE.wait_evidence_inconsistency(True, True, True, evidence),
+                         "ATTEMPT_WINDOW_NETWORK_LOGIN_INCONSISTENT")
+    def test_prelogin_disconnected_screen_does_not_require_exit_request_marker(self):
+        evidence = MODULE.AttemptEvidence(True, True, False, False, False, False, False, False, None, None)
+        self.assertFalse(MODULE.should_expect_exit_request(
+            evidence, {"last_client_screen": "DisconnectedScreen"}))
+    def test_connected_or_nonterminal_attempt_requires_exit_request_marker(self):
+        connected = MODULE.AttemptEvidence(True, True, True, False, False, False, False, False, None, None)
+        connecting = MODULE.AttemptEvidence(True, True, False, False, False, False, False, False, None, None)
+        self.assertTrue(MODULE.should_expect_exit_request(connected, {"last_client_screen": "DisconnectedScreen"}))
+        self.assertTrue(MODULE.should_expect_exit_request(connecting, {"last_client_screen": "ConnectScreen"}))
+    def test_fresh_client_attempt_window_starts_before_first_line(self):
+        process = self.process(["HANDSHAKE_ACCEPTANCE_CLIENT_READY", "HANDSHAKE_ACCEPTANCE_CLIENT_CONNECT_REQUESTED"])
+        window = MODULE.AttemptWindow(-1, -1, None, None)
+        evidence = MODULE.attempt_marker_evidence(None, process, window, None, None)
+        self.assertTrue(evidence["ready"])
+        self.assertTrue(evidence["connect_requested"])
+    def test_tcp_summary_splits_comma_separated_states(self):
+        self.assertEqual(POLICY.tcp_state_summary("ESTABLISHED,SYN_SENT"), "ESTABLISHED,SYN_SENT")
+    def test_tcp_terminal_evidence_with_mixed_states(self):
+        self.assertEqual(POLICY.tcp_state_summary("CLOSE_WAIT,ESTABLISHED"), "CLOSE_WAIT,ESTABLISHED")
+        self.assertTrue(POLICY.tcp_terminal_evidence("CLOSE_WAIT,ESTABLISHED"))
+    def test_control_bootstrap_failure_is_explicit_execution_failure(self):
+        report = {"status": "failed", "bootstrap_completed": False, "server_mod_mode": "without_mod"}
+        ok, error, _ = POLICY.validate_control_baseline_report(report)
+        self.assertFalse(ok); self.assertEqual(error, "CONTROL_EXECUTION_FAILED")
+    def test_target_bootstrap_failure_is_not_mode_invalid(self):
+        adj = load_adjudicator()
+        report = {"status": "failed", "bootstrap_completed": False,
+                  "server_mod_mode": "with_mod", "server_main_mod_present": True}
+        ok, error = adj.validate_target_report(report)
+        self.assertFalse(ok); self.assertEqual(error, "TARGET_EXECUTION_FAILED")
     def test_loader_rejects_product_signals(self):
         for key in ("partialreload_marker_seen", "channel_rejection_seen", "unknown_custom_packet_seen"):
             attempt = authorizable_attempt(); attempt["fingerprint_diagnostics"][key] = True
@@ -455,8 +527,11 @@ def authorizable_attempt(cleanup="DEFAULT"):
     return {"classification": "INFRASTRUCTURE_FAILURE", "status": "failed",
             "functional_trial": None,
             "cleanup": {"status": "passed"} if cleanup == "DEFAULT" else cleanup,
-            "attempt_evidence": {"client_ready": True, "connect_requested": True,
-                                 "network_login": False},
+            "attempt_evidence_schema_version": POLICY.FINGERPRINT_SCHEMA_VERSION,
+            "attempt_evidence": {"client_ready_seen": True, "connect_requested_seen": True,
+                                 "network_login_seen": False, "server_absent_seen": False,
+                                 "server_pending_seen": False, "server_compatible_seen": False,
+                                 "network_logout_seen": False, "server_disconnected_seen": False},
             "fingerprint_diagnostics": diagnostics,
             "fingerprint": fingerprint,
             "fingerprint_quality": quality.value,
