@@ -28,6 +28,7 @@ SERVER_MARKERS = {"CLIENT_HANDSHAKE_SERVER_ABSENT", "CLIENT_HANDSHAKE_SERVER_PEN
                   "CLIENT_HANDSHAKE_SERVER_COMPATIBLE", "CLIENT_HANDSHAKE_SERVER_INCOMPATIBLE",
                   "CLIENT_HANDSHAKE_SERVER_TIMED_OUT", "CLIENT_HANDSHAKE_SERVER_DISCONNECTED",
                   "CLIENT_HANDSHAKE_SERVER_DISCOVERING", "CLIENT_HANDSHAKE_SERVER_PRESENCE_RECEIVED"}
+IGNORED_TERMINAL_MARKERS = {"HANDSHAKE_ACCEPTANCE_CLIENT_CONNECT_HEARTBEAT"}
 
 
 @dataclass(frozen=True)
@@ -119,6 +120,12 @@ class AttemptClassification(str, Enum):
     HARNESS_FAILURE = "HARNESS_FAILURE"
 
 
+class FingerprintQuality(str, Enum):
+    HIGH = "HIGH"
+    MEDIUM = "MEDIUM"
+    INSUFFICIENT = "INSUFFICIENT"
+
+
 def classify_control_classpath_entry(entry: str, repository_root: pathlib.Path) -> str | None:
     value = pathlib.Path(entry).resolve()
     root = repository_root.resolve()
@@ -160,27 +167,122 @@ def evaluate_quota(attempts: list[dict[str, object]], required_valid_trials: int
             "unauthorized_infrastructure_failures": unauthorized_count}
 
 
-def infrastructure_fingerprint(evidence: AttemptEvidence, diagnostics: dict[str, object]) -> str:
-    """Canonical, redacted fingerprint for a pre-login infrastructure failure."""
-    def clean(value: object) -> str | bool | None:
-        if value is None:
-            return None
-        text = str(value)
-        text = re.sub(r"\b(?:run|attempt|pid|port|player|connection|uuid|username)=[^\s]+", "", text, flags=re.I)
-        text = re.sub(r"[A-Fa-f0-9]{8,}", "<id>", text)
-        text = re.sub(r"\b\d{2,}\b", "<n>", text)
-        return re.sub(r"\s+", " ", text).strip()
-    data = {
-        "last_client_marker": clean(diagnostics.get("last_client_marker") or diagnostics.get("last_marker")),
-        "last_client_screen": clean(diagnostics.get("screen") or diagnostics.get("last_client_screen")),
-        "disconnect_reason": clean(diagnostics.get("disconnect_reason") or diagnostics.get("disconnected_reason")),
+def normalize_fingerprint_value(value: object) -> str | bool | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    text = str(value)
+    text = re.sub(r"\[[^\]]+\]\s*", "", text)
+    text = re.sub(r"\b(?:run|attempt|pid|port|player|connection|uuid|username)=[^\s]+", "", text, flags=re.I)
+    text = re.sub(r"[A-Fa-f0-9]{8,}(?:-[A-Fa-f0-9]{4,})*", "<id>", text)
+    text = re.sub(r"0x[A-Fa-f0-9]+", "<addr>", text)
+    text = re.sub(r"\b\d{2,}\b", "<n>", text)
+    text = re.sub(r"[A-Za-z]:\\[^\s]+", "<path>", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def elapsed_connect_bucket(elapsed_seconds: object) -> str | None:
+    if elapsed_seconds is None:
+        return None
+    try:
+        elapsed = float(elapsed_seconds)
+    except (TypeError, ValueError):
+        return None
+    if elapsed < 5:
+        return "LT_5_SECONDS"
+    if elapsed < 15:
+        return "5_TO_15_SECONDS"
+    if elapsed < 30:
+        return "15_TO_30_SECONDS"
+    if elapsed < 60:
+        return "30_TO_60_SECONDS"
+    return "GT_60_SECONDS"
+
+
+def tcp_state_summary(tcp: dict[str, object] | None) -> str | None:
+    if tcp is None:
+        return None
+    states = set()
+    for entry in tcp.get("entries", []):
+        if not isinstance(entry, dict):
+            continue
+        state = str(entry.get("State") or entry.get("state") or "").upper()
+        if state in {"LISTEN", "TIME_WAIT", ""}:
+            continue
+        states.add(state)
+    return ",".join(sorted(states)) if states else "NONE"
+
+
+def last_relevant_log_signature(lines: list[str]) -> str | None:
+    keywords = re.compile(r"Failed|Timed out|Disconnected|Connection|Exception|Channel|Handshake|Login", re.I)
+    selected = [normalize_fingerprint_value(line) for line in lines if keywords.search(line)]
+    selected = [str(line) for line in selected if line]
+    return " | ".join(selected[-5:]) if selected else None
+
+
+def fingerprint_payload(evidence: AttemptEvidence, diagnostics: dict[str, object]) -> dict[str, object]:
+    last_client_marker = diagnostics.get("last_client_marker") or diagnostics.get("last_marker")
+    meaningful = diagnostics.get("last_meaningful_client_marker") or last_client_marker
+    if meaningful in IGNORED_TERMINAL_MARKERS:
+        meaningful = None
+    return {
+        "last_client_marker": normalize_fingerprint_value(last_client_marker),
+        "last_meaningful_client_marker": normalize_fingerprint_value(meaningful),
+        "last_server_marker": normalize_fingerprint_value(diagnostics.get("last_server_marker")),
+        "last_client_screen": normalize_fingerprint_value(diagnostics.get("screen") or diagnostics.get("last_client_screen")),
+        "disconnect_reason": normalize_fingerprint_value(diagnostics.get("disconnect_reason") or diagnostics.get("disconnected_reason")),
+        "client_connection_phase": diagnostics.get("client_connection_phase") or "UNKNOWN",
         "server_login_timeout_seen": bool(diagnostics.get("server_login_timeout_seen")),
-        "tcp_terminal_state": clean(diagnostics.get("tcp_terminal_state")),
+        "server_player_join_seen": bool(diagnostics.get("server_player_join_seen")),
+        "player_present_in_rcon": bool(diagnostics.get("player_present_in_rcon")),
+        "tcp_state_summary": diagnostics.get("tcp_state_summary"),
+        "client_game_process_alive": diagnostics.get("client_game_process_alive"),
+        "server_game_process_alive": diagnostics.get("server_game_process_alive"),
+        "elapsed_connect_bucket": elapsed_connect_bucket(diagnostics.get("elapsed_connect_seconds")),
+        "last_client_log_signature": normalize_fingerprint_value(diagnostics.get("last_client_log_signature")),
+        "last_server_log_signature": normalize_fingerprint_value(diagnostics.get("last_server_log_signature")),
         "channel_rejection_seen": bool(evidence.channel_rejection_seen or diagnostics.get("channel_rejection_seen")),
         "unknown_custom_packet_seen": bool(evidence.unknown_custom_packet_seen or diagnostics.get("unknown_custom_packet_seen")),
         "partialreload_marker_seen": bool(diagnostics.get("partialreload_marker_seen")),
     }
-    return json.dumps(data, sort_keys=True, separators=(",", ":"))
+
+
+def assess_fingerprint_quality(payload: dict[str, object]) -> tuple[FingerprintQuality, list[str]]:
+    missing: list[str] = []
+    if payload.get("client_connection_phase") in {None, "UNKNOWN"}:
+        missing.append("client_connection_phase")
+    if payload.get("elapsed_connect_bucket") is None:
+        missing.append("elapsed_connect_bucket")
+    if payload.get("client_game_process_alive") is None or payload.get("server_game_process_alive") is None:
+        missing.append("process_state")
+    if payload.get("tcp_state_summary") is None and payload.get("last_client_screen") is None:
+        missing.append("tcp_or_screen")
+    if payload.get("last_meaningful_client_marker") is None:
+        missing.append("last_meaningful_client_marker")
+    terminal = bool(
+        payload.get("disconnect_reason")
+        or payload.get("server_login_timeout_seen")
+        or payload.get("last_client_screen") in {"DisconnectedScreen", "ModMismatchDisconnectedScreen"}
+        or payload.get("tcp_state_summary") not in {None, "NONE"}
+        or payload.get("client_game_process_alive") is False
+        or payload.get("last_client_log_signature")
+        or payload.get("last_server_log_signature")
+    )
+    if not missing and terminal:
+        return FingerprintQuality.HIGH, []
+    if payload.get("client_connection_phase") not in {None, "UNKNOWN"} and payload.get("client_game_process_alive") is not None:
+        return FingerprintQuality.MEDIUM, missing
+    return FingerprintQuality.INSUFFICIENT, missing
+
+
+def infrastructure_fingerprint(evidence: AttemptEvidence, diagnostics: dict[str, object]) -> str:
+    """Canonical, redacted fingerprint for a pre-login infrastructure failure."""
+    return json.dumps(fingerprint_payload(evidence, diagnostics), sort_keys=True, separators=(",", ":"))
+
+
+def infrastructure_fingerprint_quality(evidence: AttemptEvidence, diagnostics: dict[str, object]) -> tuple[FingerprintQuality, list[str]]:
+    return assess_fingerprint_quality(fingerprint_payload(evidence, diagnostics))
 
 
 def preflight_owned_processes(ownership_directory: pathlib.Path) -> dict[str, object]:
@@ -234,7 +336,7 @@ def load_authorized_infrastructure_fingerprints(report_path: pathlib.Path) -> se
             raise ValueError("INVALID_INFRASTRUCTURE_AUTHORIZATION_REPORT")
         if classification == AttemptClassification.INFRASTRUCTURE_FAILURE.value:
             fingerprint = item.get("fingerprint")
-            if not fingerprint:
+            if not fingerprint or item.get("fingerprint_quality") != FingerprintQuality.HIGH.value:
                 raise ValueError("INVALID_INFRASTRUCTURE_AUTHORIZATION_REPORT")
             fingerprints.add(str(fingerprint))
     if not fingerprints:
@@ -630,6 +732,71 @@ def login_diagnostics(server: "OwnedProcess | None", client: "OwnedProcess | Non
         "client_ready_seen": any(e["marker"] == "HANDSHAKE_ACCEPTANCE_CLIENT_READY" for e in client_entries),
         "initial_connect_triggered": any(e["marker"] == "HANDSHAKE_ACCEPTANCE_CLIENT_CONNECT_REQUESTED" for e in client_entries),
         "network_login_seen": any(e["marker"] == "HANDSHAKE_ACCEPTANCE_CLIENT_NETWORK_LOGIN" for e in client_entries),
+    }
+
+
+def client_connection_phase(evidence: AttemptEvidence, entries: list[dict[str, object]]) -> str:
+    if evidence.network_login_seen:
+        return "NETWORK_LOGIN"
+    if any(entry["marker"] == "HANDSHAKE_ACCEPTANCE_CLIENT_DISCONNECTED_SCREEN" for entry in entries):
+        return "DISCONNECTED"
+    if evidence.connect_requested_seen:
+        return "CONNECTING"
+    if evidence.client_ready_seen:
+        return "READY"
+    return "UNKNOWN"
+
+
+def collect_infrastructure_diagnostics(server: "OwnedProcess | None", client: "OwnedProcess | None",
+                                       evidence: AttemptEvidence, marker_window: dict[str, object],
+                                       tcp: dict[str, object], elapsed_seconds: float | None,
+                                       username: str, rcon: RconClient | None) -> dict[str, object]:
+    client_entries = list(marker_window.get("client_entries", []))
+    server_entries = list(marker_window.get("server_entries", []))
+    meaningful = [entry for entry in client_entries if entry["marker"] not in IGNORED_TERMINAL_MARKERS]
+    last_client = client_entries[-1] if client_entries else None
+    last_meaningful = meaningful[-1] if meaningful else None
+    last_server = server_entries[-1] if server_entries else None
+    screen = None
+    disconnect_reason = None
+    for entry in reversed(client_entries):
+        values = fields(entry)
+        if screen is None:
+            screen = values.get("currentScreen") or values.get("screen") or values.get("screenClass")
+        if entry["marker"] == "HANDSHAKE_ACCEPTANCE_CLIENT_DISCONNECTED_SCREEN":
+            disconnect_reason = values.get("narration")
+            screen = values.get("screen") or screen
+            break
+    client_summary = process_summary(client, "client")
+    server_summary = process_summary(server, "server")
+    player_present = False
+    if rcon is not None:
+        try:
+            player_present = username in rcon.command("list")
+        except Exception:
+            player_present = False
+    client_lines = [] if client is None else client.lines
+    server_lines = [] if server is None else server.lines
+    return {
+        "last_client_marker": last_client["marker"] if last_client else None,
+        "last_meaningful_client_marker": last_meaningful["marker"] if last_meaningful else None,
+        "last_server_marker": last_server["marker"] if last_server else None,
+        "last_client_screen": screen,
+        "disconnect_reason": disconnect_reason,
+        "client_connection_phase": client_connection_phase(evidence, client_entries),
+        "server_login_timeout_seen": any("timed out" in line.lower() and "login" in line.lower() for line in server_lines),
+        "server_player_join_seen": any(f"{username} joined the game" in line for line in server_lines),
+        "player_present_in_rcon": player_present,
+        "tcp_state_summary": tcp_state_summary(tcp),
+        "client_game_process_alive": process_alive(client_summary.get("game_pid") or (client.process.pid if client and client.process else -1)),
+        "server_game_process_alive": process_alive(server_summary.get("game_pid") or (server.process.pid if server and server.process else -1)),
+        "elapsed_connect_seconds": elapsed_seconds,
+        "last_client_log_signature": last_relevant_log_signature(client_lines),
+        "last_server_log_signature": last_relevant_log_signature(server_lines),
+        "partialreload_marker_seen": any(str(item["marker"]).startswith("CLIENT_HANDSHAKE_") for item in server_entries),
+        "channel_rejection_seen": any("rejected" in line.lower() and "partialreload:client_sync" in line.lower()
+                                      for line in client_lines + server_lines),
+        "unknown_custom_packet_seen": any("unknown custom packet" in line.lower() for line in client_lines + server_lines),
     }
 
 
@@ -1383,6 +1550,7 @@ class Acceptance:
                                        with_mod=self.client_mod_mode == "with_mod")
             client_start_line = client.cursor()
             stop_after_attempt = False
+            connect_started_at: float | None = None
             try:
                 ready = client.wait_marker("HANDSHAKE_ACCEPTANCE_CLIENT_READY", 90)
                 client_cursor = client.cursor()
@@ -1392,6 +1560,7 @@ class Acceptance:
                 if self.initial_connect_mode == "CONTROL":
                     control = self.run_root / name / "control"
                     control.mkdir(parents=True, exist_ok=True)
+                    connect_started_at = time.monotonic()
                     (control / "connect.request").write_text("connect\n", encoding="utf-8")
                     client.wait_marker("HANDSHAKE_ACCEPTANCE_CLIENT_CONNECT_REQUESTED", 60, client_cursor)
                     capture_tcp_state(self.run_log_root, self.server_port, client, self.server,
@@ -1432,8 +1601,8 @@ class Acceptance:
             finally:
                 window = AttemptWindow(server_start_line, client_start_line,
                                        self.server.cursor(), client.cursor())
-                capture_tcp_state(self.run_log_root, self.server_port, client, self.server,
-                                  f"tcp-before-cleanup-{name}.json")
+                pre_cleanup_tcp = capture_tcp_state(self.run_log_root, self.server_port, client, self.server,
+                                                    f"tcp-before-cleanup-{name}.json")
                 evidence = attempt_evidence(
                     self.server, client, window, self.run_id,
                     self.attempt_ids.get(name, ""), self.initial_connect_mode,
@@ -1455,11 +1624,15 @@ class Acceptance:
                                                          else AttemptClassification.INFRASTRUCTURE_FAILURE.value)
                     attempts[-1]["login_diagnostics"] = login_diagnostics(self.server, client)
                     window_evidence = attempt_marker_evidence(self.server, client, window, self.run_id, self.attempt_ids.get(name, ""))
-                    attempts[-1]["fingerprint"] = infrastructure_fingerprint(evidence, {
-                        "last_client_marker": (window_evidence["client_entries"][-1]["marker"] if window_evidence["client_entries"] else None),
-                        "partialreload_marker_seen": any(str(item["marker"]).startswith("CLIENT_HANDSHAKE_") for item in window_evidence["server_entries"]),
-                        "channel_rejection_seen": "rejected" in str(attempts[-1]["login_diagnostics"]).lower(),
-                        "unknown_custom_packet_seen": "unknown custom packet" in str(attempts[-1]["login_diagnostics"]).lower()})
+                    fingerprint_diagnostics = collect_infrastructure_diagnostics(
+                        self.server, client, evidence, window_evidence, pre_cleanup_tcp,
+                        (time.monotonic() - connect_started_at) if connect_started_at is not None else None,
+                        username, self.rcon)
+                    attempts[-1]["fingerprint"] = infrastructure_fingerprint(evidence, fingerprint_diagnostics)
+                    quality, missing = infrastructure_fingerprint_quality(evidence, fingerprint_diagnostics)
+                    attempts[-1]["fingerprint_quality"] = quality.value
+                    attempts[-1]["fingerprint_missing_fields"] = missing
+                    attempts[-1]["fingerprint_diagnostics"] = fingerprint_diagnostics
                     attempts[-1]["launch_args"] = launch
                     attempts[-1]["processes"] = {
                         "client": process_summary(client, "client"),

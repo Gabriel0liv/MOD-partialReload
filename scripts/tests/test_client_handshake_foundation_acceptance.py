@@ -231,6 +231,85 @@ class HandshakeAcceptanceReportTest(unittest.TestCase):
     def test_validate_report_requires_new_scenario(self):
         value = report(); del value["scenarios"]["server_absent_client_mod_reconnect"]
         self.assertFalse(MODULE.validate_report(value)[0])
+    def test_heartbeat_only_fingerprint_is_insufficient(self):
+        evidence = MODULE.AttemptEvidence(True, True, False, False, False, False, False, False, None, None)
+        diagnostics = {"last_client_marker": "HANDSHAKE_ACCEPTANCE_CLIENT_CONNECT_HEARTBEAT"}
+        quality, missing = MODULE.infrastructure_fingerprint_quality(evidence, diagnostics)
+        self.assertEqual(quality, MODULE.FingerprintQuality.INSUFFICIENT)
+        self.assertIn("last_meaningful_client_marker", missing)
+    def test_disconnected_screen_fingerprint_is_high(self):
+        evidence = MODULE.AttemptEvidence(True, True, False, False, False, False, False, False, None, None)
+        diagnostics = {"last_client_marker": "HANDSHAKE_ACCEPTANCE_CLIENT_SCREEN_CHANGED",
+                       "last_meaningful_client_marker": "HANDSHAKE_ACCEPTANCE_CLIENT_SCREEN_CHANGED",
+                       "last_client_screen": "DisconnectedScreen", "client_connection_phase": "DISCONNECTED",
+                       "elapsed_connect_seconds": 20, "client_game_process_alive": True,
+                       "server_game_process_alive": True, "tcp_state_summary": "NONE"}
+        self.assertEqual(MODULE.infrastructure_fingerprint_quality(evidence, diagnostics)[0],
+                         MODULE.FingerprintQuality.HIGH)
+    def test_server_login_timeout_fingerprint_is_high(self):
+        evidence = MODULE.AttemptEvidence(True, True, False, False, False, False, False, False, None, None)
+        diagnostics = {"last_client_marker": "HANDSHAKE_ACCEPTANCE_CLIENT_CONNECT_REQUESTED",
+                       "last_meaningful_client_marker": "HANDSHAKE_ACCEPTANCE_CLIENT_CONNECT_REQUESTED",
+                       "client_connection_phase": "CONNECTING", "elapsed_connect_seconds": 61,
+                       "client_game_process_alive": True, "server_game_process_alive": True,
+                       "tcp_state_summary": "NONE", "server_login_timeout_seen": True}
+        self.assertEqual(MODULE.infrastructure_fingerprint_quality(evidence, diagnostics)[0],
+                         MODULE.FingerprintQuality.HIGH)
+    def test_dead_client_process_fingerprint_is_high(self):
+        evidence = MODULE.AttemptEvidence(True, True, False, False, False, False, False, False, None, None)
+        diagnostics = {"last_client_marker": "HANDSHAKE_ACCEPTANCE_CLIENT_CONNECT_CALL_RETURN",
+                       "last_meaningful_client_marker": "HANDSHAKE_ACCEPTANCE_CLIENT_CONNECT_CALL_RETURN",
+                       "client_connection_phase": "CONNECTING", "elapsed_connect_seconds": 10,
+                       "client_game_process_alive": False, "server_game_process_alive": True,
+                       "tcp_state_summary": "NONE"}
+        self.assertEqual(MODULE.infrastructure_fingerprint_quality(evidence, diagnostics)[0],
+                         MODULE.FingerprintQuality.HIGH)
+    def test_phase_without_terminal_is_medium(self):
+        evidence = MODULE.AttemptEvidence(True, True, False, False, False, False, False, False, None, None)
+        diagnostics = {"last_client_marker": "HANDSHAKE_ACCEPTANCE_CLIENT_CONNECT_REQUESTED",
+                       "last_meaningful_client_marker": "HANDSHAKE_ACCEPTANCE_CLIENT_CONNECT_REQUESTED",
+                       "client_connection_phase": "CONNECTING", "elapsed_connect_seconds": 10,
+                       "client_game_process_alive": True, "server_game_process_alive": True,
+                       "tcp_state_summary": "NONE"}
+        self.assertEqual(MODULE.infrastructure_fingerprint_quality(evidence, diagnostics)[0],
+                         MODULE.FingerprintQuality.MEDIUM)
+    def test_authorization_rejects_insufficient_fingerprint(self):
+        import tempfile, json
+        with tempfile.TemporaryDirectory() as path:
+            fp = pathlib.Path(path) / "report.json"
+            fp.write_text(json.dumps({"server_mod_mode": "without_mod", "classpath_isolated": True,
+                                      "partialreload_loaded": False, "cleanup": {"status": "passed"},
+                                      "attempts": [{"classification": "INFRASTRUCTURE_FAILURE",
+                                                    "fingerprint": "x",
+                                                    "fingerprint_quality": "INSUFFICIENT"}]}))
+            with self.assertRaises(ValueError): MODULE.load_authorized_infrastructure_fingerprints(fp)
+    def test_authorization_accepts_high_fingerprint(self):
+        import tempfile, json
+        with tempfile.TemporaryDirectory() as path:
+            fp = pathlib.Path(path) / "report.json"
+            fp.write_text(json.dumps({"server_mod_mode": "without_mod", "classpath_isolated": True,
+                                      "partialreload_loaded": False, "cleanup": {"status": "passed"},
+                                      "attempts": [{"classification": "INFRASTRUCTURE_FAILURE",
+                                                    "fingerprint": "x",
+                                                    "fingerprint_quality": "HIGH"}]}))
+            self.assertEqual(MODULE.load_authorized_infrastructure_fingerprints(fp), {"x"})
+    def test_fingerprint_normalization_removes_ids(self):
+        self.assertEqual(MODULE.normalize_fingerprint_value("run=abc12345 pid=12345 C:\\Users\\Sato\\x"),
+                         "<path>")
+    def test_causally_different_fingerprints_differ(self):
+        evidence = MODULE.AttemptEvidence(True, True, False, False, False, False, False, False, None, None)
+        one = MODULE.infrastructure_fingerprint(evidence, {"last_meaningful_client_marker": "A", "client_connection_phase": "CONNECTING"})
+        two = MODULE.infrastructure_fingerprint(evidence, {"last_meaningful_client_marker": "B", "client_connection_phase": "CONNECTING"})
+        self.assertNotEqual(one, two)
+    def test_adjudicator_reconfirms_case_d(self):
+        import importlib.util
+        script = pathlib.Path(__file__).resolve().parents[1] / "adjudicate-handshake-infrastructure.py"
+        spec = importlib.util.spec_from_file_location("adjudicator", script)
+        module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+        report = {"scenarios": {"cold_login": {"attempts": [{"classification": "VALID_PASS"} for _ in range(10)]}}}
+        result = module.adjudicate({"attempts": [{"classification": "INFRASTRUCTURE_FAILURE",
+                                                  "fingerprint_quality": "INSUFFICIENT"}]}, report, report)
+        self.assertEqual(result["decision"], "CASE_D_RECONFIRMED")
 
 
 if __name__ == "__main__":
