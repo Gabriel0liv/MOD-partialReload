@@ -141,6 +141,10 @@ class HandshakeAcceptanceReportTest(unittest.TestCase):
         self.assertEqual(MODULE.find_game_process(tree, "server")["pid"], 3)
         self.assertIsNone(MODULE.find_game_process(tree, "other"))
 
+    def test_git_fsmonitor_is_not_adopted_as_owned_descendant(self):
+        self.assertFalse(MODULE.should_track_descendant("git fsmonitor--daemon run --detach"))
+        self.assertTrue(MODULE.should_track_descendant("BootstrapLauncher --launchTarget forgeclientuserdev"))
+
     def test_process_tree_none_and_launch_args_evidence(self):
         self.assertEqual(MODULE.process_tree(None), [])
         process = self.process([])
@@ -495,6 +499,127 @@ class HandshakeAcceptanceReportTest(unittest.TestCase):
         target_attempt["fingerprint_missing_fields"] = missing
         target = full_matrix_report("with_mod", [target_attempt] + [{"classification": "VALID_PASS"} for _ in range(9)])
         self.assertEqual(adj.adjudicate({}, control, target)["decision"], "CASE_C_NON_EQUIVALENT_FAILURES")
+    def test_scope_schema_version(self):
+        scope = POLICY.authorization_scope("with_mod", "CONTROL", test_versions())
+        self.assertEqual(scope.schema_version, POLICY.AUTHORIZATION_SCOPE_SCHEMA_VERSION)
+        self.assertEqual(scope.fingerprint_schema_version, POLICY.FINGERPRINT_SCHEMA_VERSION)
+    def test_helper_only_scope_derivation(self):
+        scope = POLICY.authorization_scope("without_mod", "CONTROL", test_versions())
+        self.assertEqual(scope.client_classpath_profile, "HELPER_ONLY")
+        self.assertFalse(scope.client_main_mod_present)
+        self.assertTrue(scope.helper_mod_present)
+    def test_main_mod_and_helper_scope_derivation(self):
+        scope = POLICY.authorization_scope("with_mod", "CONTROL", test_versions())
+        self.assertEqual(scope.client_classpath_profile, "MAIN_MOD_AND_HELPER")
+        self.assertTrue(scope.client_main_mod_present)
+        self.assertTrue(scope.helper_mod_present)
+    def test_ready_profile_without_mod(self):
+        entry = {"fields": {"partialReloadLoaded": "false", "helperLoaded": "true"}}
+        profile, error = MODULE.ready_client_profile(entry, "without_mod", "CONTROL")
+        self.assertIsNone(error)
+        self.assertEqual(profile["client_classpath_profile"], "HELPER_ONLY")
+    def test_ready_profile_with_mod(self):
+        entry = {"fields": {"partialReloadLoaded": "true", "helperLoaded": "true"}}
+        profile, error = MODULE.ready_client_profile(entry, "with_mod", "CONTROL")
+        self.assertIsNone(error)
+        self.assertEqual(profile["client_classpath_profile"], "MAIN_MOD_AND_HELPER")
+    def test_ready_profile_mismatch(self):
+        entry = {"fields": {"partialReloadLoaded": "false", "helperLoaded": "true"}}
+        _, error = MODULE.ready_client_profile(entry, "with_mod", "CONTROL")
+        self.assertEqual(error, "CLIENT_PROFILE_MISMATCH")
+    def test_scope_match_accepts_identical(self):
+        left = POLICY.authorization_scope("with_mod", "CONTROL", test_versions())
+        right = POLICY.authorization_scope("with_mod", "CONTROL", test_versions())
+        self.assertEqual(POLICY.authorization_scope_matches(left, right), (True, []))
+    def test_scope_match_rejects_client_mode(self):
+        left = POLICY.authorization_scope("without_mod", "CONTROL", test_versions())
+        right = POLICY.authorization_scope("with_mod", "CONTROL", test_versions())
+        ok, changed = POLICY.authorization_scope_matches(left, right)
+        self.assertFalse(ok); self.assertIn("client_mod_mode", changed)
+    def test_scope_match_rejects_forge_version(self):
+        left = POLICY.authorization_scope("with_mod", "CONTROL", test_versions())
+        right = POLICY.authorization_scope("with_mod", "CONTROL", test_versions({"forge_version": "47.4.11"}))
+        self.assertIn("forge_version", POLICY.authorization_scope_matches(left, right)[1])
+    def test_scope_match_rejects_java_major(self):
+        left = POLICY.authorization_scope("with_mod", "CONTROL", test_versions())
+        right = POLICY.authorization_scope("with_mod", "CONTROL", test_versions({"java_version": 21}))
+        self.assertIn("java_major", POLICY.authorization_scope_matches(left, right)[1])
+    def test_scope_match_rejects_initial_connect_mode(self):
+        left = POLICY.authorization_scope("with_mod", "CONTROL", test_versions())
+        right = POLICY.authorization_scope("with_mod", "LAUNCH_ARGS", test_versions())
+        self.assertIn("initial_connect_mode", POLICY.authorization_scope_matches(left, right)[1])
+    def test_absent_baseline_cannot_authorize_compatible_scope(self):
+        report = full_matrix_report("without_mod", [authorizable_attempt()] + [{"classification": "VALID_PASS"} for _ in range(9)], "without_mod")
+        ok, error, _ = POLICY.validate_control_baseline_report(report, "with_mod")
+        self.assertFalse(ok); self.assertEqual(error, "AUTHORIZATION_SCOPE_CLIENT_MODE_INVALID")
+    def test_compatible_baseline_cannot_authorize_absent_scope(self):
+        report = full_matrix_report("without_mod", [authorizable_attempt()] + [{"classification": "VALID_PASS"} for _ in range(9)], "with_mod")
+        ok, error, _ = POLICY.validate_control_baseline_report(report, "without_mod")
+        self.assertFalse(ok); self.assertEqual(error, "AUTHORIZATION_SCOPE_CLIENT_MODE_INVALID")
+    def test_loader_returns_baseline_with_scope(self):
+        report = full_matrix_report("without_mod", [authorizable_attempt()] + [{"classification": "VALID_PASS"} for _ in range(9)], "with_mod")
+        ok, error, baseline = POLICY.load_authorized_infrastructure_baseline(report, "source", "with_mod")
+        self.assertTrue(ok, error)
+        self.assertEqual(baseline.scope.client_mod_mode, "with_mod")
+        self.assertEqual(len(baseline.fingerprints), 1)
+    def test_compare_fingerprint_payloads(self):
+        left = json.dumps({"schema_version": 2, "a": 1}, sort_keys=True)
+        right = json.dumps({"schema_version": 2, "a": 2}, sort_keys=True)
+        diff = POLICY.compare_fingerprint_payloads(left, right)
+        self.assertFalse(diff["equal"])
+        self.assertIn("a", diff["changed_fields"])
+    def test_compatible_case_a_requires_historical_exact_match_in_control(self):
+        adj = load_adjudicator()
+        hist = authorizable_attempt()
+        control = full_matrix_report("without_mod", [hist] + [{"classification": "VALID_PASS"} for _ in range(9)], "with_mod")
+        target = full_matrix_report("with_mod", [{"classification": "VALID_PASS"} for _ in range(10)], "with_mod")
+        quota = {"scenarios": {"cold_login": {"attempts": [hist]}}}
+        self.assertEqual(adj.adjudicate(quota, control, target, "compatible_client")["decision"],
+                         "COMPATIBLE_CASE_A_MATCHED_INFRASTRUCTURE")
+    def test_compatible_case_d_reconfirmed(self):
+        adj = load_adjudicator()
+        control = full_matrix_report("without_mod", [{"classification": "VALID_PASS"} for _ in range(10)], "with_mod")
+        target = full_matrix_report("with_mod", [{"classification": "VALID_PASS"} for _ in range(10)], "with_mod")
+        self.assertEqual(adj.adjudicate({}, control, target, "compatible_client")["decision"],
+                         "COMPATIBLE_CASE_D_RECONFIRMED")
+    def test_compatible_case_b_target_correlated(self):
+        adj = load_adjudicator()
+        hist = authorizable_attempt()
+        control = full_matrix_report("without_mod", [{"classification": "VALID_PASS"} for _ in range(10)], "with_mod")
+        target = full_matrix_report("with_mod", [hist] + [{"classification": "VALID_PASS"} for _ in range(9)], "with_mod")
+        quota = {"scenarios": {"cold_login": {"attempts": [hist]}}}
+        self.assertEqual(adj.adjudicate(quota, control, target, "compatible_client")["decision"],
+                         "COMPATIBLE_CASE_B_TARGET_CORRELATED")
+    def test_compatible_case_c_non_equivalent(self):
+        adj = load_adjudicator()
+        hist = authorizable_attempt()
+        different = authorizable_attempt()
+        different["fingerprint_diagnostics"]["disconnect_reason"] = "Connection refused"
+        different["fingerprint"] = POLICY.canonical_fingerprint(dummy_evidence(), different["fingerprint_diagnostics"])
+        payload = json.loads(different["fingerprint"])
+        quality, missing = POLICY.assess_fingerprint_quality(payload)
+        different["fingerprint_quality"] = quality.value
+        different["fingerprint_missing_fields"] = missing
+        control = full_matrix_report("without_mod", [different] + [{"classification": "VALID_PASS"} for _ in range(9)], "with_mod")
+        target = full_matrix_report("with_mod", [hist] + [{"classification": "VALID_PASS"} for _ in range(9)], "with_mod")
+        quota = {"scenarios": {"cold_login": {"attempts": [hist]}}}
+        self.assertEqual(adj.adjudicate(quota, control, target, "compatible_client")["decision"],
+                         "COMPATIBLE_CASE_C_NON_EQUIVALENT")
+    def test_compatible_case_unresolved_when_control_has_unrelated_infra_and_target_passes(self):
+        adj = load_adjudicator()
+        hist = authorizable_attempt()
+        different = authorizable_attempt()
+        different["fingerprint_diagnostics"]["disconnect_reason"] = "Connection refused"
+        different["fingerprint"] = POLICY.canonical_fingerprint(dummy_evidence(), different["fingerprint_diagnostics"])
+        payload = json.loads(different["fingerprint"])
+        quality, missing = POLICY.assess_fingerprint_quality(payload)
+        different["fingerprint_quality"] = quality.value
+        different["fingerprint_missing_fields"] = missing
+        control = full_matrix_report("without_mod", [different] + [{"classification": "VALID_PASS"} for _ in range(9)], "with_mod")
+        target = full_matrix_report("with_mod", [{"classification": "VALID_PASS"} for _ in range(10)], "with_mod")
+        quota = {"scenarios": {"cold_login": {"attempts": [hist]}}}
+        self.assertEqual(adj.adjudicate(quota, control, target, "compatible_client")["decision"],
+                         "COMPATIBLE_CASE_UNRESOLVED")
 
 
 def dummy_evidence():
@@ -527,7 +652,7 @@ def authorizable_attempt(cleanup="DEFAULT"):
     return {"classification": "INFRASTRUCTURE_FAILURE", "status": "failed",
             "functional_trial": None,
             "cleanup": {"status": "passed"} if cleanup == "DEFAULT" else cleanup,
-            "attempt_evidence_schema_version": POLICY.FINGERPRINT_SCHEMA_VERSION,
+            "attempt_evidence_schema_version": POLICY.ATTEMPT_EVIDENCE_SCHEMA_VERSION,
             "attempt_evidence": {"client_ready_seen": True, "connect_requested_seen": True,
                                  "network_login_seen": False, "server_absent_seen": False,
                                  "server_pending_seen": False, "server_compatible_seen": False,
@@ -538,14 +663,26 @@ def authorizable_attempt(cleanup="DEFAULT"):
             "fingerprint_missing_fields": missing}
 
 
-def full_matrix_report(server_mode, attempts):
+def test_versions(overrides=None):
+    data = {"minecraft_version": "1.20.1", "forge_version": "47.4.10",
+            "mapping_channel": "official", "mapping_version": "1.20.1",
+            "java_version": 17}
+    if overrides:
+        data.update(overrides)
+    return data
+
+
+def full_matrix_report(server_mode, attempts, client_mode="without_mod"):
     infrastructure = sum(item.get("classification") == "INFRASTRUCTURE_FAILURE" for item in attempts)
     product = sum(item.get("classification") == "PRODUCT_FAILURE" for item in attempts)
     harness = sum(item.get("classification") == "HARNESS_FAILURE" for item in attempts)
     valid = sum(item.get("classification") == "VALID_PASS" for item in attempts)
     for item in attempts:
         item.setdefault("cleanup", {"status": "passed"})
+    scope = POLICY.authorization_scope(client_mode, "CONTROL", test_versions())
     return {"server_mod_mode": server_mode,
+            "client_mod_mode": client_mode,
+            "authorization_scope": POLICY.scope_to_dict(scope),
             "server_build_mode": "independent_gradle_build" if server_mode == "without_mod" else "root_gradle_build",
             "server_main_mod_present": server_mode == "with_mod",
             "classpath_isolated": True if server_mode == "without_mod" else None,

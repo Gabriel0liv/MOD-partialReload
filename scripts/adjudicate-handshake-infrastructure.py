@@ -43,13 +43,25 @@ def high_fingerprints(report: dict[str, object]) -> set[str]:
             if policy.validate_authorizable_attempt(item)[0]}
 
 
-def validate_target_report(report: dict[str, object]) -> tuple[bool, str | None]:
+def expected_client_mode(profile: str) -> str:
+    if profile == "compatible_client":
+        return "with_mod"
+    if profile == "absent_client":
+        return "without_mod"
+    raise ValueError("INVALID_COMPARISON_PROFILE")
+
+
+def validate_target_report(report: dict[str, object], expected_client_mod_mode: str | None = None
+                           ) -> tuple[bool, str | None]:
     cold = cold_scenario(report)
     attempts = cold_attempts(report)
     if report.get("status") == "failed" and report.get("bootstrap_completed") is False:
         return False, "TARGET_EXECUTION_FAILED"
     if report.get("server_mod_mode") != "with_mod" or report.get("server_main_mod_present") is not True:
         return False, "TARGET_SERVER_MODE_INVALID"
+    scope_valid, scope_error, _ = policy.validate_authorization_scope(report, expected_client_mod_mode)
+    if not scope_valid:
+        return False, scope_error
     if report.get("diagnostic_matrix") is not True or report.get("cleanup", {}).get("status") != "passed":
         return False, "TARGET_METADATA_INVALID"
     if cold.get("matrix_complete") is not True or cold.get("launch_attempts") != 10 or len(attempts) != 10:
@@ -65,16 +77,28 @@ def historical_failure(quota: dict[str, object]) -> dict[str, object]:
     failed = next((item for item in cold_attempts(quota)
                    if item.get("classification") == "INFRASTRUCTURE_FAILURE"), {})
     quality = failed.get("fingerprint_quality") or "INSUFFICIENT"
-    return {"fingerprint_quality": quality, "explained": False, "authorized": False}
+    return {"fingerprint_quality": quality, "quality": quality,
+            "fingerprint": failed.get("fingerprint"),
+            "explained": False, "authorized": False}
 
 
-def adjudicate(quota: dict[str, object], control: dict[str, object], target: dict[str, object]) -> dict[str, object]:
-    control_valid, control_error, control_fingerprints = policy.validate_control_baseline_report(control)
-    target_valid, target_error = validate_target_report(target)
+def adjudicate(quota: dict[str, object], control: dict[str, object], target: dict[str, object],
+               comparison_profile: str = "absent_client") -> dict[str, object]:
+    expected_mode = expected_client_mode(comparison_profile)
+    control_valid, control_error, control_fingerprints = policy.validate_control_baseline_report(control, expected_mode)
+    target_valid, target_error = validate_target_report(target, expected_mode)
     control_summary = summarize(control)
     target_summary = summarize(target)
     target_high = high_fingerprints(target)
     history = historical_failure(quota)
+    historical_fp = history.get("fingerprint") if history.get("fingerprint_quality") == "HIGH" else None
+    scope_match = False
+    scope_differences: list[str] = []
+    control_scope = target_scope = None
+    if control_valid and target_valid:
+        control_scope = policy.scope_from_dict(control["authorization_scope"])
+        target_scope = policy.scope_from_dict(target["authorization_scope"])
+        scope_match, scope_differences = policy.authorization_scope_matches(control_scope, target_scope)
     errors = {}
     if not control_valid:
         errors["control"] = control_error
@@ -82,7 +106,22 @@ def adjudicate(quota: dict[str, object], control: dict[str, object], target: dic
         errors["target"] = target_error
     decision = "CASE_INVALID_EVIDENCE" if errors else "CASE_UNRESOLVED_INSUFFICIENT_DIAGNOSTICS"
     authorized: set[str] = set()
-    if not errors:
+    if not errors and not scope_match:
+        errors["scope"] = "INFRASTRUCTURE_AUTHORIZATION_SCOPE_MISMATCH"
+        decision = "CASE_INVALID_EVIDENCE"
+    elif not errors and comparison_profile == "compatible_client":
+        if historical_fp and historical_fp in control_fingerprints:
+            decision = "COMPATIBLE_CASE_A_MATCHED_INFRASTRUCTURE"
+            authorized = {str(historical_fp)}
+        elif control_summary["valid"] == 10 and control_summary["infrastructure"] == 0 and target_summary["valid"] == 10 and target_summary["infrastructure"] == 0:
+            decision = "COMPATIBLE_CASE_D_RECONFIRMED"
+        elif control_summary["valid"] == 10 and control_summary["infrastructure"] == 0 and historical_fp and historical_fp in target_high:
+            decision = "COMPATIBLE_CASE_B_TARGET_CORRELATED"
+        elif control_fingerprints and target_high and not (control_fingerprints & target_high):
+            decision = "COMPATIBLE_CASE_C_NON_EQUIVALENT"
+        else:
+            decision = "COMPATIBLE_CASE_UNRESOLVED"
+    elif not errors:
         if control_summary["valid"] == 10 and control_summary["infrastructure"] == 0 and target_summary["valid"] == 10 and target_summary["infrastructure"] == 0:
             decision = "CASE_D_RECONFIRMED"
         elif control_fingerprints & target_high:
@@ -102,6 +141,10 @@ def adjudicate(quota: dict[str, object], control: dict[str, object], target: dic
             "progress_tcp_states": sorted(policy.TCP_PROGRESS_STATES),
         },
         "previous_case": "D",
+        "comparison_profile": comparison_profile,
+        "scope_match": scope_match,
+        "scope_differences": scope_differences,
+        "expected_authorization_scope": policy.scope_to_dict(control_scope) if control_scope else None,
         "decision": decision,
         "historical_failure": history,
         "control_baseline": {
@@ -116,7 +159,8 @@ def adjudicate(quota: dict[str, object], control: dict[str, object], target: dic
             **target_summary,
             "all_cleanups_passed": all_cleanups_passed(target),
         },
-        "prospective_quota_allowed": decision in {"CASE_D_RECONFIRMED", "CASE_CONTROL_BASELINE_ESTABLISHED", "CASE_A_LATE_FINGERPRINT_CONFIRMED"},
+        "prospective_quota_allowed": decision in {"CASE_D_RECONFIRMED", "CASE_CONTROL_BASELINE_ESTABLISHED", "CASE_A_LATE_FINGERPRINT_CONFIRMED",
+                                                  "COMPATIBLE_CASE_A_MATCHED_INFRASTRUCTURE", "COMPATIBLE_CASE_D_RECONFIRMED"},
         "authorized_fingerprints": sorted(authorized),
         "errors": errors,
     }
@@ -127,13 +171,14 @@ def main() -> int:
     parser.add_argument("quota_report")
     parser.add_argument("control_report")
     parser.add_argument("target_report")
+    parser.add_argument("--comparison-profile", choices=("absent_client", "compatible_client"), default="absent_client")
     parser.add_argument("--out", default="build/reports/handshake-infrastructure-adjudication.json")
     args = parser.parse_args()
     quota_path = pathlib.Path(args.quota_report)
     quota_report = json.loads(quota_path.read_text(encoding="utf-8")) if quota_path.exists() else {}
     reports = [quota_report] + [json.loads(pathlib.Path(path).read_text(encoding="utf-8"))
                                 for path in (args.control_report, args.target_report)]
-    result = adjudicate(*reports)
+    result = adjudicate(*reports, args.comparison_profile)
     output = pathlib.Path(args.out)
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(result, indent=2), encoding="utf-8")

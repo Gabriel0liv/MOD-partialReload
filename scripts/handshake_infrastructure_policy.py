@@ -3,16 +3,44 @@ from __future__ import annotations
 
 import json
 import re
+from dataclasses import asdict, dataclass
 from enum import Enum
 from types import SimpleNamespace
 
 FINGERPRINT_SCHEMA_VERSION = 2
+AUTHORIZATION_SCOPE_SCHEMA_VERSION = 1
+ATTEMPT_EVIDENCE_SCHEMA_VERSION = 2
 
 
 class FingerprintQuality(str, Enum):
     HIGH = "HIGH"
     MEDIUM = "MEDIUM"
     INSUFFICIENT = "INSUFFICIENT"
+
+
+@dataclass(frozen=True)
+class InfrastructureAuthorizationScope:
+    schema_version: int
+    fingerprint_schema_version: int
+    attempt_evidence_schema_version: int
+    client_mod_mode: str
+    client_classpath_profile: str
+    client_main_mod_present: bool
+    helper_mod_present: bool
+    initial_connect_mode: str
+    client_launch_target: str
+    minecraft_version: str
+    forge_version: str
+    mapping_channel: str
+    mapping_version: str
+    java_major: int
+
+
+@dataclass(frozen=True)
+class AuthorizedInfrastructureBaseline:
+    scope: InfrastructureAuthorizationScope
+    fingerprints: frozenset[str]
+    source_report: str
 
 
 TCP_PROGRESS_STATES = {"SYN_SENT", "SYN_RECEIVED", "ESTABLISHED", "BOUND"}
@@ -59,6 +87,74 @@ TERMINAL_ERROR_PATTERNS = tuple(re.compile(pattern, re.IGNORECASE) for pattern i
     r"\bjava\.[A-Za-z0-9_.]+Exception\b",
     r"\bnetty.*exception\b",
 ))
+
+
+def client_classpath_profile(client_mod_mode: str) -> tuple[str, bool, bool]:
+    if client_mod_mode == "without_mod":
+        return "HELPER_ONLY", False, True
+    if client_mod_mode == "with_mod":
+        return "MAIN_MOD_AND_HELPER", True, True
+    raise ValueError("INVALID_CLIENT_MOD_MODE")
+
+
+def authorization_scope(client_mod_mode: str, initial_connect_mode: str,
+                        versions: dict[str, object]) -> InfrastructureAuthorizationScope:
+    profile, main_present, helper_present = client_classpath_profile(client_mod_mode)
+    return InfrastructureAuthorizationScope(
+        schema_version=AUTHORIZATION_SCOPE_SCHEMA_VERSION,
+        fingerprint_schema_version=FINGERPRINT_SCHEMA_VERSION,
+        attempt_evidence_schema_version=ATTEMPT_EVIDENCE_SCHEMA_VERSION,
+        client_mod_mode=client_mod_mode,
+        client_classpath_profile=profile,
+        client_main_mod_present=main_present,
+        helper_mod_present=helper_present,
+        initial_connect_mode=str(initial_connect_mode).upper(),
+        client_launch_target="forgeclientuserdev",
+        minecraft_version=str(versions.get("minecraft_version")),
+        forge_version=str(versions.get("forge_version")),
+        mapping_channel=str(versions.get("mapping_channel")),
+        mapping_version=str(versions.get("mapping_version")),
+        java_major=int(versions.get("java_version", versions.get("java_major", 0))),
+    )
+
+
+def scope_to_dict(scope: InfrastructureAuthorizationScope) -> dict[str, object]:
+    return asdict(scope)
+
+
+def scope_from_dict(value: dict[str, object]) -> InfrastructureAuthorizationScope:
+    return InfrastructureAuthorizationScope(
+        schema_version=int(value.get("schema_version", -1)),
+        fingerprint_schema_version=int(value.get("fingerprint_schema_version", -1)),
+        attempt_evidence_schema_version=int(value.get("attempt_evidence_schema_version", -1)),
+        client_mod_mode=str(value.get("client_mod_mode")),
+        client_classpath_profile=str(value.get("client_classpath_profile")),
+        client_main_mod_present=bool(value.get("client_main_mod_present")),
+        helper_mod_present=bool(value.get("helper_mod_present")),
+        initial_connect_mode=str(value.get("initial_connect_mode")).upper(),
+        client_launch_target=str(value.get("client_launch_target")),
+        minecraft_version=str(value.get("minecraft_version")),
+        forge_version=str(value.get("forge_version")),
+        mapping_channel=str(value.get("mapping_channel")),
+        mapping_version=str(value.get("mapping_version")),
+        java_major=int(value.get("java_major", 0)),
+    )
+
+
+def authorization_scope_matches(baseline: InfrastructureAuthorizationScope,
+                                execution: InfrastructureAuthorizationScope) -> tuple[bool, list[str]]:
+    left, right = scope_to_dict(baseline), scope_to_dict(execution)
+    changed = [key for key in left if left.get(key) != right.get(key)]
+    return not changed, changed
+
+
+def compare_fingerprint_payloads(left: str, right: str) -> dict[str, object]:
+    left_payload = json.loads(left)
+    right_payload = json.loads(right)
+    keys = sorted(set(left_payload) | set(right_payload))
+    changed = {key: {"left": left_payload.get(key), "right": right_payload.get(key)}
+               for key in keys if left_payload.get(key) != right_payload.get(key)}
+    return {"equal": not changed, "changed_fields": changed}
 
 
 def normalize_fingerprint_value(value: object) -> str | bool | None:
@@ -230,7 +326,7 @@ def validate_authorizable_attempt(attempt: dict[str, object]) -> tuple[bool, str
         "network_logout_seen", "server_disconnected_seen",
     }
     legacy_keys = {"ready", "client_ready", "connect_requested", "network_login"}
-    if attempt.get("attempt_evidence_schema_version") != FINGERPRINT_SCHEMA_VERSION:
+    if attempt.get("attempt_evidence_schema_version") != ATTEMPT_EVIDENCE_SCHEMA_VERSION:
         return False, "ATTEMPT_EVIDENCE_SCHEMA_INVALID"
     if not canonical_keys.issubset(evidence.keys()) or legacy_keys & set(evidence.keys()):
         return False, "ATTEMPT_EVIDENCE_SCHEMA_INVALID"
@@ -262,11 +358,40 @@ def validate_authorizable_attempt(attempt: dict[str, object]) -> tuple[bool, str
     return True, None
 
 
-def validate_control_baseline_report(report: dict[str, object]) -> tuple[bool, str | None, set[str]]:
+def validate_authorization_scope(report: dict[str, object], expected_client_mod_mode: str | None = None
+                                 ) -> tuple[bool, str | None, InfrastructureAuthorizationScope | None]:
+    scope_data = report.get("authorization_scope")
+    if not isinstance(scope_data, dict):
+        return False, "AUTHORIZATION_SCOPE_MISSING", None
+    try:
+        scope = scope_from_dict(scope_data)
+    except Exception:
+        return False, "AUTHORIZATION_SCOPE_INVALID", None
+    if scope.schema_version != AUTHORIZATION_SCOPE_SCHEMA_VERSION:
+        return False, "AUTHORIZATION_SCOPE_SCHEMA_INVALID", None
+    if scope.fingerprint_schema_version != FINGERPRINT_SCHEMA_VERSION:
+        return False, "FINGERPRINT_SCHEMA_INVALID", None
+    if scope.attempt_evidence_schema_version != ATTEMPT_EVIDENCE_SCHEMA_VERSION:
+        return False, "ATTEMPT_EVIDENCE_SCHEMA_INVALID", None
+    expected_profile, expected_main, expected_helper = client_classpath_profile(scope.client_mod_mode)
+    if (scope.client_classpath_profile != expected_profile
+            or scope.client_main_mod_present is not expected_main
+            or scope.helper_mod_present is not expected_helper):
+        return False, "AUTHORIZATION_SCOPE_PROFILE_INVALID", None
+    if expected_client_mod_mode is not None and scope.client_mod_mode != expected_client_mod_mode:
+        return False, "AUTHORIZATION_SCOPE_CLIENT_MODE_INVALID", None
+    return True, None, scope
+
+
+def validate_control_baseline_report(report: dict[str, object], expected_client_mod_mode: str | None = None
+                                     ) -> tuple[bool, str | None, set[str]]:
     if report.get("status") == "failed" and report.get("bootstrap_completed") is False:
         return False, "CONTROL_EXECUTION_FAILED", set()
     if report.get("server_mod_mode") != "without_mod":
         return False, "CONTROL_SERVER_MODE_INVALID", set()
+    scope_valid, scope_error, _ = validate_authorization_scope(report, expected_client_mod_mode)
+    if not scope_valid:
+        return False, scope_error, set()
     if report.get("server_build_mode") != "independent_gradle_build":
         return False, "CONTROL_BUILD_MODE_INVALID", set()
     if report.get("classpath_isolated") is not True or report.get("partialreload_loaded") is not False or report.get("partialreload_markers_seen") is not False:
@@ -296,3 +421,17 @@ def validate_control_baseline_report(report: dict[str, object]) -> tuple[bool, s
     if int(cold.get("infrastructure_failures", 0)) and not fingerprints:
         return False, "NO_INFRASTRUCTURE_FINGERPRINTS", set()
     return True, None, fingerprints
+
+
+def load_authorized_infrastructure_baseline(report: dict[str, object], source_report: str = "",
+                                            expected_client_mod_mode: str | None = None
+                                            ) -> tuple[bool, str | None, AuthorizedInfrastructureBaseline | None]:
+    valid, error, fingerprints = validate_control_baseline_report(report, expected_client_mod_mode)
+    if not valid:
+        return False, error, None
+    if not fingerprints:
+        return False, "NO_INFRASTRUCTURE_FINGERPRINTS", None
+    scope_valid, scope_error, scope = validate_authorization_scope(report, expected_client_mod_mode)
+    if not scope_valid or scope is None:
+        return False, scope_error, None
+    return True, None, AuthorizedInfrastructureBaseline(scope, frozenset(fingerprints), source_report)

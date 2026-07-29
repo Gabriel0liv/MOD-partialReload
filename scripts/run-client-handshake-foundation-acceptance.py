@@ -165,6 +165,43 @@ def evaluate_quota(attempts: list[dict[str, object]], required_valid_trials: int
             "unauthorized_infrastructure_failures": unauthorized_count}
 
 
+def load_handshake_versions() -> dict[str, object]:
+    task = [str(ROOT / "gradlew.bat"), "--no-daemon", "--console=plain",
+            "reportHandshakeAcceptanceVersions"]
+    subprocess.run(task, cwd=ROOT, check=True, stdout=subprocess.DEVNULL,
+                   stderr=subprocess.PIPE, text=True)
+    path = ROOT / "build" / "reports" / "handshake-acceptance-versions.json"
+    versions = json.loads(path.read_text(encoding="utf-8"))
+    required = ("minecraft_version", "forge_version", "mapping_channel", "mapping_version", "java_version")
+    if any(not str(versions.get(key, "")).strip() for key in required):
+        raise RuntimeError("HANDSHAKE_ACCEPTANCE_VERSIONS_INCOMPLETE")
+    return versions
+
+
+def expected_authorization_scope(client_mod_mode: str, initial_connect_mode: str,
+                                 versions: dict[str, object]) -> infra_policy.InfrastructureAuthorizationScope:
+    return infra_policy.authorization_scope(client_mod_mode, initial_connect_mode, versions)
+
+
+def ready_client_profile(ready_entry: dict[str, object] | None, client_mod_mode: str,
+                         initial_connect_mode: str) -> tuple[dict[str, object] | None, str | None]:
+    if ready_entry is None:
+        return None, None
+    data = fields(ready_entry)
+    partial_loaded = str(data.get("partialReloadLoaded", "")).lower() == "true"
+    helper_loaded = str(data.get("helperLoaded", "")).lower() == "true"
+    expected_profile, expected_main, expected_helper = infra_policy.client_classpath_profile(client_mod_mode)
+    profile = {"client_mod_mode": client_mod_mode,
+               "client_classpath_profile": expected_profile,
+               "client_main_mod_present": partial_loaded,
+               "helper_mod_present": helper_loaded,
+               "initial_connect_mode": initial_connect_mode,
+               "client_launch_target": "forgeclientuserdev"}
+    if partial_loaded != expected_main or helper_loaded != expected_helper:
+        return profile, "CLIENT_PROFILE_MISMATCH"
+    return profile, None
+
+
 def normalize_fingerprint_value(value: object) -> str | bool | None:
     return infra_policy.normalize_fingerprint_value(value)
 
@@ -236,16 +273,23 @@ def preflight_owned_processes(ownership_directory: pathlib.Path) -> dict[str, ob
     return {"status": "passed", "recovered": recovered, "ambiguous": [], "invalid": []}
 
 
-def load_authorized_infrastructure_fingerprints(report_path: pathlib.Path) -> set[str]:
+def load_authorized_infrastructure_baseline(report_path: pathlib.Path,
+                                            expected_client_mod_mode: str | None = None
+                                            ) -> infra_policy.AuthorizedInfrastructureBaseline:
     report = json.loads(report_path.read_text(encoding="utf-8"))
-    valid, error, fingerprints = infra_policy.validate_control_baseline_report(report)
+    valid, error, baseline = infra_policy.load_authorized_infrastructure_baseline(
+        report, str(report_path), expected_client_mod_mode)
     if not valid:
         if error == "NO_INFRASTRUCTURE_FINGERPRINTS":
             raise ValueError("NO_INFRASTRUCTURE_FINGERPRINTS")
         raise ValueError(f"INVALID_INFRASTRUCTURE_AUTHORIZATION_REPORT:{error}")
-    if not fingerprints:
+    if baseline is None or not baseline.fingerprints:
         raise ValueError("NO_INFRASTRUCTURE_FINGERPRINTS")
-    return fingerprints
+    return baseline
+
+
+def load_authorized_infrastructure_fingerprints(report_path: pathlib.Path) -> set[str]:
+    return set(load_authorized_infrastructure_baseline(report_path).fingerprints)
 
 
 def entries_in_window(process: "OwnedProcess | None", start: int, end: int | None,
@@ -410,6 +454,13 @@ def command_fingerprint(command: list[str]) -> str:
     return "UNKNOWN_OWNED_DESCENDANT"
 
 
+def should_track_descendant(command_line: object) -> bool:
+    text = str(command_line or "").lower()
+    if "git fsmonitor--daemon" in text:
+        return False
+    return True
+
+
 def process_creation_time(pid: int) -> str | None:
     try:
         script = f"(Get-CimInstance Win32_Process -Filter 'ProcessId={int(pid)}').CreationDate"
@@ -495,6 +546,8 @@ class OwnedProcess:
         for item in descendants:
             pid = int(item.get("pid", 0) or 0)
             if pid <= 0 or pid in self.owned_identities:
+                continue
+            if not should_track_descendant(item.get("command_line")):
                 continue
             command = [str(item.get("command_line") or "")]
             fingerprint = command_fingerprint(command)
@@ -924,7 +977,8 @@ class Acceptance:
                  server_smoke_only: bool = False, required_valid_trials: int = 0,
                  maximum_launch_attempts: int = 0,
                  authorized_infrastructure_fingerprints: set[str] | None = None,
-                 diagnostic_matrix: bool = False) -> None:
+                 diagnostic_matrix: bool = False,
+                 authorization_scope: infra_policy.InfrastructureAuthorizationScope | None = None) -> None:
         self.run_id = uuid.uuid4().hex
         self.run_root = ACCEPTANCE_RUNS_ROOT / self.run_id
         self.run_root.mkdir(parents=True, exist_ok=True)
@@ -954,6 +1008,7 @@ class Acceptance:
         self.maximum_launch_attempts = maximum_launch_attempts
         self.authorized_infrastructure_fingerprints = authorized_infrastructure_fingerprints or set()
         self.diagnostic_matrix = diagnostic_matrix
+        self.authorization_scope = authorization_scope
         if self.required_valid_trials < 0 or self.maximum_launch_attempts < 0:
             raise ValueError("INVALID_TRIAL_QUOTA")
         if self.required_valid_trials > 0 and self.maximum_launch_attempts < self.required_valid_trials:
@@ -1622,6 +1677,16 @@ class Acceptance:
                     attempts[-1]["attempt_marker_evidence"] = marker_evidence
                     attempts[-1]["attempt_evidence"] = authorization_attempt_evidence(marker_evidence)
                     attempts[-1]["attempt_evidence_schema_version"] = infra_policy.FINGERPRINT_SCHEMA_VERSION
+                    ready_entry = next((entry for entry in marker_evidence.get("client_entries", [])
+                                        if entry.get("marker") == "HANDSHAKE_ACCEPTANCE_CLIENT_READY"), None)
+                    profile, profile_error = ready_client_profile(
+                        ready_entry, self.client_mod_mode, self.initial_connect_mode)
+                    if profile is not None:
+                        attempts[-1]["client_profile"] = profile
+                    if profile_error:
+                        attempts[-1]["status"] = "failed"
+                        attempts[-1]["classification"] = AttemptClassification.HARNESS_FAILURE.value
+                        attempts[-1]["error_code"] = profile_error
                     if attempt_cleanup["status"] != "passed":
                         attempts[-1]["status"] = "failed"
                         attempts[-1]["classification"] = AttemptClassification.HARNESS_FAILURE.value
@@ -1649,6 +1714,7 @@ class Acceptance:
         diagnostic_ok = product == 0 and harness == 0 and len(attempts) == target
         self.scenarios["cold_login"] = {"status": "passed" if (quota["quota_reached"] or (self.diagnostic_matrix and diagnostic_ok)) else "failed",
                                          "client_mod_mode": self.client_mod_mode,
+                                         "authorization_scope": infra_policy.scope_to_dict(self.authorization_scope) if self.authorization_scope else None,
                                          "mode": self.initial_connect_mode,
                                          "attempts": attempts, "attempt_count": len(attempts),
                                          "launch_attempts": len(attempts), "valid_trials": passed_count,
@@ -1737,6 +1803,7 @@ class Acceptance:
                 smoke_report = {"status": "diagnostic_passed", "complete_run": False,
                         "server_mod_mode": self.server_mod_mode,
                         "server_build_mode": self.server_build_mode,
+                        "authorization_scope": infra_policy.scope_to_dict(self.authorization_scope) if self.authorization_scope else None,
                         "server_project_directory": self.server_project_directory,
                         "server_task": self.server_task, "server_booted": True,
                         "rcon_ready": self.rcon is not None,
@@ -1782,10 +1849,12 @@ class Acceptance:
             isolated = bool(self.control_classpath_result and self.control_classpath_result.get("isolated"))
             return {"status": "diagnostic_passed" if cold_passed or diagnostic_ok else "failed", "complete_run": False,
                     "mode": self.initial_connect_mode, "scenarios": self.scenarios,
-                    "server_mod_mode": self.server_mod_mode, "server_task": self.server_task,
+                    "server_mod_mode": self.server_mod_mode, "client_mod_mode": self.client_mod_mode,
+                    "server_task": self.server_task,
                     "server_build_mode": self.server_build_mode,
                     "server_project_directory": self.server_project_directory,
                     "server_main_mod_present": self.server_mod_mode == "with_mod",
+                    "authorization_scope": infra_policy.scope_to_dict(self.authorization_scope) if self.authorization_scope else None,
                     "classpath_isolated": isolated if self.server_mod_mode == "without_mod" else None,
                     "partialreload_markers_seen": any(entry["marker"].startswith("CLIENT_HANDSHAKE_SERVER_") for entry in self.server.entries()) if self.server else False,
                     "partialreload_loaded": ((not isolated) or bool(self.control_classpath_result and self.control_classpath_result.get("partialreload_module_present"))) if self.server_mod_mode == "without_mod" else self.server_mod_mode == "with_mod",
@@ -1806,6 +1875,7 @@ class Acceptance:
                 "server_build_mode": self.server_build_mode,
                 "server_project_directory": self.server_project_directory,
                 "server_main_mod_present": self.server_mod_mode == "with_mod",
+                "authorization_scope": infra_policy.scope_to_dict(self.authorization_scope) if self.authorization_scope else None,
                 "classpath_isolated": isolated if self.server_mod_mode == "without_mod" else None,
                 "partialreload_markers_seen": any(entry["marker"].startswith("CLIENT_HANDSHAKE_SERVER_") for entry in self.server.entries()) if self.server else False,
                 "partialreload_loaded": ((not isolated) or bool(self.control_classpath_result and self.control_classpath_result.get("partialreload_module_present"))) if self.server_mod_mode == "without_mod" else self.server_mod_mode == "with_mod",
@@ -1841,17 +1911,26 @@ def main() -> int:
             args.required_valid_trials > 0 and args.maximum_launch_attempts < args.required_valid_trials):
         parser.error("INVALID_TRIAL_QUOTA")
     LOG_ROOT.mkdir(parents=True, exist_ok=True)
+    versions = load_handshake_versions()
+    execution_scope = expected_authorization_scope(
+        args.client_mod_mode, args.initial_connect_mode.upper(), versions)
     authorized = set()
     if args.authorize_infrastructure_from:
         try:
-            authorized = load_authorized_infrastructure_fingerprints(pathlib.Path(args.authorize_infrastructure_from))
+            baseline = load_authorized_infrastructure_baseline(
+                pathlib.Path(args.authorize_infrastructure_from), args.client_mod_mode)
+            matches, changed = infra_policy.authorization_scope_matches(baseline.scope, execution_scope)
+            if not matches:
+                parser.error("INFRASTRUCTURE_AUTHORIZATION_SCOPE_MISMATCH:" + ",".join(changed))
+            authorized = set(baseline.fingerprints)
         except Exception as exc:
             parser.error(str(exc))
     acceptance = Acceptance(args.initial_connect_mode.upper(), args.cold_login_probes, args.client_mod_mode,
                             args.strict_client_isolation, args.require_attempt_cleanup,
                             args.fresh_server_per_probe, args.cycles, args.server_mod_mode,
                             args.server_smoke_only, args.required_valid_trials,
-                            args.maximum_launch_attempts, authorized, args.diagnostic_matrix)
+                            args.maximum_launch_attempts, authorized, args.diagnostic_matrix,
+                            execution_scope)
     selected = None if not args.scenarios else set(args.scenarios.split(","))
     try:
         if args.full_composite:
@@ -1884,6 +1963,7 @@ def main() -> int:
                   "server_task": acceptance.server_task,
                   "server_project_directory": acceptance.server_project_directory,
                   "server_main_mod_present": acceptance.server_mod_mode == "with_mod",
+                  "authorization_scope": infra_policy.scope_to_dict(acceptance.authorization_scope) if acceptance.authorization_scope else None,
                   "diagnostic_matrix": acceptance.diagnostic_matrix,
                   "bootstrap_completed": False,
                   "error_code": "SERVER_BOOTSTRAP_FAILED",
