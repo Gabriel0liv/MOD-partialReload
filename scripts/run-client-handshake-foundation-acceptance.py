@@ -18,9 +18,11 @@ from enum import Enum
 from minecraft_rcon import RconClient
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-RUN_ROOT = ROOT / "run" / "handshake-acceptance" / uuid.uuid4().hex
+ACCEPTANCE_RUNS_ROOT = ROOT / "run" / "handshake-acceptance"
 REPORT = ROOT / "build" / "reports" / "client-handshake-foundation-acceptance.json"
 LOG_ROOT = ROOT / "build" / "reports" / "client-handshake-foundation-acceptance"
+OWNERSHIP_ROOT = LOG_ROOT / "ownership"
+ACCEPTANCE_LOCK = LOG_ROOT / "acceptance.lock"
 MARKER = re.compile(r"(?P<marker>(?:CLIENT_HANDSHAKE|HANDSHAKE_ACCEPTANCE_CLIENT)_[A-Z_]+)(?:\s+|:|$)(?P<rest>.*)")
 SERVER_MARKERS = {"CLIENT_HANDSHAKE_SERVER_ABSENT", "CLIENT_HANDSHAKE_SERVER_PENDING",
                   "CLIENT_HANDSHAKE_SERVER_COMPATIBLE", "CLIENT_HANDSHAKE_SERVER_INCOMPATIBLE",
@@ -57,6 +59,34 @@ class AttemptEvidence:
     server_disconnected_seen: bool
     player: str | None
     connection: str | None
+
+
+@dataclass(frozen=True)
+class MatrixExpectation:
+    server_mod_mode: str
+    client_mod_mode: str
+
+
+def classify_attempt(evidence: AttemptEvidence, expectation: MatrixExpectation,
+                     cleanup: dict[str, object], diagnostics: dict[str, object]) -> AttemptClassification:
+    if cleanup.get("status") != "passed" or diagnostics.get("channel_rejection_seen") or diagnostics.get("unknown_custom_packet_seen"):
+        return AttemptClassification.HARNESS_FAILURE if cleanup.get("status") != "passed" else AttemptClassification.PRODUCT_FAILURE
+    if expectation.server_mod_mode == "without_mod":
+        if expectation.client_mod_mode == "with_mod":
+            valid = evidence.network_login_seen and bool(diagnostics.get("presence_skipped_seen"))
+        else:
+            valid = evidence.network_login_seen and evidence.player is not None
+    elif expectation.client_mod_mode == "without_mod":
+        valid = evidence.network_login_seen and evidence.server_absent_seen and not evidence.server_pending_seen
+    else:
+        valid = evidence.network_login_seen and evidence.server_pending_seen and evidence.server_compatible_seen
+    if valid:
+        return AttemptClassification.VALID_PASS
+    if evidence.network_login_seen:
+        return AttemptClassification.PRODUCT_FAILURE
+    if evidence.client_ready_seen and evidence.connect_requested_seen and not diagnostics.get("partialreload_marker_seen"):
+        return AttemptClassification.INFRASTRUCTURE_FAILURE
+    return AttemptClassification.HARNESS_FAILURE
 
 
 class AttemptClassification(str, Enum):
@@ -532,6 +562,8 @@ class Acceptance:
                  server_smoke_only: bool = False, required_valid_trials: int = 0,
                  maximum_launch_attempts: int = 0) -> None:
         self.run_id = uuid.uuid4().hex
+        self.run_root = ACCEPTANCE_RUNS_ROOT / self.run_id
+        self.run_root.mkdir(parents=True, exist_ok=True)
         self.run_log_root = LOG_ROOT / self.run_id
         self.server_port, self.rcon_port = free_port(), free_port()
         self.server_directory_name = "server"
@@ -564,6 +596,25 @@ class Acceptance:
         self.failure_capture_errors: list[str] = []
         self.failure_tcp_state: dict[str, object] = {}
         self.failure_process_tree: dict[str, object] = {}
+        self.lock_acquired = False
+
+    def acquire_lock(self) -> None:
+        ACCEPTANCE_LOCK.parent.mkdir(parents=True, exist_ok=True)
+        payload = {"run_id": self.run_id, "harness_pid": os.getpid(), "started_at": time.time()}
+        try:
+            fd = os.open(str(ACCEPTANCE_LOCK), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                json.dump(payload, stream)
+            self.lock_acquired = True
+        except FileExistsError:
+            raise RuntimeError("ACCEPTANCE_ALREADY_RUNNING")
+
+    def release_lock(self) -> None:
+        if self.lock_acquired:
+            try:
+                ACCEPTANCE_LOCK.unlink(missing_ok=True)
+            finally:
+                self.lock_acquired = False
 
     def env(self) -> dict[str, str]:
         result = os.environ.copy()
@@ -590,7 +641,7 @@ class Acceptance:
         return result
 
     def prepare_server(self) -> None:
-        directory = RUN_ROOT / self.server_directory_name
+        directory = self.run_root / self.server_directory_name
         directory.mkdir(parents=True, exist_ok=True)
         (directory / "server.properties").write_text("\n".join([
             "online-mode=false", "enable-rcon=true", "server-ip=127.0.0.1",
@@ -622,7 +673,7 @@ class Acceptance:
         command += [self.server_task]
         server_env = self.env()
         server_env["PARTIALRELOAD_ACCEPTANCE_RUN_ID"] = self.run_id
-        server_env["PARTIALRELOAD_ACCEPTANCE_RUN_DIR"] = str(RUN_ROOT / self.server_directory_name)
+        server_env["PARTIALRELOAD_ACCEPTANCE_RUN_DIR"] = str(self.run_root / self.server_directory_name)
         self.server = OwnedProcess("server", command, server_env, ROOT,
                                    self.run_log_root / "server.stdout.log")
         self.server.start()
@@ -669,7 +720,7 @@ class Acceptance:
     def start_client(self, name: str, username: str, *, with_mod: bool = True,
                      mode: str = "NORMAL") -> OwnedProcess:
         environment = self.env()
-        directory = RUN_ROOT / name
+        directory = self.run_root / name
         if directory.exists():
             shutil.rmtree(directory)
         directory.mkdir(parents=True, exist_ok=True)
@@ -699,7 +750,7 @@ class Acceptance:
 
     def cleanup_attempt(self, client: OwnedProcess, name: str, username: str,
                         entered_server: bool, expect_server_disconnect: bool) -> dict[str, object]:
-        control = RUN_ROOT / name / "control"
+        control = self.run_root / name / "control"
         control.mkdir(parents=True, exist_ok=True)
         client_cursor = client.cursor()
         server_cursor = self.server.cursor()
@@ -768,7 +819,7 @@ class Acceptance:
         client.wait_marker("HANDSHAKE_ACCEPTANCE_CLIENT_READY", 120)
         client_cursor = client.cursor()
         server_cursor = self.server.cursor()
-        control = RUN_ROOT / "compatible-reconnect" / "control"
+        control = self.run_root / "compatible-reconnect" / "control"
         control.mkdir(parents=True, exist_ok=True)
         (control / "connect.request").write_text("connect\n", encoding="utf-8")
         client.wait_marker("HANDSHAKE_ACCEPTANCE_CLIENT_CONNECT_REQUESTED", 60, client_cursor)
@@ -796,7 +847,7 @@ class Acceptance:
     def reconnect(self) -> None:
         client = self.reconnect_client
         old = self.scenarios["compatible"]
-        control = RUN_ROOT / "compatible-reconnect" / "control"
+        control = self.run_root / "compatible-reconnect" / "control"
         control.mkdir(parents=True, exist_ok=True)
         server_cursor = self.server.cursor(); client_cursor = client.cursor()
         (control / "disconnect.request").write_text("disconnect\n", encoding="utf-8")
@@ -840,7 +891,7 @@ class Acceptance:
         client = self.start_client("silent-timeout", "PRSilent", mode="SILENT")
         client.wait_marker("HANDSHAKE_ACCEPTANCE_CLIENT_READY", 120)
         client_cursor = client.cursor(); previous_pending_line = self.server.cursor()
-        control = RUN_ROOT / "silent-timeout" / "control"
+        control = self.run_root / "silent-timeout" / "control"
         control.mkdir(parents=True, exist_ok=True)
         (control / "connect.request").write_text("connect\n", encoding="utf-8")
         client.wait_marker("HANDSHAKE_ACCEPTANCE_CLIENT_CONNECT_REQUESTED", 60, client_cursor)
@@ -865,7 +916,7 @@ class Acceptance:
         client = self.start_client("absent", "PRAbsent", with_mod=False)
         client.wait_marker("HANDSHAKE_ACCEPTANCE_CLIENT_READY", 120)
         client_cursor = client.cursor(); server_cursor = self.server.cursor()
-        control = RUN_ROOT / "absent" / "control"
+        control = self.run_root / "absent" / "control"
         control.mkdir(parents=True, exist_ok=True)
         (control / "connect.request").write_text("connect\n", encoding="utf-8")
         client.wait_marker("HANDSHAKE_ACCEPTANCE_CLIENT_CONNECT_REQUESTED", 60, client_cursor)
@@ -902,7 +953,7 @@ class Acceptance:
         client = self.start_client("server-absent-client-mod", "PRClientModControl", with_mod=True)
         client.wait_marker("HANDSHAKE_ACCEPTANCE_CLIENT_READY", 120)
         cursor = client.cursor()
-        control = RUN_ROOT / "server-absent-client-mod" / "control"
+        control = self.run_root / "server-absent-client-mod" / "control"
         control.mkdir(parents=True, exist_ok=True)
         (control / "connect.request").write_text("connect\n", encoding="utf-8")
         client.wait_marker("HANDSHAKE_ACCEPTANCE_CLIENT_CONNECT_REQUESTED", 60, cursor)
@@ -917,7 +968,7 @@ class Acceptance:
         cycles = self.cycles or 5
         client = self.start_client("absent-reconnect-stress", "PRAbsentStress", with_mod=False)
         client.wait_marker("HANDSHAKE_ACCEPTANCE_CLIENT_READY", 120)
-        control = RUN_ROOT / "absent-reconnect-stress" / "control"
+        control = self.run_root / "absent-reconnect-stress" / "control"
         control.mkdir(parents=True, exist_ok=True)
         connections: list[str] = []
         for cycle in range(cycles):
@@ -987,7 +1038,7 @@ class Acceptance:
                 capture_tcp_state(self.run_log_root, self.server_port, client, self.server,
                                   f"tcp-before-connect-{name}.json")
                 if self.initial_connect_mode == "CONTROL":
-                    control = RUN_ROOT / name / "control"
+                    control = self.run_root / name / "control"
                     control.mkdir(parents=True, exist_ok=True)
                     (control / "connect.request").write_text("connect\n", encoding="utf-8")
                     client.wait_marker("HANDSHAKE_ACCEPTANCE_CLIENT_CONNECT_REQUESTED", 60, client_cursor)
@@ -1097,15 +1148,15 @@ class Acceptance:
             except Exception as exc:
                 errors.append(str(exc))
         try:
-            if RUN_ROOT.exists():
+            if self.run_root.exists():
                 deadline = time.monotonic() + 15
-                while RUN_ROOT.exists() and time.monotonic() < deadline:
+                while self.run_root.exists() and time.monotonic() < deadline:
                     try:
-                        shutil.rmtree(RUN_ROOT)
+                        shutil.rmtree(self.run_root)
                     except OSError as exc:
                         last_error = exc
                         time.sleep(.5)
-                if RUN_ROOT.exists():
+                if self.run_root.exists():
                     errors.append(str(locals().get("last_error", "owned run root remains")))
         except Exception as exc:
             errors.append(str(exc))
@@ -1115,6 +1166,7 @@ class Acceptance:
                                "rcon_port_released": not port_open(self.rcon_port), "errors": errors}
 
     def run(self, selected: set[str] | None = None) -> dict[str, object]:
+        self.acquire_lock()
         self.start_server()
         if self.server_smoke_only:
             smoke_report = None
@@ -1132,6 +1184,7 @@ class Acceptance:
                         "partialreload_loaded": (not isolated) or bool(self.control_classpath_result and self.control_classpath_result.get("partialreload_module_present"))}
             finally:
                 self.cleanup()
+                self.release_lock()
             smoke_report["cleanup"] = self.cleanup_result
             if self.cleanup_result.get("status") != "passed":
                 smoke_report["status"] = "failed"
@@ -1153,6 +1206,7 @@ class Acceptance:
                 if "absent_reconnect_stress" in selected: self.absent_reconnect_stress()
         finally:
             self.cleanup()
+            self.release_lock()
         if cold_mode:
             cold_passed = self.scenarios.get("cold_login", {}).get("status") == "passed"
             return {"status": "diagnostic_passed" if cold_passed else "failed", "complete_run": False,
@@ -1226,6 +1280,7 @@ def main() -> int:
         tcp = acceptance.failure_tcp_state or capture_tcp_state(acceptance.run_log_root, acceptance.server_port,
                                                                  client_process, server_process)
         acceptance.cleanup()
+        acceptance.release_lock()
         report = {"status": "failed", "complete_run": False, "scenarios": acceptance.scenarios,
                   "cleanup": acceptance.cleanup_result, "error": str(exc),
                   "failed_scenario": next((name for name in (selected or []) if name not in acceptance.scenarios), None),
