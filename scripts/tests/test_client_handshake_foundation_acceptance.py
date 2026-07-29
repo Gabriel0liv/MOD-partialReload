@@ -1,4 +1,5 @@
 import importlib.util
+import json
 import pathlib
 import sys
 import unittest
@@ -11,6 +12,7 @@ MODULE = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None
 sys.modules[SPEC.name] = MODULE
 SPEC.loader.exec_module(MODULE)
+import handshake_infrastructure_policy as POLICY
 
 
 def report(status="passed", complete=True, scenarios=None, cleanup="passed"):
@@ -287,12 +289,9 @@ class HandshakeAcceptanceReportTest(unittest.TestCase):
         import tempfile, json
         with tempfile.TemporaryDirectory() as path:
             fp = pathlib.Path(path) / "report.json"
-            fp.write_text(json.dumps({"server_mod_mode": "without_mod", "classpath_isolated": True,
-                                      "partialreload_loaded": False, "cleanup": {"status": "passed"},
-                                      "attempts": [{"classification": "INFRASTRUCTURE_FAILURE",
-                                                    "fingerprint": "x",
-                                                    "fingerprint_quality": "HIGH"}]}))
-            self.assertEqual(MODULE.load_authorized_infrastructure_fingerprints(fp), {"x"})
+            report = full_matrix_report("without_mod", [authorizable_attempt()] + [{"classification": "VALID_PASS"} for _ in range(9)])
+            fp.write_text(json.dumps(report))
+            self.assertEqual(MODULE.load_authorized_infrastructure_fingerprints(fp), POLICY.validate_control_baseline_report(report)[2])
     def test_fingerprint_normalization_removes_ids(self):
         self.assertEqual(MODULE.normalize_fingerprint_value("run=abc12345 pid=12345 C:\\Users\\Sato\\x"),
                          "<path>")
@@ -306,10 +305,198 @@ class HandshakeAcceptanceReportTest(unittest.TestCase):
         script = pathlib.Path(__file__).resolve().parents[1] / "adjudicate-handshake-infrastructure.py"
         spec = importlib.util.spec_from_file_location("adjudicator", script)
         module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
-        report = {"scenarios": {"cold_login": {"attempts": [{"classification": "VALID_PASS"} for _ in range(10)]}}}
+        report = full_matrix_report("without_mod", [{"classification": "VALID_PASS"} for _ in range(10)])
+        target = full_matrix_report("with_mod", [{"classification": "VALID_PASS"} for _ in range(10)])
         result = module.adjudicate({"attempts": [{"classification": "INFRASTRUCTURE_FAILURE",
-                                                  "fingerprint_quality": "INSUFFICIENT"}]}, report, report)
+                                                  "fingerprint_quality": "INSUFFICIENT"}]}, report, target)
         self.assertEqual(result["decision"], "CASE_D_RECONFIRMED")
+    def test_tcp_progress_states_are_medium_not_high(self):
+        for state in ("Established", "SynSent", "SynReceived"):
+            payload = POLICY.fingerprint_payload(dummy_evidence(), complete_diag({"tcp_state_summary": state}))
+            self.assertEqual(POLICY.assess_fingerprint_quality(payload)[0], POLICY.FingerprintQuality.MEDIUM)
+    def test_tcp_terminal_states_can_be_high(self):
+        for state in ("CloseWait", "FinWait1", "Closed"):
+            payload = POLICY.fingerprint_payload(dummy_evidence(), complete_diag({"tcp_state_summary": state}))
+            self.assertEqual(POLICY.assess_fingerprint_quality(payload)[0], POLICY.FingerprintQuality.HIGH)
+    def test_normal_login_handshake_lines_are_not_terminal_errors(self):
+        lines = ["Starting client connection handshake", "Network login completed", "Channel registered"]
+        self.assertIsNone(POLICY.last_error_log_signature(lines))
+    def test_terminal_error_log_patterns_are_strict(self):
+        self.assertIsNotNone(POLICY.last_error_log_signature(["Failed to connect to the server"]))
+        self.assertIsNotNone(POLICY.last_error_log_signature(["java.net.ConnectException: Connection refused"]))
+        self.assertIsNotNone(POLICY.last_error_log_signature(["Internal Exception: io.netty.handler.codec.DecoderException"]))
+    def test_attempt_window_raw_lines_are_isolated(self):
+        process = self.process(["old Unknown custom packet", "current normal", "later rejected partialreload:client_sync"])
+        self.assertEqual(MODULE.raw_lines_in_window(process, 0, 1), ["current normal"])
+        self.assertIsNone(POLICY.last_error_log_signature(MODULE.raw_lines_in_window(process, 0, 1)))
+    def test_loader_rejects_missing_attempt_cleanup(self):
+        attempt = authorizable_attempt(); del attempt["cleanup"]
+        ok, error = POLICY.validate_authorizable_attempt(attempt)[:2]
+        self.assertFalse(ok); self.assertEqual(error, "ATTEMPT_CLEANUP_NOT_PASSED")
+    def test_loader_rejects_failed_attempt_cleanup(self):
+        ok, error = POLICY.validate_authorizable_attempt(authorizable_attempt(cleanup={"status": "failed"}))[:2]
+        self.assertFalse(ok); self.assertEqual(error, "ATTEMPT_CLEANUP_NOT_PASSED")
+    def test_loader_rejects_missing_attempt_evidence(self):
+        attempt = authorizable_attempt(); del attempt["attempt_evidence"]
+        ok, error = POLICY.validate_authorizable_attempt(attempt)
+        self.assertFalse(ok); self.assertEqual(error, "ATTEMPT_EVIDENCE_MISSING")
+    def test_loader_rejects_network_login_true(self):
+        attempt = authorizable_attempt(); attempt["attempt_evidence"]["network_login"] = True
+        ok, error = POLICY.validate_authorizable_attempt(attempt)
+        self.assertFalse(ok); self.assertEqual(error, "NETWORK_LOGIN_TRUE")
+    def test_loader_rejects_product_signals(self):
+        for key in ("partialreload_marker_seen", "channel_rejection_seen", "unknown_custom_packet_seen"):
+            attempt = authorizable_attempt(); attempt["fingerprint_diagnostics"][key] = True
+            ok, error = POLICY.validate_authorizable_attempt(attempt)
+            self.assertFalse(ok); self.assertEqual(error, "PRODUCT_SIGNAL_PRESENT")
+    def test_loader_rejects_fingerprint_integrity_mismatch(self):
+        attempt = authorizable_attempt()
+        payload = json.loads(attempt["fingerprint"]); payload["last_client_screen"] = "OtherScreen"
+        attempt["fingerprint"] = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        ok, error = POLICY.validate_authorizable_attempt(attempt)
+        self.assertFalse(ok); self.assertEqual(error, "FINGERPRINT_INTEGRITY_MISMATCH")
+    def test_loader_rejects_quality_mismatch(self):
+        attempt = authorizable_attempt(); attempt["fingerprint_quality"] = "MEDIUM"
+        ok, error = POLICY.validate_authorizable_attempt(attempt)
+        self.assertFalse(ok); self.assertEqual(error, "FINGERPRINT_INTEGRITY_MISMATCH")
+    def test_loader_rejects_schema_old(self):
+        attempt = authorizable_attempt()
+        payload = json.loads(attempt["fingerprint"]); payload["schema_version"] = 1
+        attempt["fingerprint"] = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        ok, error = POLICY.validate_authorizable_attempt(attempt)
+        self.assertFalse(ok); self.assertEqual(error, "FINGERPRINT_SCHEMA_INVALID")
+    def test_control_report_validation_rejects_partial_matrix(self):
+        report = full_matrix_report("without_mod", [authorizable_attempt()])
+        ok, error, _ = POLICY.validate_control_baseline_report(report)
+        self.assertFalse(ok); self.assertEqual(error, "CONTROL_MATRIX_INCOMPLETE")
+    def test_control_report_validation_rejects_modded_control(self):
+        report = full_matrix_report("with_mod", [authorizable_attempt()] * 10)
+        ok, error, _ = POLICY.validate_control_baseline_report(report)
+        self.assertFalse(ok); self.assertEqual(error, "CONTROL_SERVER_MODE_INVALID")
+    def test_control_report_validation_accepts_complete_high(self):
+        report = full_matrix_report("without_mod", [authorizable_attempt()] + [{"classification": "VALID_PASS", "cleanup": {"status": "passed"}} for _ in range(9)])
+        ok, error, fps = POLICY.validate_control_baseline_report(report)
+        self.assertTrue(ok, error); self.assertEqual(len(fps), 1)
+    def test_adjudicator_current_baseline_case(self):
+        adj = load_adjudicator()
+        control = full_matrix_report("without_mod", [authorizable_attempt()] + [{"classification": "VALID_PASS", "cleanup": {"status": "passed"}} for _ in range(9)])
+        target = full_matrix_report("with_mod", [{"classification": "VALID_PASS", "cleanup": {"status": "passed"}} for _ in range(10)])
+        result = adj.adjudicate({"attempts": [{"classification": "INFRASTRUCTURE_FAILURE", "fingerprint_quality": "INSUFFICIENT"}]}, control, target)
+        self.assertEqual(result["decision"], "CASE_CONTROL_BASELINE_ESTABLISHED")
+        self.assertTrue(result["prospective_quota_allowed"])
+        self.assertFalse(result["historical_failure"]["authorized"])
+    def test_adjudicator_target_product_blocks_baseline(self):
+        adj = load_adjudicator()
+        control = full_matrix_report("without_mod", [authorizable_attempt()] + [{"classification": "VALID_PASS", "cleanup": {"status": "passed"}} for _ in range(9)])
+        target = full_matrix_report("with_mod", [{"classification": "PRODUCT_FAILURE", "cleanup": {"status": "passed"}}] + [{"classification": "VALID_PASS", "cleanup": {"status": "passed"}} for _ in range(9)])
+        self.assertEqual(adj.adjudicate({}, control, target)["decision"], "CASE_INVALID_EVIDENCE")
+    def test_adjudicator_does_not_authorize_target_only_fingerprint(self):
+        adj = load_adjudicator()
+        control = full_matrix_report("without_mod", [{"classification": "VALID_PASS", "cleanup": {"status": "passed"}} for _ in range(10)])
+        target = full_matrix_report("with_mod", [authorizable_attempt()] + [{"classification": "VALID_PASS", "cleanup": {"status": "passed"}} for _ in range(9)])
+        result = adj.adjudicate({}, control, target)
+        self.assertEqual(result["decision"], "CASE_B_PRODUCT_CORRELATED_PRELOGIN_FAILURE")
+        self.assertEqual(result["authorized_fingerprints"], [])
+    def test_loader_rejects_unknown_custom_packet_authorization(self):
+        attempt = authorizable_attempt(); attempt["fingerprint_diagnostics"]["unknown_custom_packet_seen"] = True
+        ok, error = POLICY.validate_authorizable_attempt(attempt)
+        self.assertFalse(ok); self.assertEqual(error, "PRODUCT_SIGNAL_PRESENT")
+    def test_control_report_rejects_matrix_complete_false(self):
+        report = full_matrix_report("without_mod", [authorizable_attempt()] + [{"classification": "VALID_PASS"} for _ in range(9)])
+        report["scenarios"]["cold_login"]["matrix_complete"] = False
+        ok, error, _ = POLICY.validate_control_baseline_report(report)
+        self.assertFalse(ok); self.assertEqual(error, "CONTROL_MATRIX_INCOMPLETE")
+    def test_control_report_rejects_global_cleanup_failure(self):
+        report = full_matrix_report("without_mod", [authorizable_attempt()] + [{"classification": "VALID_PASS"} for _ in range(9)])
+        report["cleanup"]["status"] = "failed"
+        ok, error, _ = POLICY.validate_control_baseline_report(report)
+        self.assertFalse(ok); self.assertEqual(error, "CONTROL_CLEANUP_INVALID")
+    def test_adjudicator_baseline_does_not_mask_c(self):
+        adj = load_adjudicator()
+        control = full_matrix_report("without_mod", [authorizable_attempt()] + [{"classification": "VALID_PASS"} for _ in range(9)])
+        target_attempt = authorizable_attempt()
+        target_attempt["fingerprint_diagnostics"]["disconnect_reason"] = "Connection refused"
+        target_attempt["fingerprint"] = POLICY.canonical_fingerprint(dummy_evidence(), target_attempt["fingerprint_diagnostics"])
+        target_payload = json.loads(target_attempt["fingerprint"])
+        quality, missing = POLICY.assess_fingerprint_quality(target_payload)
+        target_attempt["fingerprint_quality"] = quality.value
+        target_attempt["fingerprint_missing_fields"] = missing
+        target = full_matrix_report("with_mod", [target_attempt] + [{"classification": "VALID_PASS"} for _ in range(9)])
+        self.assertEqual(adj.adjudicate({}, control, target)["decision"], "CASE_C_NON_EQUIVALENT_FAILURES")
+
+
+def dummy_evidence():
+    return type("Evidence", (), {"channel_rejection_seen": False, "unknown_custom_packet_seen": False})()
+
+
+def complete_diag(overrides=None):
+    data = {"last_client_marker": "HANDSHAKE_ACCEPTANCE_CLIENT_DISCONNECTED_SCREEN",
+            "last_meaningful_client_marker": "HANDSHAKE_ACCEPTANCE_CLIENT_DISCONNECTED_SCREEN",
+            "last_client_screen": None,
+            "client_connection_phase": "CONNECTING",
+            "elapsed_connect_seconds": 20,
+            "client_game_process_alive": True,
+            "server_game_process_alive": True,
+            "tcp_state_summary": "NONE",
+            "partialreload_marker_seen": False,
+            "channel_rejection_seen": False,
+            "unknown_custom_packet_seen": False,
+            "player_present_in_rcon": False}
+    if overrides:
+        data.update(overrides)
+    return data
+
+
+def authorizable_attempt(cleanup="DEFAULT"):
+    diagnostics = complete_diag({"last_client_screen": "DisconnectedScreen"})
+    fingerprint = POLICY.canonical_fingerprint(dummy_evidence(), diagnostics)
+    payload = json.loads(fingerprint)
+    quality, missing = POLICY.assess_fingerprint_quality(payload)
+    return {"classification": "INFRASTRUCTURE_FAILURE", "status": "failed",
+            "functional_trial": None,
+            "cleanup": {"status": "passed"} if cleanup == "DEFAULT" else cleanup,
+            "attempt_evidence": {"client_ready": True, "connect_requested": True,
+                                 "network_login": False},
+            "fingerprint_diagnostics": diagnostics,
+            "fingerprint": fingerprint,
+            "fingerprint_quality": quality.value,
+            "fingerprint_missing_fields": missing}
+
+
+def full_matrix_report(server_mode, attempts):
+    infrastructure = sum(item.get("classification") == "INFRASTRUCTURE_FAILURE" for item in attempts)
+    product = sum(item.get("classification") == "PRODUCT_FAILURE" for item in attempts)
+    harness = sum(item.get("classification") == "HARNESS_FAILURE" for item in attempts)
+    valid = sum(item.get("classification") == "VALID_PASS" for item in attempts)
+    for item in attempts:
+        item.setdefault("cleanup", {"status": "passed"})
+    return {"server_mod_mode": server_mode,
+            "server_build_mode": "independent_gradle_build" if server_mode == "without_mod" else "root_gradle_build",
+            "server_main_mod_present": server_mode == "with_mod",
+            "classpath_isolated": True if server_mode == "without_mod" else None,
+            "partialreload_loaded": False if server_mode == "without_mod" else True,
+            "partialreload_markers_seen": False,
+            "diagnostic_matrix": True,
+            "status": "diagnostic_passed",
+            "complete_run": False,
+            "cleanup": {"status": "passed"},
+            "scenarios": {"cold_login": {"matrix_complete": True,
+                                          "launch_attempts": len(attempts),
+                                          "attempt_count": len(attempts),
+                                          "valid_trials": valid,
+                                          "infrastructure_failures": infrastructure,
+                                          "product_failures": product,
+                                          "harness_failures": harness,
+                                          "attempts": attempts}}}
+
+
+def load_adjudicator():
+    script = pathlib.Path(__file__).resolve().parents[1] / "adjudicate-handshake-infrastructure.py"
+    spec = importlib.util.spec_from_file_location("adjudicator", script)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
 
 
 if __name__ == "__main__":

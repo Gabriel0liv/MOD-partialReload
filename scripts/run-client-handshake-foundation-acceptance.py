@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 
 from minecraft_rcon import RconClient
+import handshake_infrastructure_policy as infra_policy
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 ACCEPTANCE_RUNS_ROOT = ROOT / "run" / "handshake-acceptance"
@@ -120,10 +121,7 @@ class AttemptClassification(str, Enum):
     HARNESS_FAILURE = "HARNESS_FAILURE"
 
 
-class FingerprintQuality(str, Enum):
-    HIGH = "HIGH"
-    MEDIUM = "MEDIUM"
-    INSUFFICIENT = "INSUFFICIENT"
+FingerprintQuality = infra_policy.FingerprintQuality
 
 
 def classify_control_classpath_entry(entry: str, repository_root: pathlib.Path) -> str | None:
@@ -168,117 +166,32 @@ def evaluate_quota(attempts: list[dict[str, object]], required_valid_trials: int
 
 
 def normalize_fingerprint_value(value: object) -> str | bool | None:
-    if value is None:
-        return None
-    if isinstance(value, bool):
-        return value
-    text = str(value)
-    text = re.sub(r"\[[^\]]+\]\s*", "", text)
-    text = re.sub(r"\b(?:run|attempt|pid|port|player|connection|uuid|username)=[^\s]+", "", text, flags=re.I)
-    text = re.sub(r"[A-Fa-f0-9]{8,}(?:-[A-Fa-f0-9]{4,})*", "<id>", text)
-    text = re.sub(r"0x[A-Fa-f0-9]+", "<addr>", text)
-    text = re.sub(r"\b\d{2,}\b", "<n>", text)
-    text = re.sub(r"[A-Za-z]:\\[^\s]+", "<path>", text)
-    return re.sub(r"\s+", " ", text).strip()
+    return infra_policy.normalize_fingerprint_value(value)
 
 
 def elapsed_connect_bucket(elapsed_seconds: object) -> str | None:
-    if elapsed_seconds is None:
-        return None
-    try:
-        elapsed = float(elapsed_seconds)
-    except (TypeError, ValueError):
-        return None
-    if elapsed < 5:
-        return "LT_5_SECONDS"
-    if elapsed < 15:
-        return "5_TO_15_SECONDS"
-    if elapsed < 30:
-        return "15_TO_30_SECONDS"
-    if elapsed < 60:
-        return "30_TO_60_SECONDS"
-    return "GT_60_SECONDS"
+    return infra_policy.elapsed_connect_bucket(elapsed_seconds)
 
 
 def tcp_state_summary(tcp: dict[str, object] | None) -> str | None:
-    if tcp is None:
-        return None
-    states = set()
-    for entry in tcp.get("entries", []):
-        if not isinstance(entry, dict):
-            continue
-        state = str(entry.get("State") or entry.get("state") or "").upper()
-        if state in {"LISTEN", "TIME_WAIT", ""}:
-            continue
-        states.add(state)
-    return ",".join(sorted(states)) if states else "NONE"
+    return infra_policy.tcp_state_summary(tcp)
 
 
 def last_relevant_log_signature(lines: list[str]) -> str | None:
-    keywords = re.compile(r"Failed|Timed out|Disconnected|Connection|Exception|Channel|Handshake|Login", re.I)
-    selected = [normalize_fingerprint_value(line) for line in lines if keywords.search(line)]
-    selected = [str(line) for line in selected if line]
-    return " | ".join(selected[-5:]) if selected else None
+    return infra_policy.last_error_log_signature(lines)
 
 
 def fingerprint_payload(evidence: AttemptEvidence, diagnostics: dict[str, object]) -> dict[str, object]:
-    last_client_marker = diagnostics.get("last_client_marker") or diagnostics.get("last_marker")
-    meaningful = diagnostics.get("last_meaningful_client_marker") or last_client_marker
-    if meaningful in IGNORED_TERMINAL_MARKERS:
-        meaningful = None
-    return {
-        "last_client_marker": normalize_fingerprint_value(last_client_marker),
-        "last_meaningful_client_marker": normalize_fingerprint_value(meaningful),
-        "last_server_marker": normalize_fingerprint_value(diagnostics.get("last_server_marker")),
-        "last_client_screen": normalize_fingerprint_value(diagnostics.get("screen") or diagnostics.get("last_client_screen")),
-        "disconnect_reason": normalize_fingerprint_value(diagnostics.get("disconnect_reason") or diagnostics.get("disconnected_reason")),
-        "client_connection_phase": diagnostics.get("client_connection_phase") or "UNKNOWN",
-        "server_login_timeout_seen": bool(diagnostics.get("server_login_timeout_seen")),
-        "server_player_join_seen": bool(diagnostics.get("server_player_join_seen")),
-        "player_present_in_rcon": bool(diagnostics.get("player_present_in_rcon")),
-        "tcp_state_summary": diagnostics.get("tcp_state_summary"),
-        "client_game_process_alive": diagnostics.get("client_game_process_alive"),
-        "server_game_process_alive": diagnostics.get("server_game_process_alive"),
-        "elapsed_connect_bucket": elapsed_connect_bucket(diagnostics.get("elapsed_connect_seconds")),
-        "last_client_log_signature": normalize_fingerprint_value(diagnostics.get("last_client_log_signature")),
-        "last_server_log_signature": normalize_fingerprint_value(diagnostics.get("last_server_log_signature")),
-        "channel_rejection_seen": bool(evidence.channel_rejection_seen or diagnostics.get("channel_rejection_seen")),
-        "unknown_custom_packet_seen": bool(evidence.unknown_custom_packet_seen or diagnostics.get("unknown_custom_packet_seen")),
-        "partialreload_marker_seen": bool(diagnostics.get("partialreload_marker_seen")),
-    }
+    return infra_policy.fingerprint_payload(evidence, diagnostics)
 
 
 def assess_fingerprint_quality(payload: dict[str, object]) -> tuple[FingerprintQuality, list[str]]:
-    missing: list[str] = []
-    if payload.get("client_connection_phase") in {None, "UNKNOWN"}:
-        missing.append("client_connection_phase")
-    if payload.get("elapsed_connect_bucket") is None:
-        missing.append("elapsed_connect_bucket")
-    if payload.get("client_game_process_alive") is None or payload.get("server_game_process_alive") is None:
-        missing.append("process_state")
-    if payload.get("tcp_state_summary") is None and payload.get("last_client_screen") is None:
-        missing.append("tcp_or_screen")
-    if payload.get("last_meaningful_client_marker") is None:
-        missing.append("last_meaningful_client_marker")
-    terminal = bool(
-        payload.get("disconnect_reason")
-        or payload.get("server_login_timeout_seen")
-        or payload.get("last_client_screen") in {"DisconnectedScreen", "ModMismatchDisconnectedScreen"}
-        or payload.get("tcp_state_summary") not in {None, "NONE"}
-        or payload.get("client_game_process_alive") is False
-        or payload.get("last_client_log_signature")
-        or payload.get("last_server_log_signature")
-    )
-    if not missing and terminal:
-        return FingerprintQuality.HIGH, []
-    if payload.get("client_connection_phase") not in {None, "UNKNOWN"} and payload.get("client_game_process_alive") is not None:
-        return FingerprintQuality.MEDIUM, missing
-    return FingerprintQuality.INSUFFICIENT, missing
+    return infra_policy.assess_fingerprint_quality(payload)
 
 
 def infrastructure_fingerprint(evidence: AttemptEvidence, diagnostics: dict[str, object]) -> str:
     """Canonical, redacted fingerprint for a pre-login infrastructure failure."""
-    return json.dumps(fingerprint_payload(evidence, diagnostics), sort_keys=True, separators=(",", ":"))
+    return infra_policy.canonical_fingerprint(evidence, diagnostics)
 
 
 def infrastructure_fingerprint_quality(evidence: AttemptEvidence, diagnostics: dict[str, object]) -> tuple[FingerprintQuality, list[str]]:
@@ -325,20 +238,11 @@ def preflight_owned_processes(ownership_directory: pathlib.Path) -> dict[str, ob
 
 def load_authorized_infrastructure_fingerprints(report_path: pathlib.Path) -> set[str]:
     report = json.loads(report_path.read_text(encoding="utf-8"))
-    if report.get("server_mod_mode") != "without_mod" or report.get("classpath_isolated") is not True \
-            or report.get("partialreload_loaded") is not False or report.get("cleanup", {}).get("status") != "passed":
-        raise ValueError("INVALID_INFRASTRUCTURE_AUTHORIZATION_REPORT")
-    attempts = report.get("attempts") or report.get("scenarios", {}).get("cold_login", {}).get("attempts", [])
-    fingerprints: set[str] = set()
-    for item in attempts:
-        classification = item.get("classification")
-        if classification == AttemptClassification.PRODUCT_FAILURE.value or classification == AttemptClassification.HARNESS_FAILURE.value:
-            raise ValueError("INVALID_INFRASTRUCTURE_AUTHORIZATION_REPORT")
-        if classification == AttemptClassification.INFRASTRUCTURE_FAILURE.value:
-            fingerprint = item.get("fingerprint")
-            if not fingerprint or item.get("fingerprint_quality") != FingerprintQuality.HIGH.value:
-                raise ValueError("INVALID_INFRASTRUCTURE_AUTHORIZATION_REPORT")
-            fingerprints.add(str(fingerprint))
+    valid, error, fingerprints = infra_policy.validate_control_baseline_report(report)
+    if not valid:
+        if error == "NO_INFRASTRUCTURE_FINGERPRINTS":
+            raise ValueError("NO_INFRASTRUCTURE_FINGERPRINTS")
+        raise ValueError(f"INVALID_INFRASTRUCTURE_AUTHORIZATION_REPORT:{error}")
     if not fingerprints:
         raise ValueError("NO_INFRASTRUCTURE_FINGERPRINTS")
     return fingerprints
@@ -353,6 +257,13 @@ def entries_in_window(process: "OwnedProcess | None", start: int, end: int | Non
             if start < int(entry["line"]) <= upper
             and (run_id is None or fields(entry).get("run") == run_id)
             and (attempt_id is None or fields(entry).get("attempt") == attempt_id)]
+
+
+def raw_lines_in_window(process: "OwnedProcess | None", start_line: int, end_line: int | None) -> list[str]:
+    if process is None:
+        return []
+    upper = len(process.lines) - 1 if end_line is None else min(end_line, len(process.lines) - 1)
+    return [line for index, line in enumerate(process.lines) if start_line < index <= upper]
 
 
 def attempt_marker_evidence(server: "OwnedProcess | None", client: "OwnedProcess | None",
@@ -749,6 +660,7 @@ def client_connection_phase(evidence: AttemptEvidence, entries: list[dict[str, o
 
 def collect_infrastructure_diagnostics(server: "OwnedProcess | None", client: "OwnedProcess | None",
                                        evidence: AttemptEvidence, marker_window: dict[str, object],
+                                       window: AttemptWindow,
                                        tcp: dict[str, object], elapsed_seconds: float | None,
                                        username: str, rcon: RconClient | None) -> dict[str, object]:
     client_entries = list(marker_window.get("client_entries", []))
@@ -775,8 +687,8 @@ def collect_infrastructure_diagnostics(server: "OwnedProcess | None", client: "O
             player_present = username in rcon.command("list")
         except Exception:
             player_present = False
-    client_lines = [] if client is None else client.lines
-    server_lines = [] if server is None else server.lines
+    client_lines = raw_lines_in_window(client, window.client_start_line, window.client_end_line)
+    server_lines = raw_lines_in_window(server, window.server_start_line, window.server_end_line)
     return {
         "last_client_marker": last_client["marker"] if last_client else None,
         "last_meaningful_client_marker": last_meaningful["marker"] if last_meaningful else None,
@@ -791,8 +703,8 @@ def collect_infrastructure_diagnostics(server: "OwnedProcess | None", client: "O
         "client_game_process_alive": process_alive(client_summary.get("game_pid") or (client.process.pid if client and client.process else -1)),
         "server_game_process_alive": process_alive(server_summary.get("game_pid") or (server.process.pid if server and server.process else -1)),
         "elapsed_connect_seconds": elapsed_seconds,
-        "last_client_log_signature": last_relevant_log_signature(client_lines),
-        "last_server_log_signature": last_relevant_log_signature(server_lines),
+        "last_client_error_signature": infra_policy.last_error_log_signature(client_lines),
+        "last_server_error_signature": infra_policy.last_error_log_signature(server_lines),
         "partialreload_marker_seen": any(str(item["marker"]).startswith("CLIENT_HANDSHAKE_") for item in server_entries),
         "channel_rejection_seen": any("rejected" in line.lower() and "partialreload:client_sync" in line.lower()
                                       for line in client_lines + server_lines),
@@ -1199,17 +1111,20 @@ class Acceptance:
         return process
 
     def cleanup_attempt(self, client: OwnedProcess, name: str, username: str,
-                        entered_server: bool, expect_server_disconnect: bool) -> dict[str, object]:
+                        entered_server: bool, expect_server_disconnect: bool,
+                        expect_exit_request: bool = True) -> dict[str, object]:
         control = self.run_root / name / "control"
         control.mkdir(parents=True, exist_ok=True)
         client_cursor = client.cursor()
         server_cursor = self.server.cursor()
         (control / "exit.request").write_text("exit\n", encoding="utf-8")
-        exit_seen = True
-        try:
-            client.wait_marker("HANDSHAKE_ACCEPTANCE_CLIENT_EXIT_REQUESTED", 20, client_cursor)
-        except Exception:
-            exit_seen = False
+        exit_seen = not expect_exit_request
+        if expect_exit_request:
+            try:
+                client.wait_marker("HANDSHAKE_ACCEPTANCE_CLIENT_EXIT_REQUESTED", 20, client_cursor)
+                exit_seen = True
+            except Exception:
+                exit_seen = False
         logout_seen = not entered_server
         server_disconnected_seen = not expect_server_disconnect
         if entered_server:
@@ -1625,7 +1540,7 @@ class Acceptance:
                     attempts[-1]["login_diagnostics"] = login_diagnostics(self.server, client)
                     window_evidence = attempt_marker_evidence(self.server, client, window, self.run_id, self.attempt_ids.get(name, ""))
                     fingerprint_diagnostics = collect_infrastructure_diagnostics(
-                        self.server, client, evidence, window_evidence, pre_cleanup_tcp,
+                        self.server, client, evidence, window_evidence, window, pre_cleanup_tcp,
                         (time.monotonic() - connect_started_at) if connect_started_at is not None else None,
                         username, self.rcon)
                     attempts[-1]["fingerprint"] = infrastructure_fingerprint(evidence, fingerprint_diagnostics)
@@ -1651,7 +1566,8 @@ class Acceptance:
                 entered = evidence.network_login_seen
                 attempt_cleanup = self.cleanup_attempt(
                     client, name, username, entered,
-                    entered and self.server_mod_mode == "with_mod")
+                    entered and self.server_mod_mode == "with_mod",
+                    evidence.client_ready_seen)
                 if attempts:
                     attempts[-1]["cleanup"] = attempt_cleanup
                     final_window = AttemptWindow(window.server_start_line, window.client_start_line,

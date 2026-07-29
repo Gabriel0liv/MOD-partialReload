@@ -1,19 +1,24 @@
-"""Adjudicate 4F-A pre-login infrastructure failures after Case D requalification."""
+"""Adjudicate 4F-A pre-login infrastructure failures using schema-2 evidence."""
 from __future__ import annotations
 
 import argparse
 import json
 import pathlib
+import sys
 from collections import Counter
+
+import handshake_infrastructure_policy as policy
+
+
+def cold_scenario(report: dict[str, object]) -> dict[str, object]:
+    scenarios = report.get("scenarios", {})
+    cold = scenarios.get("cold_login", {}) if isinstance(scenarios, dict) else {}
+    return cold if isinstance(cold, dict) else {}
 
 
 def cold_attempts(report: dict[str, object]) -> list[dict[str, object]]:
-    scenarios = report.get("scenarios", {})
-    if isinstance(scenarios, dict):
-        cold = scenarios.get("cold_login", {})
-        if isinstance(cold, dict) and isinstance(cold.get("attempts"), list):
-            return list(cold["attempts"])
-    return list(report.get("attempts", [])) if isinstance(report.get("attempts"), list) else []
+    attempts = cold_scenario(report).get("attempts", [])
+    return list(attempts) if isinstance(attempts, list) else []
 
 
 def summarize(report: dict[str, object]) -> dict[str, object]:
@@ -34,88 +39,84 @@ def all_cleanups_passed(report: dict[str, object]) -> bool:
 
 
 def high_fingerprints(report: dict[str, object]) -> set[str]:
-    result: set[str] = set()
-    for item in cold_attempts(report):
-        if item.get("classification") != "INFRASTRUCTURE_FAILURE":
-            continue
-        if item.get("fingerprint_quality") != "HIGH" or not item.get("fingerprint"):
-            continue
-        diagnostics = item.get("fingerprint_diagnostics") if isinstance(item.get("fingerprint_diagnostics"), dict) else {}
-        if ((item.get("cleanup") or {}).get("status") == "passed"
-                and diagnostics.get("partialreload_marker_seen") is False
-                and diagnostics.get("channel_rejection_seen") is False
-                and diagnostics.get("unknown_custom_packet_seen") is False):
-            result.add(str(item.get("fingerprint")))
-    return result
+    return {str(item.get("fingerprint")) for item in cold_attempts(report)
+            if policy.validate_authorizable_attempt(item)[0]}
 
 
-def non_high_infrastructure(report: dict[str, object]) -> bool:
-    return any(item.get("classification") == "INFRASTRUCTURE_FAILURE"
-               and item.get("fingerprint_quality") != "HIGH"
-               for item in cold_attempts(report))
+def validate_target_report(report: dict[str, object]) -> tuple[bool, str | None]:
+    cold = cold_scenario(report)
+    attempts = cold_attempts(report)
+    if report.get("server_mod_mode") != "with_mod" or report.get("server_main_mod_present") is not True:
+        return False, "TARGET_SERVER_MODE_INVALID"
+    if report.get("diagnostic_matrix") is not True or report.get("cleanup", {}).get("status") != "passed":
+        return False, "TARGET_METADATA_INVALID"
+    if cold.get("matrix_complete") is not True or cold.get("launch_attempts") != 10 or len(attempts) != 10:
+        return False, "TARGET_MATRIX_INCOMPLETE"
+    if cold.get("product_failures") != 0 or cold.get("harness_failures") != 0:
+        return False, "TARGET_PRODUCT_OR_HARNESS_FAILURE"
+    if not all_cleanups_passed(report):
+        return False, "TARGET_CLEANUP_FAILED"
+    return True, None
+
+
+def historical_failure(quota: dict[str, object]) -> dict[str, object]:
+    failed = next((item for item in cold_attempts(quota)
+                   if item.get("classification") == "INFRASTRUCTURE_FAILURE"), {})
+    quality = failed.get("fingerprint_quality") or "INSUFFICIENT"
+    return {"fingerprint_quality": quality, "explained": False, "authorized": False}
 
 
 def adjudicate(quota: dict[str, object], control: dict[str, object], target: dict[str, object]) -> dict[str, object]:
-    quota_attempts = cold_attempts(quota)
-    failed_quota = next((item for item in quota_attempts
-                         if item.get("classification") == "INFRASTRUCTURE_FAILURE"), {})
+    control_valid, control_error, control_fingerprints = policy.validate_control_baseline_report(control)
+    target_valid, target_error = validate_target_report(target)
     control_summary = summarize(control)
     target_summary = summarize(target)
-    control_high = high_fingerprints(control)
     target_high = high_fingerprints(target)
-    failed_quota_quality = failed_quota.get("fingerprint_quality") or "INSUFFICIENT"
-    quota_high = {str(failed_quota.get("fingerprint"))} if failed_quota_quality == "HIGH" and failed_quota.get("fingerprint") else set()
+    history = historical_failure(quota)
+    errors = {}
+    if not control_valid:
+        errors["control"] = control_error
+    if not target_valid:
+        errors["target"] = target_error
+    decision = "CASE_INVALID_EVIDENCE" if errors else "CASE_UNRESOLVED_INSUFFICIENT_DIAGNOSTICS"
     authorized: set[str] = set()
-    control_isolated = control.get("server_mod_mode") == "without_mod" and control.get("classpath_isolated") is True and control.get("partialreload_loaded") is False
-    control_baseline_established = bool(
-        control_high
-        and control_summary["product"] == 0
-        and control_summary["harness"] == 0
-        and all_cleanups_passed(control)
-        and control_isolated
-        and target_summary["product"] == 0
-        and target_summary["harness"] == 0
-        and all_cleanups_passed(target)
-    )
-    if control_baseline_established:
-        decision = "CASE_CONTROL_BASELINE_ESTABLISHED"
-        authorized = control_high
-    elif control_summary["valid"] == 10 and control_summary["infrastructure"] == 0 and target_summary["valid"] == 10 and target_summary["infrastructure"] == 0:
-        decision = "CASE_D_RECONFIRMED"
-    elif control_high & target_high:
-        decision = "CASE_A_LATE_FINGERPRINT_CONFIRMED"
-        authorized = control_high & target_high
-    elif control_high & quota_high:
-        decision = "CASE_A_LATE_FINGERPRINT_CONFIRMED"
-        authorized = control_high & quota_high
-    elif control_summary["valid"] == 10 and control_summary["infrastructure"] == 0 and target_high:
-        decision = "CASE_B_PRODUCT_CORRELATED_PRELOGIN_FAILURE"
-    elif control_high and target_high and not (control_high & target_high):
-        decision = "CASE_C_NON_EQUIVALENT_FAILURES"
-    elif non_high_infrastructure(control) or non_high_infrastructure(target) or failed_quota.get("fingerprint_quality") in {"MEDIUM", "INSUFFICIENT", None}:
-        decision = "CASE_UNRESOLVED_INSUFFICIENT_DIAGNOSTICS"
-    else:
-        decision = "CASE_UNRESOLVED_INSUFFICIENT_DIAGNOSTICS"
-    historical_explained = bool(failed_quota_quality == "HIGH" and quota_high and (quota_high & (control_high | target_high)))
+    if not errors:
+        if control_summary["valid"] == 10 and control_summary["infrastructure"] == 0 and target_summary["valid"] == 10 and target_summary["infrastructure"] == 0:
+            decision = "CASE_D_RECONFIRMED"
+        elif control_fingerprints & target_high:
+            decision = "CASE_A_LATE_FINGERPRINT_CONFIRMED"
+            authorized = control_fingerprints & target_high
+        elif control_summary["valid"] == 10 and control_summary["infrastructure"] == 0 and target_high:
+            decision = "CASE_B_PRODUCT_CORRELATED_PRELOGIN_FAILURE"
+        elif control_fingerprints and target_high and not (control_fingerprints & target_high):
+            decision = "CASE_C_NON_EQUIVALENT_FAILURES"
+        elif control_fingerprints and target_summary["valid"] == 10 and target_summary["infrastructure"] == 0:
+            decision = "CASE_CONTROL_BASELINE_ESTABLISHED"
+            authorized = control_fingerprints
     return {
+        "policy": {
+            "fingerprint_schema_version": policy.FINGERPRINT_SCHEMA_VERSION,
+            "terminal_tcp_states": sorted(policy.TCP_TERMINAL_STATES),
+            "progress_tcp_states": sorted(policy.TCP_PROGRESS_STATES),
+        },
         "previous_case": "D",
         "decision": decision,
-        "historical_failure": {
-            "fingerprint_quality": failed_quota_quality,
-            "explained": historical_explained,
-            "authorized": False,
-        },
+        "historical_failure": history,
         "control_baseline": {
-            "established": control_baseline_established,
+            "valid_report": control_valid,
+            "established": decision == "CASE_CONTROL_BASELINE_ESTABLISHED",
             **control_summary,
+            "authorized_attempts": len(control_fingerprints),
             "all_cleanups_passed": all_cleanups_passed(control),
         },
         "target_requalification": {
+            "valid_report": target_valid,
             **target_summary,
             "all_cleanups_passed": all_cleanups_passed(target),
         },
-        "prospective_quota_allowed": decision in {"CASE_CONTROL_BASELINE_ESTABLISHED", "CASE_A_LATE_FINGERPRINT_CONFIRMED"},
+        "prospective_quota_allowed": decision in {"CASE_D_RECONFIRMED", "CASE_CONTROL_BASELINE_ESTABLISHED", "CASE_A_LATE_FINGERPRINT_CONFIRMED"},
         "authorized_fingerprints": sorted(authorized),
+        "errors": errors,
     }
 
 
@@ -133,7 +134,7 @@ def main() -> int:
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(result, indent=2), encoding="utf-8")
     print(json.dumps(result, indent=2))
-    return 0
+    return 1 if result["decision"] == "CASE_INVALID_EVIDENCE" else 0
 
 
 if __name__ == "__main__":
