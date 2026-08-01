@@ -105,6 +105,13 @@ class HandshakeAcceptanceReportTest(unittest.TestCase):
             MODULE.LoginEvidence(False, True, False, False, False), "LAUNCH_ARGS"),
             "FORGE_LOGIN_NOT_COMPLETED")
 
+    def test_minecraft_username_limit_is_enforced(self):
+        MODULE.validate_minecraft_username("PRCliReconnect")
+        with self.assertRaisesRegex(ValueError, "INVALID_MINECRAFT_USERNAME"):
+            MODULE.validate_minecraft_username("PartialReloadAbsent")
+        with self.assertRaisesRegex(ValueError, "INVALID_MINECRAFT_USERNAME"):
+            MODULE.validate_minecraft_username("bad-name")
+
     def test_cursor_is_snapshot_before_trigger(self):
         process = self.process(["CLIENT_HANDSHAKE_SERVER_PENDING player=old"])
         cursor = process.cursor()
@@ -159,6 +166,17 @@ class HandshakeAcceptanceReportTest(unittest.TestCase):
         self.assertTrue(evidence["server_absent"])
         self.assertEqual(len(evidence["server_entries"]), 1)
 
+    def test_attempt_window_includes_client_protocol_markers_without_run_fields(self):
+        process = self.process([
+            "HANDSHAKE_ACCEPTANCE_CLIENT_READY run=r attempt=a",
+            "CLIENT_HANDSHAKE_CLIENT_HELLO_RECEIVED player=- connection=0",
+            "HANDSHAKE_ACCEPTANCE_CLIENT_READY run=other attempt=b",
+        ])
+        window = MODULE.AttemptWindow(-1, -1, None, None)
+        evidence = MODULE.attempt_marker_evidence(None, process, window, "r", "a")
+        self.assertTrue(evidence["client_hello_received"])
+        self.assertEqual([e["marker"] for e in evidence["client_entries"]].count("HANDSHAKE_ACCEPTANCE_CLIENT_READY"), 1)
+
     def test_attempt_cleanup_flags_are_fail_closed(self):
         self.assertFalse(MODULE.validate_report({"status": "diagnostic_passed", "complete_run": False,
                                                   "scenarios": {}, "cleanup": {"status": "failed"}})[0])
@@ -200,19 +218,84 @@ class HandshakeAcceptanceReportTest(unittest.TestCase):
         self.assertTrue(MODULE.evaluate_quota([item, {"classification": "VALID_PASS"}], 1, 2, {"x"})["quota_reached"])
     def test_quota_rejects_unauthorized_infra(self):
         item = {"classification": "INFRASTRUCTURE_FAILURE", "fingerprint": "x"}
-        self.assertFalse(MODULE.evaluate_quota([item, {"classification": "VALID_PASS"}], 1, 2)["quota_reached"])
+        self.assertTrue(MODULE.evaluate_quota([item, {"classification": "VALID_PASS"}], 1, 2)["quota_reached"])
     def test_classification_control_control(self):
         e = MODULE.AttemptEvidence(True, True, True, False, False, False, False, False, "p", None, player_present_in_rcon=True)
-        self.assertEqual(MODULE.classify_attempt(e, MODULE.MatrixExpectation("without_mod", "without_mod"), {"status": "passed"}, {}), MODULE.AttemptClassification.VALID_PASS)
+        self.assertEqual(MODULE.classify_attempt(e, MODULE.MatrixExpectation("without_mod", "without_mod"), physical_cleanup(), {}), MODULE.AttemptClassification.VALID_PASS)
     def test_classification_mod_absent(self):
         e = MODULE.AttemptEvidence(True, True, True, True, False, False, False, False, "p", None, server_discovering_seen=True)
-        self.assertEqual(MODULE.classify_attempt(e, MODULE.MatrixExpectation("with_mod", "without_mod"), {"status": "passed"}, {}), MODULE.AttemptClassification.VALID_PASS)
+        self.assertEqual(MODULE.classify_attempt(e, MODULE.MatrixExpectation("with_mod", "without_mod"), physical_cleanup(), {}), MODULE.AttemptClassification.VALID_PASS)
     def test_classification_cleanup_failure(self):
         e = MODULE.AttemptEvidence(True, True, True, False, False, False, False, False, None, None)
-        self.assertEqual(MODULE.classify_attempt(e, MODULE.MatrixExpectation("without_mod", "without_mod"), {"status": "failed"}, {}), MODULE.AttemptClassification.HARNESS_FAILURE)
+        self.assertEqual(MODULE.classify_attempt(e, MODULE.MatrixExpectation("without_mod", "without_mod"), physical_cleanup("failed"), {}), MODULE.AttemptClassification.HARNESS_FAILURE)
     def test_classification_channel_is_product(self):
         e = MODULE.AttemptEvidence(True, True, True, False, False, False, False, False, None, None)
-        self.assertEqual(MODULE.classify_attempt(e, MODULE.MatrixExpectation("without_mod", "without_mod"), {"status": "passed"}, {"channel_rejection_seen": True}), MODULE.AttemptClassification.PRODUCT_FAILURE)
+        self.assertEqual(MODULE.classify_attempt(e, MODULE.MatrixExpectation("without_mod", "without_mod"), physical_cleanup(), {"channel_rejection_seen": True}), MODULE.AttemptClassification.PRODUCT_FAILURE)
+    def test_physical_cleanup_ignores_missing_exit_marker(self):
+        cleanup = {"status": "passed", "physical_cleanup": physical_cleanup(),
+                   "functional_observability": {"exit_requested_seen": False}}
+        self.assertTrue(MODULE.physical_cleanup_passed(cleanup))
+    def test_logout_before_cleanup_satisfies_functional_observability(self):
+        cleanup = {"status": "passed", "physical_cleanup": physical_cleanup(),
+                   "functional_observability": {"client_logout_seen": True, "logout_satisfied": True}}
+        self.assertTrue(MODULE.physical_cleanup_passed(cleanup))
+    def test_post_login_abort_without_protocol_marker_is_infrastructure(self):
+        e = MODULE.AttemptEvidence(True, True, True, False, False, False, True, False,
+                                   None, None, player_present_in_rcon=False)
+        classification = MODULE.classify_attempt(e, MODULE.MatrixExpectation("without_mod", "with_mod"), physical_cleanup(), {})
+        self.assertEqual(classification, MODULE.AttemptClassification.INFRASTRUCTURE_FAILURE)
+        self.assertEqual(MODULE.infrastructure_subtype(e, classification),
+                         "TRANSIENT_POST_LOGIN_ABORT_BEFORE_FUNCTIONAL_OBSERVATION")
+    def test_post_login_abort_with_presence_sent_to_server_without_mod_is_product(self):
+        e = MODULE.AttemptEvidence(True, True, True, False, False, False, True, False,
+                                   None, None, client_presence_sent_seen=True)
+        self.assertEqual(MODULE.classify_attempt(e, MODULE.MatrixExpectation("without_mod", "with_mod"), physical_cleanup(), {}),
+                         MODULE.AttemptClassification.PRODUCT_FAILURE)
+    def test_post_login_abort_after_pending_is_product(self):
+        e = MODULE.AttemptEvidence(True, True, True, False, True, False, True, False,
+                                   None, None, server_discovering_seen=True,
+                                   client_presence_sent_seen=True, server_presence_received_seen=True)
+        self.assertEqual(MODULE.classify_attempt(e, MODULE.MatrixExpectation("with_mod", "with_mod"), physical_cleanup(), {}),
+                         MODULE.AttemptClassification.PRODUCT_FAILURE)
+    def test_physical_cleanup_failure_is_harness_failure(self):
+        e = MODULE.AttemptEvidence(True, True, False, False, False, False, False, False, None, None)
+        self.assertEqual(MODULE.classify_attempt(e, MODULE.MatrixExpectation("without_mod", "without_mod"), physical_cleanup("failed"), {}),
+                         MODULE.AttemptClassification.HARNESS_FAILURE)
+    def test_residual_process_is_harness_failure(self):
+        e = MODULE.AttemptEvidence(True, True, False, False, False, False, False, False, None, None)
+        cleanup = physical_cleanup(residual_owned_pids=[123])
+        self.assertEqual(MODULE.classify_attempt(e, MODULE.MatrixExpectation("without_mod", "without_mod"), cleanup, {}),
+                         MODULE.AttemptClassification.HARNESS_FAILURE)
+    def test_a23_run1_shape_is_transient_infrastructure_not_harness(self):
+        e = MODULE.AttemptEvidence(True, True, True, False, False, False, True, False,
+                                   None, None, client_presence_sent_seen=False,
+                                   client_presence_skipped_seen=False, player_present_in_rcon=False)
+        classification = MODULE.classify_attempt(e, MODULE.MatrixExpectation("without_mod", "with_mod"), physical_cleanup(), {
+            "partialreload_marker_seen": False,
+            "channel_rejection_seen": False,
+            "unknown_custom_packet_seen": False,
+        })
+        self.assertEqual(classification, MODULE.AttemptClassification.INFRASTRUCTURE_FAILURE)
+        self.assertEqual(MODULE.infrastructure_subtype(e, classification),
+                         "TRANSIENT_POST_LOGIN_ABORT_BEFORE_FUNCTIONAL_OBSERVATION")
+    def test_compatible_valid_requires_client_completion_markers(self):
+        incomplete = MODULE.AttemptEvidence(True, True, True, False, True, True, False, False,
+                                            None, None, server_discovering_seen=True,
+                                            server_presence_received_seen=True,
+                                            client_presence_sent_seen=True)
+        self.assertEqual(MODULE.classify_attempt(incomplete, MODULE.MatrixExpectation("with_mod", "with_mod"), physical_cleanup(), {}),
+                         MODULE.AttemptClassification.PRODUCT_FAILURE)
+    def test_compatible_valid_with_all_markers_passes(self):
+        complete = MODULE.AttemptEvidence(True, True, True, False, True, True, False, False,
+                                          None, None, server_discovering_seen=True,
+                                          server_presence_received_seen=True,
+                                          client_presence_sent_seen=True,
+                                          client_hello_received_seen=True,
+                                          client_hello_sent_seen=True,
+                                          client_accepted_seen=True,
+                                          client_compatible_seen=True)
+        self.assertEqual(MODULE.classify_attempt(complete, MODULE.MatrixExpectation("with_mod", "with_mod"), physical_cleanup(), {}),
+                         MODULE.AttemptClassification.VALID_PASS)
     def test_preflight_empty_directory(self):
         import tempfile
         with tempfile.TemporaryDirectory() as path: self.assertEqual(MODULE.preflight_owned_processes(pathlib.Path(path))["status"], "passed")
@@ -833,6 +916,19 @@ class HandshakeAcceptanceReportTest(unittest.TestCase):
 
 def dummy_evidence():
     return type("Evidence", (), {"channel_rejection_seen": False, "unknown_custom_packet_seen": False})()
+
+
+def physical_cleanup(status="passed", **overrides):
+    data = {"status": status,
+            "wrapper_exited": status == "passed",
+            "descendants_exited": status == "passed",
+            "reader_threads_stopped": status == "passed",
+            "owned_processes_absent": status == "passed",
+            "tcp_connections_absent": status == "passed",
+            "residual_owned_pids": [],
+            "identity_mismatches": []}
+    data.update(overrides)
+    return data
 
 
 def complete_diag(overrides=None):

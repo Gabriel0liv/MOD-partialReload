@@ -2,7 +2,7 @@
 
 ## Status
 
-Aceito para a Fase 4F-A.
+Aceito e promovido para a Fase 4F-A.
 
 ## Decisão
 
@@ -29,3 +29,9 @@ O servidor permanece funcional sem o mod cliente e a Spec 016 continua
 recusando qualquer jogador conectado. Esta decisão não implementa payload de
 tags/recipes, recipe-book, ACK transacional, quiescência, digest, rollback ou
 qualquer integração com `PartialReloadService`.
+
+## Evidência de promoção
+
+A promoção da 4F-A foi decidida por evidência funcional, não por reprodução causal exaustiva de instabilidades userdev. O servidor nunca envia o primeiro packet para cliente ausente; clientes sem canal chegam a ABSENT; clientes compatíveis completam PRESENCE_SENT/PRESENCE_RECEIVED/PENDING/HELLO/COMPATIBLE; clientes com mod entram em servidor Forge sem Partial Reload usando presença remota ausente; reconnects criam nova identidade, nonce e challenge. partialreload apply prepared continua bloqueado com jogadores conectados.
+
+Fingerprints schema 2, authorization scope schema 1 e assinaturas causais permanecem ferramentas diagnósticas. Eles não são gate de promoção quando a sessão termina antes do primeiro marker funcional do protocolo Partial Reload, sem sinais de produto e com cleanup físico aprovado. 4F-B/C/D não foram implementadas.

@@ -42,11 +42,7 @@ A fase 3B continua somente preparação conjunta e passiva de predicates, item
 modifiers e loot tables; `VanillaLootDataProvider` nunca publica no
 `LootDataManager`. GLM permanece separado conforme ADR-007.
 
-A Fase 4F-A implementa somente a fundação opcional de protocolo e handshake;
-clientes sem canal compatível entram normalmente. Operações da Spec 016
-continuam recusando qualquer jogador conectado. As fases 4F-B/C/D permanecem
-fora do escopo: nenhum payload, recipe-book, ACK transacional, quiescência ou
-rollback compensatório é permitido nesta fase.
+A Fase 4F-A foi promovida: a fundação opcional de protocolo e handshake está aceita por evidência funcional. Clientes sem canal compatível entram normalmente, clientes com mod entram em servidor Forge sem Partial Reload, reconnects e SILENT foram validados, e operações da Spec 016 continuam recusando qualquer jogador conectado. As fases 4F-B/C/D permanecem fora do escopo: nenhum payload, recipe-book, ACK transacional, quiescência ou rollback compensatório é permitido.
 
 A Fase 4E implementa o caminho server-only de commit conjunto de tags + recipes
 somente em servidor dedicado sem jogadores conectados. O safe point usa o fim
@@ -101,5 +97,4 @@ consolidado é `python scripts/run-all-acceptance.py`.
 
 Atualização 2026-07-27: o safety gate server-side da Fase 4E-S foi aceito com
 GameTests completos, safety dedicated completa e runner consolidado aprovado.
-A fundação opcional 4F-A de protocolo/handshake foi implementada sem payload
-de tags/recipes; 4F-B/C/D permanecem fora do escopo até acceptance real.
+A fundação opcional 4F-A de protocolo/handshake foi aceita por evidência funcional sem payload de tags/recipes. A validação funcional começa no primeiro marker observável do protocolo Partial Reload; aborts Forge userdev antes dessa observação, sem sinais de produto e com cleanup físico aprovado, são infraestrutura transitória. 4F-B/C/D permanecem fora do escopo.

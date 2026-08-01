@@ -6,9 +6,7 @@ e transacionais em servidores Forge 1.20.1.
 Versão atual: `0.3.0-SNAPSHOT` — preparação conjunta e commit server-only de tags/recipes adicionados; commit de functions vanilla suportado no alvo
 exato Forge 47.4.10.
 
-Sincronização com jogadores conectados ainda está bloqueada pelo gate de
-segurança server-only (`CLIENT_SYNC_BLOCKED_BY_SERVER_SAFETY_GATE`). Nenhum
-packet customizado ou código client-side de sincronização foi introduzido.
+A fundação opcional de handshake client-side da Fase 4F-A foi aceita: o canal `partialreload:client_sync` é client-optional, a presença é iniciada pelo cliente, clientes sem o mod continuam entrando, clientes com o mod entram em servidor sem Partial Reload, e reconnects/timeout SILENT foram validados. Sincronização de tags/recipes com jogadores conectados continua bloqueada pelo gate server-only; não há payloads de tags/recipes, ACK transacional, recipe book, quiescência ou rollback distribuído.
 
 ## Implementado
 
@@ -36,7 +34,8 @@ packet customizado ou código client-side de sincronização foi introduzido.
   com bind por registry, publicação completa de recipes, invalidação de
   Ingredient, evento de tags, verificação e rollback em memória; o caminho
   safety gate 4E-S aprovado após a matriz completa, GameTests e acceptance
-  dedicada.
+  dedicada;
+- fundação opcional client-side 4F-A aceita por evidência funcional com handshake compatível, cliente ausente, servidor Forge independente sem Partial Reload, reconnects, SILENT, acceptance composta e cleanup fail-closed.
 
 ## Não implementado
 

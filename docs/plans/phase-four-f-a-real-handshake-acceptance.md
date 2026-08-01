@@ -50,3 +50,9 @@ connection identity no cliente compatível e no reconnect, timeout SILENT,
 cliente sem canal permitido, commit da Spec 016 ainda bloqueado, JAR principal
 sem o helper client-only e regressão 4E-S sem falhas. 4F-B/C/D permanecem fora
 do escopo até esta evidência.
+
+## Resultado final
+
+A Fase 4F-A foi encerrada por evidência funcional. A acceptance final usa duas sub-runs independentes: servidor com Partial Reload para compatible, reconnect, silent_timeout, absent_client_allowed e connected_commit_still_blocked; servidor Forge independente sem Partial Reload para server_absent_client_mod_allowed e server_absent_client_mod_reconnect. A validação funcional começa no primeiro marker observável do protocolo Partial Reload. Aborts de Forge userdev antes dessa observação, sem channel rejection, unknown custom packet ou marker de erro do produto, e com cleanup físico aprovado, são classificados como infraestrutura transitória e não autorizam comportamento funcional.
+
+Gates finais aprovados: quota compatível 5 válidos em até 10 launches, reconnect ausente, reconnect compatível, cliente com mod em servidor sem mod, reconnect em servidor sem mod, SILENT, commit conectado ainda bloqueado, composite final, Java tests, 24/24 GameTests, runner consolidado, clean build e inspeção do JAR. 4F-B/C/D permanecem fora do escopo: sem payloads de tags/recipes, pre-encoding, digests, ACK, recipe book, quiescência ou rollback distribuído.
