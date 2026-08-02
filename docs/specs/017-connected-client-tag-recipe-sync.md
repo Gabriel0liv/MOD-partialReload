@@ -38,6 +38,13 @@ Fase futura para falhas distribuídas, rollback e clientes reais.
 
 Somente 4F-A está autorizada nesta rodada.
 
+### 4F-R — commit server-side com refresh adiado
+
+Extensão ortogonal e opt-in da Spec 016. O servidor pode confirmar tags +
+recipes com players conectados, fechar seus menus e marcá-los stale até relog.
+Não usa o canal 4F-A para dados, não exige handshake compatível e não implementa
+payloads, ACK, recipe-book sync, quiescência distribuída ou rollback client-side.
+
 ## 5. Não objetivos
 
 Não inclui KubeJS, viewers não testados, loot, resource reload, texturas,
@@ -63,9 +70,13 @@ de payload; protocolo versionado; sem `/reload`.
 
 ## 9. Invariantes
 
-Nenhum cliente conectado pode permanecer em geração desconhecida; ACK antigo,
+Nos futuros modos live-sync, nenhum cliente conectado pode permanecer em geração desconhecida; ACK antigo,
 duplicado ou de outro jogador nunca conclui transação; server-only continua
 funcionando quando não há jogadores.
+
+O modo 4F-R é uma exceção explicitamente nomeada a essa futura garantia: clientes
+presentes podem permanecer visualmente stale até relog, enquanto o servidor usa
+exclusivamente a nova geração. Ele não pode ser apresentado como live sync.
 
 ## 10. Modelo de erros
 
@@ -108,3 +119,9 @@ publicação e ACK transacional permanecem fora do escopo.
 O safety gate server-side da Fase 4E-S foi promovido em 2026-07-27 após
 GameTests, safety acceptance completa e runner consolidado aprovados. A
 fundação 4F-A foi validada por testes de codecs, sessões, servidor de controlo Forge independente, quota funcional de cliente compatível, reconnects, SILENT, cliente ausente e acceptance composta. Fingerprints e assinaturas causais permanecem diagnostics; a validação funcional começa quando o protocolo Partial Reload produz o primeiro marker observável. Instabilidades Forge userdev que encerram a sessão antes dessa observação, sem sinais do produto e com cleanup físico aprovado, são infraestrutura transitória. 4F-B/C/D continuam bloqueadas até nova autorização.
+
+A Fase 4F-R foi validada separadamente com cliente real: ela não usa este canal
+para sincronizar dados. O servidor publica a geração nova, clientes presentes
+ficam stale até relog e o login vanilla/Forge entrega o estado atual. O canal
+continua com exatamente quatro mensagens e nenhum payload de tags/recipes ou
+ACK foi adicionado.

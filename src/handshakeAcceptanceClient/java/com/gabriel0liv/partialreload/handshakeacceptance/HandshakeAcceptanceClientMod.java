@@ -14,6 +14,14 @@ import net.minecraft.client.gui.screens.TitleScreen;
 import net.minecraft.client.multiplayer.ServerData;
 import net.minecraft.client.multiplayer.resolver.ServerAddress;
 import net.minecraft.network.chat.Component;
+import net.minecraft.core.registries.BuiltInRegistries;
+import net.minecraft.core.registries.Registries;
+import net.minecraft.resources.ResourceLocation;
+import net.minecraft.tags.TagKey;
+import net.minecraft.world.InteractionHand;
+import net.minecraft.world.phys.BlockHitResult;
+import net.minecraft.world.phys.Vec3;
+import net.minecraft.core.Direction;
 import net.minecraftforge.common.MinecraftForge;
 import net.minecraftforge.event.TickEvent;
 import net.minecraftforge.client.event.ClientPlayerNetworkEvent;
@@ -39,6 +47,7 @@ public final class HandshakeAcceptanceClientMod {
     private PendingAction pendingAction;
     private long ticksSinceRequest;
     private String previousScreen;
+    private boolean nonInventoryContainerObserved;
 
     private enum PendingAction { INITIAL_CONNECT, RECONNECT }
 
@@ -122,6 +131,15 @@ public final class HandshakeAcceptanceClientMod {
                     ModList.get().isLoaded("partialreload"), ModList.get().isLoaded(MOD_ID), stableTicks);
         }
         Path control = controlDirectory();
+        observeContainerLifecycle(minecraft);
+        if (minecraft.getConnection() != null && Files.exists(control.resolve("open-container.request"))) {
+            openContainer(minecraft, control.resolve("open-container.request"));
+            return;
+        }
+        if (minecraft.getConnection() != null && Files.exists(control.resolve("probe-data.request"))) {
+            probeData(minecraft, control.resolve("probe-data.request"));
+            return;
+        }
         if (state == AcceptanceClientState.BOOTING || state == AcceptanceClientState.READY) {
             if (!validateModSet()) {
                 state = AcceptanceClientState.FAILED;
@@ -198,6 +216,58 @@ public final class HandshakeAcceptanceClientMod {
                 LOGGER.warn("HANDSHAKE_ACCEPTANCE_CLIENT_CONTROL_FILE_DELETE_RETRY run={} attempt={} requestFile=exit.request",
                         runId(), attemptId(), exception);
             }
+        }
+    }
+
+    private void observeContainerLifecycle(Minecraft minecraft) {
+        if (minecraft.player == null) return;
+        boolean nonInventory = minecraft.player.containerMenu != minecraft.player.inventoryMenu;
+        if (nonInventory && !nonInventoryContainerObserved) {
+            nonInventoryContainerObserved = true;
+            LOGGER.info("DEFERRED_REFRESH_ACCEPTANCE_CONTAINER_OPENED run={} attempt={} menu={} screen={}",
+                    runId(), attemptId(), minecraft.player.containerMenu.getClass().getSimpleName(),
+                    minecraft.screen == null ? "null" : minecraft.screen.getClass().getSimpleName());
+        } else if (!nonInventory && nonInventoryContainerObserved) {
+            nonInventoryContainerObserved = false;
+            LOGGER.info("DEFERRED_REFRESH_ACCEPTANCE_CONTAINER_CLOSED run={} attempt={} screen={}",
+                    runId(), attemptId(), minecraft.screen == null ? "null" : minecraft.screen.getClass().getSimpleName());
+        }
+    }
+
+    private void openContainer(Minecraft minecraft, Path request) {
+        try {
+            Files.deleteIfExists(request);
+            if (minecraft.player == null || minecraft.gameMode == null) {
+                throw new IllegalStateException("client player/game mode unavailable");
+            }
+            var target = minecraft.player.blockPosition().east();
+            BlockHitResult hit = new BlockHitResult(Vec3.atCenterOf(target), Direction.WEST, target, false);
+            minecraft.gameMode.useItemOn(minecraft.player, InteractionHand.MAIN_HAND, hit);
+            LOGGER.info("DEFERRED_REFRESH_ACCEPTANCE_CONTAINER_OPEN_REQUESTED run={} attempt={} target={}",
+                    runId(), attemptId(), target);
+        } catch (IOException | RuntimeException exception) {
+            fail("DEFERRED_REFRESH_ACCEPTANCE_CONTAINER_OPEN_FAILED", exception);
+        }
+    }
+
+    private void probeData(Minecraft minecraft, Path request) {
+        try {
+            Files.deleteIfExists(request);
+            if (minecraft.getConnection() == null || minecraft.level == null) {
+                throw new IllegalStateException("client connection unavailable");
+            }
+            ResourceLocation recipeId = ResourceLocation.fromNamespaceAndPath("partialreload_test", "acceptance");
+            var recipe = minecraft.getConnection().getRecipeManager().byKey(recipeId);
+            int resultCount = recipe.map(value -> value.getResultItem(minecraft.level.registryAccess()).getCount()).orElse(-1);
+            TagKey<net.minecraft.world.item.Item> tag = TagKey.create(Registries.ITEM,
+                    ResourceLocation.fromNamespaceAndPath("partialreload_test", "joint"));
+            String members = BuiltInRegistries.ITEM.getTag(tag).map(named -> named.stream()
+                    .map(holder -> BuiltInRegistries.ITEM.getKey(holder.value()).toString()).sorted()
+                    .collect(java.util.stream.Collectors.joining(","))).orElse("<missing>");
+            LOGGER.info("DEFERRED_REFRESH_ACCEPTANCE_CLIENT_DATA run={} attempt={} recipeResultCount={} tagMembers={}",
+                    runId(), attemptId(), resultCount, members);
+        } catch (IOException | RuntimeException exception) {
+            fail("DEFERRED_REFRESH_ACCEPTANCE_CLIENT_DATA_FAILED", exception);
         }
     }
 

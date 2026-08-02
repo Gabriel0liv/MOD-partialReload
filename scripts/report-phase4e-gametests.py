@@ -25,6 +25,20 @@ REQUIRED_TRANSACTIONAL_TESTS = {
     "tagLifecyclePreservesMissingEmptyAndRemoved", "unsupportedRegistryFailsSafe",
 }
 REQUIRED_SMOKE_TESTS = {"forgeWrapperIsRecognized", "registryIdentityIsStable", "defaultPlayerProbeUsesRealServerList"}
+REQUIRED_DEFERRED_TESTS = {
+    "normalCommandRemainsBlockedWithPlayer",
+    "deferredCommitClosesMenusMarksStaleAndPublishesImmediately",
+    "menuCloseFailurePreventsFirstMutation",
+    "loginLogoutAndPostCommitJoinClearStale",
+    "deferredSafePointCapturesPlayerWhoJoinedAfterInitialPreflight",
+    "deferredSafePointOmitsPlayerWhoLeftAfterInitialPreflight",
+    "automaticRollbackDoesNotMarkStale",
+    "degradedDeferredCommitIsNeverReportedAsSuccess",
+    "deferredWithoutPlayersSucceedsWithZeroStale",
+    "safePointIsIdempotentAfterDeferredSuccess",
+    "concurrentDeferredCommitIsRejected",
+    "manualRollbackWithPlayersRemainsBlocked",
+}
 
 
 def parse(log: str) -> dict[str, object]:
@@ -37,7 +51,7 @@ def parse(log: str) -> dict[str, object]:
     global_total = int(totals.group(1)) if totals else None
     markers = re.findall(r"PHASE4E_GAMETEST_PASSED:([A-Za-z0-9_]+)", log)
     counts = {name: markers.count(name) for name in set(markers)}
-    required = REQUIRED_TRANSACTIONAL_TESTS | REQUIRED_SMOKE_TESTS
+    required = REQUIRED_TRANSACTIONAL_TESTS | REQUIRED_SMOKE_TESTS | REQUIRED_DEFERRED_TESTS
     missing = sorted(required - set(markers))
     duplicates = sorted(name for name, count in counts.items() if count > 1)
     unexpected = sorted(set(markers) - required)

@@ -42,10 +42,10 @@ A fase 3B continua somente preparação conjunta e passiva de predicates, item
 modifiers e loot tables; `VanillaLootDataProvider` nunca publica no
 `LootDataManager`. GLM permanece separado conforme ADR-007.
 
-A Fase 4F-A foi promovida: a fundação opcional de protocolo e handshake está aceita por evidência funcional. Clientes sem canal compatível entram normalmente, clientes com mod entram em servidor Forge sem Partial Reload, reconnects e SILENT foram validados, e operações da Spec 016 continuam recusando qualquer jogador conectado. As fases 4F-B/C/D permanecem fora do escopo: nenhum payload, recipe-book, ACK transacional, quiescência ou rollback compensatório é permitido.
+A Fase 4F-A foi promovida: a fundação opcional de protocolo e handshake está aceita por evidência funcional. Clientes sem canal compatível entram normalmente, clientes com mod entram em servidor Forge sem Partial Reload, reconnects e SILENT foram validados. A Fase 4F-R acrescenta o opt-in `SERVER_COMMIT_DEFERRED_CLIENT_REFRESH`: o servidor publica tags + recipes imediatamente com jogadores conectados, fecha todos os menus antes da primeira mutação e marca aquelas sessões stale até relog. O comando normal continua `SERVER_ONLY_NO_PLAYERS`. As fases 4F-B/C/D permanecem fora do escopo: nenhum payload, recipe-book live refresh, ACK transacional, quiescência ou rollback compensatório é permitido.
 
-A Fase 4E implementa o caminho server-only de commit conjunto de tags + recipes
-somente em servidor dedicado sem jogadores conectados. O safe point usa o fim
+A Fase 4E implementa o caminho server-only padrão de commit conjunto de tags + recipes
+em servidor dedicado sem jogadores conectados. O safe point usa o fim
 do tick da server thread; bindings usam `Registry.bindTags`, recipes usam
 `RecipeManager.replaceRecipes`, `Ingredient.invalidateAll()` é chamado e
 `TagsUpdatedEvent` é emitido. Uma geração conjunta anterior fica retida em
@@ -98,3 +98,9 @@ consolidado é `python scripts/run-all-acceptance.py`.
 Atualização 2026-07-27: o safety gate server-side da Fase 4E-S foi aceito com
 GameTests completos, safety dedicated completa e runner consolidado aprovado.
 A fundação opcional 4F-A de protocolo/handshake foi aceita por evidência funcional sem payload de tags/recipes. A validação funcional começa no primeiro marker observável do protocolo Partial Reload; aborts Forge userdev antes dessa observação, sem sinais de produto e com cleanup físico aprovado, são infraestrutura transitória. 4F-B/C/D permanecem fora do escopo.
+
+Atualização 2026-08-02: a Fase 4F-R foi aceita com 36/36 GameTests, acceptance
+dedicada com cliente Forge real sem o mod principal e runner consolidado com
+`ALL_ACCEPTANCE_PASSED`. No modo deferred, o servidor muda imediatamente e o
+cliente conectado permanece visualmente stale até o relog; não existe packet
+novo, live sync, ACK ou rollback distribuído.

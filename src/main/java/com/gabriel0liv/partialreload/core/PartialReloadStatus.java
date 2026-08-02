@@ -11,6 +11,9 @@ public record PartialReloadStatus(
         int changedResources,
         UUID preparedId,
         Boolean preparedApplicable,
-        String lastError
+        String lastError,
+        long tagRecipeGeneration,
+        boolean deferredClientRefreshEnabledForLastCommit,
+        int staleClientCount
 ) {
 }

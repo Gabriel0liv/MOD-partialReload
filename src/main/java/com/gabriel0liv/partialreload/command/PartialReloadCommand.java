@@ -22,6 +22,7 @@ import com.gabriel0liv.partialreload.tags.PreparedTags;
 import com.gabriel0liv.partialreload.joint.PreparedTagsAndRecipes;
 import com.gabriel0liv.partialreload.joint.TagRecipeFaultInjection;
 import com.gabriel0liv.partialreload.joint.TagRecipeFaultPoint;
+import com.gabriel0liv.partialreload.joint.TagRecipeConnectedPlayerPolicy;
 import com.gabriel0liv.partialreload.validation.ValidationSeverity;
 import com.mojang.brigadier.CommandDispatcher;
 import com.mojang.brigadier.arguments.StringArgumentType;
@@ -95,7 +96,11 @@ public final class PartialReloadCommand {
                         .executes(context -> discard(context.getSource(), service)))
                 .then(Commands.literal("apply")
                         .then(Commands.literal("prepared")
-                                .executes(context -> applyPrepared(context.getSource(), service))))
+                                .executes(context -> applyPrepared(context.getSource(), service,
+                                        TagRecipeConnectedPlayerPolicy.REJECT))
+                                .then(Commands.literal("deferred")
+                                        .executes(context -> applyPrepared(context.getSource(), service,
+                                                TagRecipeConnectedPlayerPolicy.DEFER_CLIENT_REFRESH_UNTIL_RELOGIN)))))
                 .then(Commands.literal("transaction")
                         .executes(context -> transaction(context.getSource(), service)))
                 .then(Commands.literal("rollback")
@@ -223,7 +228,7 @@ public final class PartialReloadCommand {
         String modeValue = service.functionCommitCompatibility(source.getServer()).compatible()
                 ? "FUNCTION_COMMIT_SUPPORTED" : "PREPARE_ONLY";
         if (service.tagRecipeCommitCompatibility(source.getServer()).compatible()) {
-            modeValue += " + TAG_RECIPE_SERVER_ONLY_NO_PLAYERS";
+            modeValue += " + TAG_RECIPE_SERVER_ONLY_NO_PLAYERS + SERVER_COMMIT_DEFERRED_CLIENT_REFRESH";
         }
         final String mode = modeValue;
         source.sendSuccess(() -> Component.literal("Mode: " + mode), false);
@@ -238,8 +243,12 @@ public final class PartialReloadCommand {
         ), false);
         source.sendSuccess(() -> Component.literal("Changed resources: " + status.changedResources()), false);
         source.sendSuccess(() -> Component.literal("Loot data commit: not implemented"), false);
-        source.sendSuccess(() -> Component.literal("Recipe commit: server-only joint mode (no connected players)"), false);
-        source.sendSuccess(() -> Component.literal("Tag commit: server-only joint mode (no connected players)"), false);
+        source.sendSuccess(() -> Component.literal("Recipe/tag commit default: SERVER_ONLY_NO_PLAYERS"), false);
+        source.sendSuccess(() -> Component.literal("Recipe/tag commit opt-in: SERVER_COMMIT_DEFERRED_CLIENT_REFRESH (relog required)"), false);
+        source.sendSuccess(() -> Component.literal("tagRecipeGeneration=" + status.tagRecipeGeneration()
+                + " deferredClientRefreshEnabledForLastCommit=" + status.deferredClientRefreshEnabledForLastCommit()
+                + " staleClientCount=" + status.staleClientCount()), false);
+        source.sendSuccess(() -> Component.literal("stalePlayerNames=" + service.stalePlayerNames(source.getServer(), 10)), false);
         source.sendSuccess(() -> Component.literal("KubeJS recipe preparation: blocked"), false);
         source.sendSuccess(() -> Component.literal(
                 "Prepared artifact: " + (status.preparedId() == null
@@ -826,12 +835,19 @@ public final class PartialReloadCommand {
         }
     }
 
-    private static int applyPrepared(CommandSourceStack source, PartialReloadService service) {
+    private static int applyPrepared(CommandSourceStack source, PartialReloadService service,
+                                     TagRecipeConnectedPlayerPolicy policy) {
         try {
             if (service.preparedArtifact() instanceof PreparedTagsAndRecipes) {
-                var tx = service.requestTagRecipeCommit(source.getServer(), source.getTextName());
-                source.sendSuccess(() -> Component.literal("Tag/recipe transaction " + tx.transactionId() + " queued for the next safe point."), false);
+                var tx = service.requestTagRecipeCommit(source.getServer(), source.getTextName(), policy);
+                source.sendSuccess(() -> Component.literal("Tag/recipe transaction " + tx.transactionId()
+                        + " queued for the next safe point. policy=" + policy
+                        + (policy == TagRecipeConnectedPlayerPolicy.DEFER_CLIENT_REFRESH_UNTIL_RELOGIN
+                        ? " server commit will be immediate; connected clients must relog after success." : "")), false);
                 return 1;
+            }
+            if (policy == TagRecipeConnectedPlayerPolicy.DEFER_CLIENT_REFRESH_UNTIL_RELOGIN) {
+                throw new IllegalStateException("TAG_RECIPE_DEFERRED_REQUIRES_TAGS_AND_RECIPES");
             }
             var tx = service.requestFunctionCommit(source.getServer(), source.getTextName());
             source.sendSuccess(() -> Component.literal(
@@ -852,7 +868,10 @@ public final class PartialReloadCommand {
             source.sendSuccess(() -> Component.literal("Tag mutation: " + joint.tagMutationOccurred()), false);
             source.sendSuccess(() -> Component.literal("Recipe mutation: " + joint.recipeMutationOccurred()), false);
             source.sendSuccess(() -> Component.literal("Verification: " + joint.verificationPassed()), false);
-            source.sendSuccess(() -> Component.literal("Client sync: not implemented (no players permitted)"), false);
+            source.sendSuccess(() -> Component.literal("Connected player policy: " + joint.connectedPlayerPolicy()), false);
+            source.sendSuccess(() -> Component.literal("Deferred generation: " + joint.deferredClientRefreshGeneration()
+                    + " stalePlayers=" + joint.deferredPlayerSnapshot().size()), false);
+            source.sendSuccess(() -> Component.literal("Client live sync: not implemented; deferred clients refresh on relog"), false);
             if (joint.failure() != null) source.sendFailure(Component.literal("Failure: " + joint.failure()));
             source.sendSuccess(() -> Component.literal("Rollback retained: " + (service.retainedTagRecipeGeneration() != null)), false);
             return 1;
@@ -887,13 +906,14 @@ public final class PartialReloadCommand {
     }
 
     private static int rollbackTagsRecipes(CommandSourceStack source, PartialReloadService service) {
-        try { var tx=service.requestTagRecipeRollback(source.getTextName()); source.sendSuccess(() -> Component.literal("Tag/recipe rollback " + tx.transactionId() + " queued for the next safe point."), false); return 1; }
+        try { var tx=service.requestTagRecipeRollback(source.getServer(), source.getTextName()); source.sendSuccess(() -> Component.literal("Tag/recipe rollback " + tx.transactionId() + " queued for the next safe point."), false); return 1; }
         catch(RuntimeException exception){source.sendFailure(Component.literal(exception.getMessage())); return 0;}
     }
 
     private static int activeTagsRecipes(CommandSourceStack source, PartialReloadService service) {
         var generation=service.retainedTagRecipeGeneration();
-        source.sendSuccess(() -> Component.literal("Joint tag/recipe commit mode: SERVER_ONLY_NO_PLAYERS"), false);
+        source.sendSuccess(() -> Component.literal("Joint tag/recipe commit default: SERVER_ONLY_NO_PLAYERS"), false);
+        source.sendSuccess(() -> Component.literal("Joint tag/recipe commit opt-in: SERVER_COMMIT_DEFERRED_CLIENT_REFRESH"), false);
         source.sendSuccess(() -> Component.literal("Retained rollback generation: " + (generation == null ? "none" : generation.generationId())), false);
         source.sendSuccess(() -> Component.literal("Active tag/recipe generation: " + (service.tagRecipeTransaction() == null || service.tagRecipeTransaction().candidateGeneration() == null ? "unknown" : service.tagRecipeTransaction().candidateGeneration().generationId())), false);
         return 1;
@@ -902,7 +922,7 @@ public final class PartialReloadCommand {
     private static int compatibilityTagsRecipes(CommandSourceStack source, PartialReloadService service) {
         var c=service.tagRecipeCommitCompatibility(source.getServer());
         source.sendSuccess(() -> Component.literal("Joint tag/recipe commit: " + (c.compatible() ? "compatible" : "blocked")), false);
-        source.sendSuccess(() -> Component.literal("Support level: SERVER_ONLY_NO_PLAYERS"), false);
+        source.sendSuccess(() -> Component.literal("Support levels: SERVER_ONLY_NO_PLAYERS, SERVER_COMMIT_DEFERRED_CLIENT_REFRESH"), false);
         source.sendSuccess(() -> Component.literal("Detail: " + c.detail()), false); return c.compatible() ? 1 : 0;
     }
 

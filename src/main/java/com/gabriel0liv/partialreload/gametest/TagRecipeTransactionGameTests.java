@@ -2,6 +2,7 @@ package com.gabriel0liv.partialreload.gametest;
 
 import com.gabriel0liv.partialreload.PartialReloadMod;
 import com.gabriel0liv.partialreload.core.ConnectedPlayerProbe;
+import com.gabriel0liv.partialreload.core.DeferredPlayerSession;
 import com.gabriel0liv.partialreload.core.PartialReloadState;
 import com.gabriel0liv.partialreload.joint.MappedRegistryTagBridge;
 import com.gabriel0liv.partialreload.joint.TagRecipeCommitTransaction;
@@ -10,6 +11,7 @@ import com.gabriel0liv.partialreload.joint.TagRecipeFaultInjection;
 import com.gabriel0liv.partialreload.joint.TagRecipeTransactionEvent;
 import com.gabriel0liv.partialreload.joint.TagRecipeTransactionEventType;
 import com.gabriel0liv.partialreload.joint.TagRecipeTransactionStatus;
+import com.gabriel0liv.partialreload.joint.TagRecipeConnectedPlayerPolicy;
 import net.minecraft.gametest.framework.GameTest;
 import net.minecraft.gametest.framework.GameTestHelper;
 import net.minecraft.resources.ResourceKey;
@@ -22,6 +24,8 @@ import java.io.StringWriter;
 import java.util.Arrays;
 import java.util.List;
 import java.util.UUID;
+import java.util.ArrayList;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 @GameTestHolder(PartialReloadMod.MOD_ID)
 @PrefixGameTestTemplate(false)
@@ -169,6 +173,258 @@ public final class TagRecipeTransactionGameTests {
                     TagRecipeTransactionEventType.RECIPES_PUBLISHED,
                     TagRecipeTransactionEventType.ROLLBACK_STARTED);
         });
+    }
+
+    @GameTest(template = "empty", batch = "phase4f-r-deferred-client-refresh", timeoutTicks = 1200)
+    public static void normalCommandRemainsBlockedWithPlayer(GameTestHelper helper) {
+        runTransactionalScenario(helper, "normalCommandRemainsBlockedWithPlayer", fixture -> {
+            fixture.installGenerationA();
+            fixture.prepareGenerationB();
+            fixture.fixedPlayerCount(1);
+            int result = fixture.server().getCommands().performPrefixedCommand(
+                    fixture.server().createCommandSourceStack(), "partialreload apply prepared");
+            helper.assertTrue(result == 0, "normal command accepted a connected player");
+            helper.assertTrue(fixture.service().state() == PartialReloadState.READY, "normal command changed state");
+            fixture.assertGenerationA();
+        });
+    }
+
+    @GameTest(template = "empty", batch = "phase4f-r-deferred-client-refresh", timeoutTicks = 1200)
+    public static void deferredCommitClosesMenusMarksStaleAndPublishesImmediately(GameTestHelper helper) {
+        runTransactionalScenario(helper, "deferredCommitClosesMenusMarksStaleAndPublishesImmediately", fixture -> {
+            fixture.installGenerationA();
+            fixture.prepareGenerationB();
+            UUID playerId = UUID.randomUUID();
+            AtomicBoolean inventoryMenu = new AtomicBoolean(false);
+            List<net.minecraft.network.chat.Component> messages = new ArrayList<>();
+            fixture.deferredSessions(List.of(new DeferredPlayerSession(playerId, "deferred_player",
+                    () -> inventoryMenu.set(true), inventoryMenu::get, messages::add)));
+            TagRecipeCommitTransaction transaction = fixture.service().requestTagRecipeCommit(fixture.server(),
+                    "gametest-deferred", TagRecipeConnectedPlayerPolicy.DEFER_CLIENT_REFRESH_UNTIL_RELOGIN);
+            fixture.service().processTagRecipeSafePoint(fixture.server());
+            helper.assertTrue(transaction.status() == TagRecipeTransactionStatus.SUCCESS, "deferred commit failed");
+            helper.assertTrue(inventoryMenu.get(), "menu was not closed before commit");
+            helper.assertTrue(transaction.deferredPlayerSnapshot().keySet().equals(java.util.Set.of(playerId)),
+                    "safe-point player snapshot mismatch");
+            helper.assertTrue(fixture.service().deferredClientRefreshTracker().isStale(playerId), "player not stale");
+            helper.assertTrue(fixture.service().deferredClientRefreshTracker().activeGeneration() == 1,
+                    "generation did not increment exactly once");
+            helper.assertTrue(messages.size() == 1, "relog warning not sent exactly once");
+            fixture.assertGenerationB();
+            fixture.assertLifecycleGenerationB();
+        });
+    }
+
+    @GameTest(template = "empty", batch = "phase4f-r-deferred-client-refresh", timeoutTicks = 1200)
+    public static void menuCloseFailurePreventsFirstMutation(GameTestHelper helper) {
+        runTransactionalScenario(helper, "menuCloseFailurePreventsFirstMutation", fixture -> {
+            fixture.installGenerationA();
+            fixture.prepareGenerationB();
+            UUID playerId = UUID.randomUUID();
+            fixture.deferredSessions(List.of(new DeferredPlayerSession(playerId, "stuck_menu",
+                    () -> {}, () -> false, ignored -> {})));
+            TagRecipeCommitTransaction transaction = fixture.service().requestTagRecipeCommit(fixture.server(),
+                    "gametest-menu-failure", TagRecipeConnectedPlayerPolicy.DEFER_CLIENT_REFRESH_UNTIL_RELOGIN);
+            fixture.service().processTagRecipeSafePoint(fixture.server());
+            helper.assertTrue(transaction.status() == TagRecipeTransactionStatus.FAILED_SAFE,
+                    "menu failure was not fail-safe");
+            helper.assertTrue(transaction.failure().contains("TAG_RECIPE_DEFERRED_MENU_CLOSE_FAILED"),
+                    "wrong menu failure: " + transaction.failure());
+            fixture.assertNoMutationCounters(transaction);
+            helper.assertTrue(fixture.service().deferredClientRefreshTracker().staleCount() == 0,
+                    "menu failure marked stale");
+            fixture.assertGenerationA();
+        });
+    }
+
+    @GameTest(template = "empty", batch = "phase4f-r-deferred-client-refresh", timeoutTicks = 1200)
+    public static void loginLogoutAndPostCommitJoinClearStale(GameTestHelper helper) {
+        runTransactionalScenario(helper, "loginLogoutAndPostCommitJoinClearStale", fixture -> {
+            fixture.installGenerationA();
+            fixture.prepareGenerationB();
+            UUID first = UUID.randomUUID();
+            UUID second = UUID.randomUUID();
+            fixture.deferredSessions(List.of(session(first, "first"), session(second, "second")));
+            TagRecipeCommitTransaction transaction = fixture.service().requestTagRecipeCommit(fixture.server(),
+                    "gametest-lifecycle", TagRecipeConnectedPlayerPolicy.DEFER_CLIENT_REFRESH_UNTIL_RELOGIN);
+            fixture.service().processTagRecipeSafePoint(fixture.server());
+            helper.assertTrue(transaction.status() == TagRecipeTransactionStatus.SUCCESS, "deferred commit failed");
+            helper.assertTrue(fixture.service().deferredClientRefreshTracker().staleCount() == 2, "two players not stale");
+            UUID joinedAfter = UUID.randomUUID();
+            fixture.service().onPlayerLogin(joinedAfter);
+            helper.assertTrue(!fixture.service().deferredClientRefreshTracker().isStale(joinedAfter),
+                    "post-commit join became stale");
+            fixture.service().onPlayerLogout(first);
+            helper.assertTrue(!fixture.service().deferredClientRefreshTracker().isStale(first), "logout did not clear stale");
+            fixture.service().onPlayerLogin(second);
+            helper.assertTrue(!fixture.service().deferredClientRefreshTracker().isStale(second), "login did not clear stale");
+        });
+    }
+
+    @GameTest(template = "empty", batch = "phase4f-r-deferred-client-refresh", timeoutTicks = 1200)
+    public static void deferredSafePointCapturesPlayerWhoJoinedAfterInitialPreflight(GameTestHelper helper) {
+        runTransactionalScenario(helper, "deferredSafePointCapturesPlayerWhoJoinedAfterInitialPreflight", fixture -> {
+            fixture.installGenerationA();
+            fixture.prepareGenerationB();
+            fixture.deferredSessions(List.of());
+            fixture.holdSafePoint();
+            TagRecipeCommitTransaction transaction = fixture.service().requestTagRecipeCommit(fixture.server(),
+                    "gametest-deferred-join-race", TagRecipeConnectedPlayerPolicy.DEFER_CLIENT_REFRESH_UNTIL_RELOGIN);
+            UUID joined = UUID.randomUUID();
+            fixture.deferredSessions(List.of(session(joined, "joined_at_safe_point")));
+            fixture.releaseSafePoint();
+            fixture.service().processTagRecipeSafePoint(fixture.server());
+            helper.assertTrue(transaction.status() == TagRecipeTransactionStatus.SUCCESS, "join-race commit failed");
+            helper.assertTrue(transaction.deferredPlayerSnapshot().keySet().equals(java.util.Set.of(joined)),
+                    "safe point did not capture newly joined player");
+            helper.assertTrue(fixture.service().deferredClientRefreshTracker().isStale(joined),
+                    "newly joined player was not marked stale");
+        });
+    }
+
+    @GameTest(template = "empty", batch = "phase4f-r-deferred-client-refresh", timeoutTicks = 1200)
+    public static void deferredSafePointOmitsPlayerWhoLeftAfterInitialPreflight(GameTestHelper helper) {
+        runTransactionalScenario(helper, "deferredSafePointOmitsPlayerWhoLeftAfterInitialPreflight", fixture -> {
+            fixture.installGenerationA();
+            fixture.prepareGenerationB();
+            UUID left = UUID.randomUUID();
+            fixture.deferredSessions(List.of(session(left, "left_before_safe_point")));
+            fixture.holdSafePoint();
+            TagRecipeCommitTransaction transaction = fixture.service().requestTagRecipeCommit(fixture.server(),
+                    "gametest-deferred-leave-race", TagRecipeConnectedPlayerPolicy.DEFER_CLIENT_REFRESH_UNTIL_RELOGIN);
+            fixture.deferredSessions(List.of());
+            fixture.releaseSafePoint();
+            fixture.service().processTagRecipeSafePoint(fixture.server());
+            helper.assertTrue(transaction.status() == TagRecipeTransactionStatus.SUCCESS, "leave-race commit failed");
+            helper.assertTrue(transaction.deferredPlayerSnapshot().isEmpty(),
+                    "safe point retained a player who had disconnected");
+            helper.assertTrue(!fixture.service().deferredClientRefreshTracker().isStale(left),
+                    "disconnected player was marked stale");
+        });
+    }
+
+    @GameTest(template = "empty", batch = "phase4f-r-deferred-client-refresh", timeoutTicks = 1200)
+    public static void automaticRollbackDoesNotMarkStale(GameTestHelper helper) {
+        runTransactionalScenario(helper, "automaticRollbackDoesNotMarkStale", fixture -> {
+            fixture.installGenerationA();
+            fixture.prepareGenerationB();
+            UUID playerId = UUID.randomUUID();
+            fixture.deferredSessions(List.of(session(playerId, "rollback_player")));
+            fixture.armFault(TagRecipeFaultPoint.AFTER_RECIPE_PUBLICATION);
+            TagRecipeCommitTransaction transaction = fixture.service().requestTagRecipeCommit(fixture.server(),
+                    "gametest-deferred-rollback", TagRecipeConnectedPlayerPolicy.DEFER_CLIENT_REFRESH_UNTIL_RELOGIN);
+            fixture.service().processTagRecipeSafePoint(fixture.server());
+            helper.assertTrue(transaction.status() == TagRecipeTransactionStatus.ROLLED_BACK, "rollback failed");
+            helper.assertTrue(fixture.service().deferredClientRefreshTracker().activeGeneration() == 0,
+                    "failed commit incremented generation");
+            helper.assertTrue(!fixture.service().deferredClientRefreshTracker().isStale(playerId),
+                    "rolled-back commit marked stale");
+            fixture.assertGenerationA();
+        });
+    }
+
+    @GameTest(template = "empty", batch = "phase4f-r-deferred-client-refresh", timeoutTicks = 1200)
+    public static void degradedDeferredCommitIsNeverReportedAsSuccess(GameTestHelper helper) {
+        runTransactionalScenario(helper, "degradedDeferredCommitIsNeverReportedAsSuccess", fixture -> {
+            fixture.installGenerationA();
+            fixture.prepareGenerationB();
+            UUID playerId = UUID.randomUUID();
+            fixture.deferredSessions(List.of(session(playerId, "degraded_player")));
+            fixture.armFaultSequence(TagRecipeFaultPoint.AFTER_RECIPE_PUBLICATION, TagRecipeFaultPoint.DURING_ROLLBACK);
+            TagRecipeCommitTransaction transaction = fixture.service().requestTagRecipeCommit(fixture.server(),
+                    "gametest-deferred-degraded", TagRecipeConnectedPlayerPolicy.DEFER_CLIENT_REFRESH_UNTIL_RELOGIN);
+            fixture.service().processTagRecipeSafePoint(fixture.server());
+            helper.assertTrue(transaction.status() == TagRecipeTransactionStatus.DEGRADED, "not degraded");
+            helper.assertTrue(fixture.service().deferredClientRefreshTracker().activeGeneration() == 0,
+                    "degraded commit incremented generation");
+            helper.assertTrue(!fixture.service().deferredClientRefreshTracker().isStale(playerId),
+                    "degraded commit marked stale");
+        });
+    }
+
+    @GameTest(template = "empty", batch = "phase4f-r-deferred-client-refresh", timeoutTicks = 1200)
+    public static void deferredWithoutPlayersSucceedsWithZeroStale(GameTestHelper helper) {
+        runTransactionalScenario(helper, "deferredWithoutPlayersSucceedsWithZeroStale", fixture -> {
+            fixture.installGenerationA();
+            fixture.prepareGenerationB();
+            fixture.deferredSessions(List.of());
+            TagRecipeCommitTransaction transaction = fixture.service().requestTagRecipeCommit(fixture.server(),
+                    "gametest-deferred-empty", TagRecipeConnectedPlayerPolicy.DEFER_CLIENT_REFRESH_UNTIL_RELOGIN);
+            fixture.service().processTagRecipeSafePoint(fixture.server());
+            helper.assertTrue(transaction.status() == TagRecipeTransactionStatus.SUCCESS, "empty deferred failed");
+            helper.assertTrue(transaction.deferredClientRefreshGeneration() == 1, "generation mismatch");
+            helper.assertTrue(fixture.service().deferredClientRefreshTracker().staleCount() == 0, "stale not zero");
+            fixture.assertGenerationB();
+        });
+    }
+
+    @GameTest(template = "empty", batch = "phase4f-r-deferred-client-refresh", timeoutTicks = 1200)
+    public static void safePointIsIdempotentAfterDeferredSuccess(GameTestHelper helper) {
+        runTransactionalScenario(helper, "safePointIsIdempotentAfterDeferredSuccess", fixture -> {
+            fixture.installGenerationA();
+            fixture.prepareGenerationB();
+            fixture.deferredSessions(List.of());
+            TagRecipeCommitTransaction transaction = fixture.service().requestTagRecipeCommit(fixture.server(),
+                    "gametest-deferred-idempotent", TagRecipeConnectedPlayerPolicy.DEFER_CLIENT_REFRESH_UNTIL_RELOGIN);
+            fixture.service().processTagRecipeSafePoint(fixture.server());
+            fixture.service().processTagRecipeSafePoint(fixture.server());
+            helper.assertTrue(transaction.status() == TagRecipeTransactionStatus.SUCCESS, "commit failed");
+            helper.assertTrue(fixture.service().deferredClientRefreshTracker().activeGeneration() == 1,
+                    "safe point incremented generation twice");
+        });
+    }
+
+    @GameTest(template = "empty", batch = "phase4f-r-deferred-client-refresh", timeoutTicks = 1200)
+    public static void concurrentDeferredCommitIsRejected(GameTestHelper helper) {
+        runTransactionalScenario(helper, "concurrentDeferredCommitIsRejected", fixture -> {
+            fixture.installGenerationA();
+            fixture.prepareGenerationB();
+            fixture.deferredSessions(List.of());
+            fixture.holdSafePoint();
+            TagRecipeCommitTransaction first = fixture.service().requestTagRecipeCommit(fixture.server(),
+                    "gametest-deferred-first", TagRecipeConnectedPlayerPolicy.DEFER_CLIENT_REFRESH_UNTIL_RELOGIN);
+            IllegalStateException failure;
+            try {
+                fixture.service().requestTagRecipeCommit(fixture.server(), "gametest-deferred-concurrent",
+                        TagRecipeConnectedPlayerPolicy.DEFER_CLIENT_REFRESH_UNTIL_RELOGIN);
+                throw new AssertionError("concurrent deferred commit was accepted");
+            } catch (IllegalStateException expected) {
+                failure = expected;
+            }
+            helper.assertTrue(failure.getMessage().contains("TAG_RECIPE_COMMIT_TRANSACTION_RUNNING"),
+                    "wrong concurrent rejection: " + failure.getMessage());
+            fixture.releaseSafePoint();
+            fixture.service().processTagRecipeSafePoint(fixture.server());
+            helper.assertTrue(first.status() == TagRecipeTransactionStatus.SUCCESS,
+                    "original deferred transaction did not complete");
+        });
+    }
+
+    @GameTest(template = "empty", batch = "phase4f-r-deferred-client-refresh", timeoutTicks = 1200)
+    public static void manualRollbackWithPlayersRemainsBlocked(GameTestHelper helper) {
+        runTransactionalScenario(helper, "manualRollbackWithPlayersRemainsBlocked", fixture -> {
+            fixture.installGenerationA();
+            fixture.prepareGenerationB();
+            TagRecipeCommitTransaction commit = fixture.service().requestTagRecipeCommit(fixture.server(), "commit-before-rollback");
+            fixture.service().processTagRecipeSafePoint(fixture.server());
+            helper.assertTrue(commit.status() == TagRecipeTransactionStatus.SUCCESS, "setup commit failed");
+            fixture.fixedPlayerCount(1);
+            IllegalStateException failure;
+            try {
+                fixture.service().requestTagRecipeRollback(fixture.server(), "blocked-rollback");
+                throw new AssertionError("manual rollback accepted connected players");
+            } catch (IllegalStateException expected) {
+                failure = expected;
+            }
+            helper.assertTrue(failure.getMessage().contains("TAG_RECIPE_COMMIT_PLAYERS_CONNECTED"),
+                    "wrong rollback failure");
+        });
+    }
+
+    private static DeferredPlayerSession session(UUID playerId, String name) {
+        AtomicBoolean inventoryMenu = new AtomicBoolean(false);
+        return new DeferredPlayerSession(playerId, name, () -> inventoryMenu.set(true), inventoryMenu::get,
+                ignored -> {});
     }
 
     @GameTest(template = "empty", batch = "phase4e-tag-recipe-transaction", timeoutTicks = 1200)

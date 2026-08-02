@@ -6,6 +6,7 @@ import net.minecraft.resources.ResourceKey;
 
 public final class TagRecipeCommitTransaction {
     private final UUID transactionId, preparationId; private final Instant requestedAt; private final String requester;
+    private final TagRecipeConnectedPlayerPolicy connectedPlayerPolicy;
     private TagRecipeTransactionStatus status; private boolean tagMutationOccurred, recipeMutationOccurred, verificationPassed, restartRequired; private String failure;
     private boolean ingredientInvalidationOccurred, tagsUpdatedEventDispatched;
     private int ingredientCommitInvalidations, ingredientRollbackInvalidations, commitTagEvents, rollbackTagEvents;
@@ -15,8 +16,12 @@ public final class TagRecipeCommitTransaction {
     private int recipeManagerIdentity, registryAccessIdentity;
     private String compatibilityFingerprint;
     private final List<TagRecipeTransactionEvent> events = new ArrayList<>();
-    public TagRecipeCommitTransaction(UUID tx, UUID prep, Instant at, String requester){this.transactionId=tx;this.preparationId=prep;this.requestedAt=at;this.requester=requester;this.status=TagRecipeTransactionStatus.REQUESTED;}
+    private final Map<UUID, String> deferredPlayerSnapshot = new LinkedHashMap<>();
+    private long deferredClientRefreshGeneration;
+    public TagRecipeCommitTransaction(UUID tx, UUID prep, Instant at, String requester){this(tx, prep, at, requester, TagRecipeConnectedPlayerPolicy.REJECT);}
+    public TagRecipeCommitTransaction(UUID tx, UUID prep, Instant at, String requester, TagRecipeConnectedPlayerPolicy policy){this.transactionId=tx;this.preparationId=prep;this.requestedAt=at;this.requester=requester;this.connectedPlayerPolicy=Objects.requireNonNull(policy);this.status=TagRecipeTransactionStatus.REQUESTED;}
     public UUID transactionId(){return transactionId;} public UUID preparationId(){return preparationId;} public Instant requestedAt(){return requestedAt;} public String requester(){return requester;}
+    public TagRecipeConnectedPlayerPolicy connectedPlayerPolicy(){return connectedPlayerPolicy;}
     public TagRecipeTransactionStatus status(){return status;} public void status(TagRecipeTransactionStatus s){status=s; events.add(new TagRecipeTransactionEvent(Instant.now(), transactionId, s, TagRecipeTransactionEventType.STATUS_CHANGED, null));}
     public void event(TagRecipeTransactionEventType type, TagRecipeTransactionStatus s, String detail){
         events.add(new TagRecipeTransactionEvent(Instant.now(), transactionId, s, Objects.requireNonNull(type), detail));
@@ -43,4 +48,7 @@ public final class TagRecipeCommitTransaction {
     public int recipeManagerIdentity(){return recipeManagerIdentity;} public void recipeManagerIdentity(int value){recipeManagerIdentity=value;}
     public int registryAccessIdentity(){return registryAccessIdentity;} public void registryAccessIdentity(int value){registryAccessIdentity=value;}
     public String compatibilityFingerprint(){return compatibilityFingerprint;} public void compatibilityFingerprint(String value){compatibilityFingerprint=value;}
+    public void deferredPlayerSnapshot(Map<UUID, String> players){deferredPlayerSnapshot.clear();deferredPlayerSnapshot.putAll(players);}
+    public Map<UUID, String> deferredPlayerSnapshot(){return Map.copyOf(deferredPlayerSnapshot);}
+    public long deferredClientRefreshGeneration(){return deferredClientRefreshGeneration;} public void deferredClientRefreshGeneration(long value){deferredClientRefreshGeneration=value;}
 }

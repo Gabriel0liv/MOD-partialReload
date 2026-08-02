@@ -38,6 +38,8 @@ import com.gabriel0liv.partialreload.joint.TagRecipeTransactionStatus;
 import com.gabriel0liv.partialreload.joint.TagRecipeCommitCompatibility;
 import com.gabriel0liv.partialreload.joint.TagRecipeFaultInjection;
 import com.gabriel0liv.partialreload.joint.TagRecipeFaultPoint;
+import com.gabriel0liv.partialreload.joint.TagRecipeConnectedPlayerPolicy;
+import com.gabriel0liv.partialreload.joint.DeferredClientRefreshTracker;
 import com.gabriel0liv.partialreload.tags.ActiveTagGeneration;
 import com.gabriel0liv.partialreload.recipe.ActiveRecipeGeneration;
 import com.gabriel0liv.partialreload.recipe.ActiveRecipeSnapshot;
@@ -72,6 +74,8 @@ import net.minecraft.tags.TagKey;
 import net.minecraft.world.item.crafting.Ingredient;
 import net.minecraft.world.item.crafting.Recipe;
 import net.minecraft.world.item.crafting.RecipeManager;
+import net.minecraft.ChatFormatting;
+import net.minecraft.network.chat.Component;
 import net.minecraftforge.common.MinecraftForge;
 import net.minecraftforge.fml.loading.FMLEnvironment;
 import net.minecraftforge.event.TagsUpdatedEvent;
@@ -89,8 +93,10 @@ public final class PartialReloadService {
     private final VanillaTagsProvider tagsProvider = new VanillaTagsProvider();
     private final PartialReloadStateMachine stateMachine = new PartialReloadStateMachine();
     private volatile ConnectedPlayerProbe connectedPlayerProbe = ConnectedPlayerProbe.DEFAULT;
+    private volatile DeferredPlayerSessionProbe deferredPlayerSessionProbe = DeferredPlayerSessionProbe.DEFAULT;
     private volatile boolean tagRecipeSafePointHeld;
     private volatile TagRecipeCurrentResourceProbe currentResourceProbe = this::currentResourcesMatchReal;
+    private final DeferredClientRefreshTracker deferredClientRefreshTracker = new DeferredClientRefreshTracker();
 
     public void connectedPlayerProbe(ConnectedPlayerProbe probe) {
         connectedPlayerProbe = Objects.requireNonNull(probe, "probe");
@@ -98,6 +104,15 @@ public final class PartialReloadService {
 
     public void resetConnectedPlayerProbe() {
         connectedPlayerProbe = ConnectedPlayerProbe.DEFAULT;
+    }
+
+    public void deferredPlayerSessionProbe(DeferredPlayerSessionProbe probe) {
+        requireGameTestAccess();
+        deferredPlayerSessionProbe = Objects.requireNonNull(probe, "probe");
+    }
+
+    public void resetDeferredPlayerSessionProbe() {
+        deferredPlayerSessionProbe = DeferredPlayerSessionProbe.DEFAULT;
     }
 
     /** Userdev-only seam control; production always uses the real player list. */
@@ -117,7 +132,8 @@ public final class PartialReloadService {
         requireGameTestAccess();
         return new TagRecipeGameTestState(activeReference, latestScan, lastChangeSet, lastPlan, lastError,
                 preparedArtifact, tagRecipeTransaction, retainedTagRecipeGeneration, activeTagRecipeGeneration,
-                stateMachine.state(), connectedPlayerProbe, tagRecipeSafePointHeld, currentResourceProbe);
+                stateMachine.state(), connectedPlayerProbe, tagRecipeSafePointHeld, currentResourceProbe,
+                deferredPlayerSessionProbe, deferredClientRefreshTracker.snapshot());
     }
 
     public synchronized void installTagRecipeGameTestReadyState(ResourceSnapshot activeSnapshot, ResourceSnapshot candidateSnapshot,
@@ -130,6 +146,8 @@ public final class PartialReloadService {
         lastPlan = null; lastError = null; preparedArtifact = artifact; tagRecipeTransaction = null;
         retainedTagRecipeGeneration = null; activeTagRecipeGeneration = null;
         connectedPlayerProbe = ConnectedPlayerProbe.DEFAULT; tagRecipeSafePointHeld = false;
+        deferredPlayerSessionProbe = DeferredPlayerSessionProbe.DEFAULT;
+        deferredClientRefreshTracker.clear();
         currentResourceProbe = Objects.requireNonNull(resourceProbe, "resourceProbe");
         stateMachine.forceStateForGameTest(PartialReloadState.READY);
     }
@@ -141,6 +159,8 @@ public final class PartialReloadService {
         tagRecipeTransaction = snapshot.tagRecipeTransaction(); retainedTagRecipeGeneration = snapshot.retainedTagRecipeGeneration();
         activeTagRecipeGeneration = snapshot.activeTagRecipeGeneration(); connectedPlayerProbe = snapshot.connectedPlayerProbe();
         tagRecipeSafePointHeld = snapshot.safePointHeld(); currentResourceProbe = snapshot.currentResourceProbe();
+        deferredPlayerSessionProbe = snapshot.deferredPlayerSessionProbe();
+        deferredClientRefreshTracker.restore(snapshot.deferredClientRefreshSnapshot());
         stateMachine.forceStateForGameTest(snapshot.state());
     }
 
@@ -525,17 +545,48 @@ public final class PartialReloadService {
 
     public synchronized TagRecipeCommitTransaction tagRecipeTransaction() { return tagRecipeTransaction; }
     public synchronized ActiveTagRecipeGeneration retainedTagRecipeGeneration() { return retainedTagRecipeGeneration; }
+    public DeferredClientRefreshTracker deferredClientRefreshTracker() { return deferredClientRefreshTracker; }
+
+    public void onPlayerLogin(UUID playerId) {
+        deferredClientRefreshTracker.remove(playerId);
+    }
+
+    public void onPlayerLogout(UUID playerId) {
+        deferredClientRefreshTracker.remove(playerId);
+    }
+
+    public void clearDeferredClientRefreshState() {
+        deferredClientRefreshTracker.clear();
+        deferredPlayerSessionProbe = DeferredPlayerSessionProbe.DEFAULT;
+    }
+
+    public List<String> stalePlayerNames(MinecraftServer server, int limit) {
+        if (limit < 0) throw new IllegalArgumentException("limit");
+        Set<UUID> stale = deferredClientRefreshTracker.stalePlayerIds();
+        Map<UUID, String> names = new LinkedHashMap<>();
+        server.getPlayerList().getPlayers().forEach(player -> names.put(player.getUUID(), player.getGameProfile().getName()));
+        TagRecipeCommitTransaction current = tagRecipeTransaction;
+        if (current != null) names.putAll(current.deferredPlayerSnapshot());
+        return stale.stream().map(id -> names.getOrDefault(id, "<unknown>"))
+                .sorted().limit(limit).toList();
+    }
 
     public synchronized TagRecipeCommitTransaction requestTagRecipeCommit(MinecraftServer server, String requester) {
+        return requestTagRecipeCommit(server, requester, TagRecipeConnectedPlayerPolicy.REJECT);
+    }
+
+    public synchronized TagRecipeCommitTransaction requestTagRecipeCommit(MinecraftServer server, String requester,
+                                                                           TagRecipeConnectedPlayerPolicy policy) {
+        Objects.requireNonNull(policy, "policy");
         if (stateMachine.state() == PartialReloadState.DEGRADED) throw new IllegalStateException("TAG_RECIPE_TRANSACTION_DEGRADED: restart is required");
-        if (stateMachine.state() != PartialReloadState.READY) throw new IllegalStateException("TAG_RECIPE_COMMIT_ARTIFACT_REQUIRED");
-        if (!(preparedArtifact instanceof PreparedTagsAndRecipes joint) || !joint.isApplicable()) throw new IllegalStateException("TAG_RECIPE_COMMIT_ARTIFACT_INVALID");
-        if (connectedPlayerProbe.playerCount(server) > 0) throw new IllegalStateException("TAG_RECIPE_COMMIT_PLAYERS_CONNECTED");
         if (tagRecipeTransaction != null && tagRecipeTransaction.status() != TagRecipeTransactionStatus.SUCCESS && tagRecipeTransaction.status() != TagRecipeTransactionStatus.ROLLED_BACK && tagRecipeTransaction.status() != TagRecipeTransactionStatus.FAILED_SAFE && tagRecipeTransaction.status() != TagRecipeTransactionStatus.DEGRADED)
             throw new IllegalStateException("TAG_RECIPE_COMMIT_TRANSACTION_RUNNING");
+        if (stateMachine.state() != PartialReloadState.READY) throw new IllegalStateException("TAG_RECIPE_COMMIT_ARTIFACT_REQUIRED");
+        if (!(preparedArtifact instanceof PreparedTagsAndRecipes joint) || !joint.isApplicable()) throw new IllegalStateException("TAG_RECIPE_COMMIT_ARTIFACT_INVALID");
+        policy.validateConnectedPlayerCount(connectedPlayerProbe.playerCount(server));
         TagRecipeCommitCompatibility compatibility = TagRecipeCommitCompatibility.inspect(server);
         if (!compatibility.compatible()) throw new IllegalStateException("TAG_RECIPE_COMMIT_NOT_COMPATIBLE: " + compatibility.detail());
-        TagRecipeCommitTransaction tx = new TagRecipeCommitTransaction(UUID.randomUUID(), joint.preparationId(), Instant.now(), requester);
+        TagRecipeCommitTransaction tx = new TagRecipeCommitTransaction(UUID.randomUUID(), joint.preparationId(), Instant.now(), requester, policy);
         tx.recipeManagerIdentity(compatibility.recipeManagerIdentity());
         tx.registryAccessIdentity(compatibility.registryAccessIdentity());
         tx.compatibilityFingerprint(compatibility.fingerprint());
@@ -551,6 +602,13 @@ public final class PartialReloadService {
         tx.previousGeneration(retainedTagRecipeGeneration); tx.registriesToMutate(retainedTagRecipeGeneration.tags().registries().keySet()); for (var key:retainedTagRecipeGeneration.tags().registries().keySet()) tx.tagRegistryMutated(key); tx.status(TagRecipeTransactionStatus.QUIESCING); tagRecipeTransaction=tx; stateMachine.transitionTo(PartialReloadState.QUIESCING); return tx;
     }
 
+    public synchronized TagRecipeCommitTransaction requestTagRecipeRollback(MinecraftServer server, String requester) {
+        if (connectedPlayerProbe.playerCount(server) > 0) {
+            throw new IllegalStateException("TAG_RECIPE_COMMIT_PLAYERS_CONNECTED");
+        }
+        return requestTagRecipeRollback(requester);
+    }
+
     public synchronized void processTagRecipeSafePoint(MinecraftServer server) {
         TagRecipeCommitTransaction tx=tagRecipeTransaction; if(tx==null || tx.status()!=TagRecipeTransactionStatus.QUIESCING) return;
         if (tagRecipeSafePointHeld) return;
@@ -558,6 +616,7 @@ public final class PartialReloadService {
             if (tx.preparationId()==null) { stateMachine.transitionTo(PartialReloadState.COMMITTING); restoreTagRecipeGeneration(server, tx.previousGeneration(), tx); return; }
             PreparedTagsAndRecipes artifact=preparedArtifact instanceof PreparedTagsAndRecipes j ? j : null;
             tx.event(com.gabriel0liv.partialreload.joint.TagRecipeTransactionEventType.SAFE_POINT_REACHED, TagRecipeTransactionStatus.QUIESCING, "SAFE_POINT_REACHED"); preflightTagRecipeCommit(server, tx, artifact); tx.event(com.gabriel0liv.partialreload.joint.TagRecipeTransactionEventType.PREFLIGHT_PASSED, TagRecipeTransactionStatus.QUIESCING, "SAFE_POINT_PREFLIGHT_PASSED");
+            List<DeferredPlayerSession> deferredSessions = prepareDeferredPlayersAtSafePoint(server, tx);
             Set<ResourceKey<? extends Registry<?>>> registriesToMutate=deriveRegistriesToMutate(artifact);
             tx.registriesToMutate(registriesToMutate); tx.event(com.gabriel0liv.partialreload.joint.TagRecipeTransactionEventType.REGISTRY_SCOPE_DERIVED, TagRecipeTransactionStatus.BUILDING_BINDINGS, "REGISTRY_SCOPE_DERIVED:" + registriesToMutate);
             Map<ResourceKey<? extends Registry<?>>, Map<TagKey<?>, List<Holder<?>>>> candidate=buildCandidateBindings(server.registryAccess(), artifact.preparedTags(), registriesToMutate); tx.event(com.gabriel0liv.partialreload.joint.TagRecipeTransactionEventType.CANDIDATE_BINDINGS_BUILT, TagRecipeTransactionStatus.BUILDING_BINDINGS, "bindings=" + candidate.size());
@@ -575,8 +634,18 @@ public final class PartialReloadService {
             tx.event(com.gabriel0liv.partialreload.joint.TagRecipeTransactionEventType.RECIPE_PUBLICATION_STARTED, TagRecipeTransactionStatus.PUBLISHING_RECIPES, "count=" + candidateRecipes.size()); TagRecipeFaultInjection.hit(TagRecipeFaultPoint.BEFORE_RECIPE_PUBLICATION); server.getRecipeManager().replaceRecipes(candidateRecipes); tx.recipeMutationOccurred(true); tx.event(com.gabriel0liv.partialreload.joint.TagRecipeTransactionEventType.RECIPES_PUBLISHED, TagRecipeTransactionStatus.PUBLISHING_RECIPES, "count=" + candidateRecipes.size()); TagRecipeFaultInjection.hit(TagRecipeFaultPoint.AFTER_RECIPE_PUBLICATION);
             tx.status(TagRecipeTransactionStatus.INVALIDATING_CACHES); tx.event(com.gabriel0liv.partialreload.joint.TagRecipeTransactionEventType.INGREDIENT_INVALIDATION_STARTED, TagRecipeTransactionStatus.INVALIDATING_CACHES, "start"); Ingredient.invalidateAll(); tx.ingredientInvalidationOccurred(true); tx.ingredientCommitInvalidations(tx.ingredientCommitInvalidations()+1); tx.event(com.gabriel0liv.partialreload.joint.TagRecipeTransactionEventType.INGREDIENTS_INVALIDATED, TagRecipeTransactionStatus.INVALIDATING_CACHES, "count=1"); TagRecipeFaultInjection.hit(TagRecipeFaultPoint.AFTER_INGREDIENT_INVALIDATION);
             tx.status(TagRecipeTransactionStatus.DISPATCHING_EVENTS); tx.event(com.gabriel0liv.partialreload.joint.TagRecipeTransactionEventType.TAGS_EVENT_DISPATCH_STARTED, TagRecipeTransactionStatus.DISPATCHING_EVENTS, "start"); if (MinecraftForge.EVENT_BUS.post(new TagsUpdatedEvent(server.registryAccess(), false, false))) throw new IllegalStateException("TAG_UPDATE_EVENT_FAILED"); tx.tagsUpdatedEventDispatched(true); tx.commitTagEvents(tx.commitTagEvents()+1); tx.event(com.gabriel0liv.partialreload.joint.TagRecipeTransactionEventType.TAGS_EVENT_DISPATCHED, TagRecipeTransactionStatus.DISPATCHING_EVENTS, "count=1"); TagRecipeFaultInjection.hit(TagRecipeFaultPoint.AFTER_TAGS_UPDATED_EVENT);
-            tx.status(TagRecipeTransactionStatus.VERIFYING_SERVER); stateMachine.transitionTo(PartialReloadState.VERIFYING); tx.event(com.gabriel0liv.partialreload.joint.TagRecipeTransactionEventType.VERIFICATION_STARTED, TagRecipeTransactionStatus.VERIFYING_SERVER, "start"); TagRecipeFaultInjection.hit(TagRecipeFaultPoint.BEFORE_VERIFICATION); verifyTagRecipe(server, candidate, artifact);
+            tx.status(TagRecipeTransactionStatus.VERIFYING_SERVER); stateMachine.transitionTo(PartialReloadState.VERIFYING); tx.event(com.gabriel0liv.partialreload.joint.TagRecipeTransactionEventType.VERIFICATION_STARTED, TagRecipeTransactionStatus.VERIFYING_SERVER, "start"); TagRecipeFaultInjection.hit(TagRecipeFaultPoint.BEFORE_VERIFICATION); verifyTagRecipe(server, candidate, artifact, tx);
             tx.candidateGeneration(new ActiveTagRecipeGeneration(UUID.randomUUID(),Instant.now(),new ActiveTagGeneration(UUID.randomUUID(),Instant.now(),captureTags(server.registryAccess(),tx.registriesToMutate()), server.registryAccess()),new ActiveRecipeGeneration(UUID.randomUUID(),Instant.now(),server.getRecipeManager().getRecipes()),artifact.sourceSnapshot())); tx.verificationPassed(true); tx.event(com.gabriel0liv.partialreload.joint.TagRecipeTransactionEventType.VERIFICATION_PASSED, TagRecipeTransactionStatus.VERIFYING_SERVER, "passed"); tx.status(TagRecipeTransactionStatus.SUCCESS); activeTagRecipeGeneration=tx.candidateGeneration(); promoteTagRecipeBaseline(artifact, tx.registriesToMutate()); preparedArtifact=null; stateMachine.transitionTo(PartialReloadState.SUCCESS);
+            long generation = deferredClientRefreshTracker.confirmCommit(tx.connectedPlayerPolicy(), tx.deferredPlayerSnapshot().keySet());
+            tx.deferredClientRefreshGeneration(generation);
+            if (tx.connectedPlayerPolicy() == TagRecipeConnectedPlayerPolicy.DEFER_CLIENT_REFRESH_UNTIL_RELOGIN) {
+                tx.event(com.gabriel0liv.partialreload.joint.TagRecipeTransactionEventType.DEFERRED_CLIENTS_MARKED_STALE,
+                        TagRecipeTransactionStatus.SUCCESS, "generation=" + generation + ",players=" + tx.deferredPlayerSnapshot().size());
+                notifyDeferredPlayers(deferredSessions);
+                com.gabriel0liv.partialreload.PartialReloadMod.LOGGER.info(
+                        "TAG_RECIPE_COMMIT_SUCCESS_DEFERRED_CLIENT_REFRESH generation={} connectedPlayers={} stalePlayers={}",
+                        generation, tx.deferredPlayerSnapshot().size(), deferredClientRefreshTracker.staleCount());
+            }
         } catch (RuntimeException failure) {
             lastError = failure.getMessage() == null ? failure.getClass().getSimpleName() : failure.getMessage();
             tx.failure(lastError);
@@ -603,12 +672,56 @@ public final class PartialReloadService {
     private void preflightTagRecipeCommit(MinecraftServer server, TagRecipeCommitTransaction tx, PreparedTagsAndRecipes artifact) {
         if (stateMachine.state()!=PartialReloadState.QUIESCING || tagRecipeTransaction!=tx) throw new IllegalStateException("TAG_RECIPE_COMMIT_STATE_CHANGED");
         if (artifact==null || preparedArtifact!=artifact || !artifact.preparationId().equals(tx.preparationId()) || !artifact.isApplicable()) throw new IllegalStateException("TAG_RECIPE_COMMIT_SNAPSHOT_STALE");
-        if (connectedPlayerProbe.playerCount(server)>0) throw new IllegalStateException("TAG_RECIPE_COMMIT_PLAYERS_CONNECTED");
+        tx.connectedPlayerPolicy().validateConnectedPlayerCount(connectedPlayerProbe.playerCount(server));
         if (System.identityHashCode(server.getRecipeManager())!=tx.recipeManagerIdentity() || System.identityHashCode(server.registryAccess())!=tx.registryAccessIdentity()) throw new IllegalStateException("TAG_RECIPE_COMMIT_STATE_CHANGED");
         TagRecipeCommitCompatibility compatibility=TagRecipeCommitCompatibility.inspect(server);
         if (!compatibility.compatible() || !compatibility.fingerprint().equals(tx.compatibilityFingerprint())) throw new IllegalStateException("TAG_RECIPE_COMMIT_NOT_COMPATIBLE");
             if (!currentResourceProbe.matches(server, artifact.sourceSnapshot())) throw new IllegalStateException("TAG_RECIPE_COMMIT_SNAPSHOT_STALE");
         deriveRegistriesToMutate(artifact); // validates unsupported changes before mutation
+    }
+
+    private List<DeferredPlayerSession> prepareDeferredPlayersAtSafePoint(MinecraftServer server,
+                                                                           TagRecipeCommitTransaction tx) {
+        if (tx.connectedPlayerPolicy() != TagRecipeConnectedPlayerPolicy.DEFER_CLIENT_REFRESH_UNTIL_RELOGIN) {
+            return List.of();
+        }
+        List<DeferredPlayerSession> sessions = List.copyOf(deferredPlayerSessionProbe.capture(server));
+        Map<UUID, String> snapshot = new LinkedHashMap<>();
+        for (DeferredPlayerSession session : sessions) {
+            if (snapshot.put(session.playerId(), session.playerName()) != null) {
+                throw new IllegalStateException("TAG_RECIPE_DEFERRED_PLAYER_SNAPSHOT_INVALID");
+            }
+        }
+        tx.deferredPlayerSnapshot(snapshot);
+        tx.event(com.gabriel0liv.partialreload.joint.TagRecipeTransactionEventType.DEFERRED_PLAYERS_CAPTURED,
+                TagRecipeTransactionStatus.QUIESCING, "players=" + sessions.size());
+        tx.event(com.gabriel0liv.partialreload.joint.TagRecipeTransactionEventType.DEFERRED_MENU_CLOSE_STARTED,
+                TagRecipeTransactionStatus.QUIESCING, "players=" + sessions.size());
+        for (DeferredPlayerSession session : sessions) {
+            session.closeContainer().run();
+        }
+        List<String> failed = sessions.stream().filter(session -> !session.inventoryMenuActive().getAsBoolean())
+                .map(DeferredPlayerSession::playerName).sorted().toList();
+        if (!failed.isEmpty()) {
+            throw new IllegalStateException("TAG_RECIPE_DEFERRED_MENU_CLOSE_FAILED: " + failed);
+        }
+        tx.event(com.gabriel0liv.partialreload.joint.TagRecipeTransactionEventType.DEFERRED_MENUS_CLOSED,
+                TagRecipeTransactionStatus.QUIESCING, "players=" + sessions.size());
+        return sessions;
+    }
+
+    private static void notifyDeferredPlayers(List<DeferredPlayerSession> sessions) {
+        Component message = Component.literal("[Partial Reload] As receitas e tags do servidor foram atualizadas. "
+                + "Relogue para atualizar o recipe book, JEI/REI e outras informações visuais. "
+                + "A lógica do servidor já está usando os novos dados.").withStyle(ChatFormatting.GOLD);
+        for (DeferredPlayerSession session : sessions) {
+            try {
+                session.messageSink().accept(message);
+            } catch (RuntimeException notificationFailure) {
+                com.gabriel0liv.partialreload.PartialReloadMod.LOGGER.warn(
+                        "Deferred refresh warning could not be delivered to {}", session.playerName(), notificationFailure);
+            }
+        }
     }
 
     private boolean currentResourcesMatchReal(MinecraftServer server, ResourceSnapshot expected) {
@@ -670,12 +783,13 @@ public final class PartialReloadService {
         if (generation.sourceSnapshot()!=null) { activeReference=generation.sourceSnapshot(); if (latestScan!=null) lastChangeSet=ChangeDetector.diff(activeReference, latestScan); }
         stateMachine.transitionTo(PartialReloadState.ROLLED_BACK);
     }
-    private void verifyTagRecipe(MinecraftServer server, Map<ResourceKey<? extends Registry<?>>,Map<TagKey<?>,List<Holder<?>>>> candidate, PreparedTagsAndRecipes artifact){
-        if(connectedPlayerProbe.playerCount(server)>0)throw new IllegalStateException("TAG_RECIPE_COMMIT_PLAYERS_CONNECTED");
+    private void verifyTagRecipe(MinecraftServer server, Map<ResourceKey<? extends Registry<?>>,Map<TagKey<?>,List<Holder<?>>>> candidate, PreparedTagsAndRecipes artifact, TagRecipeCommitTransaction tx){
+        tx.connectedPlayerPolicy().validateConnectedPlayerCount(connectedPlayerProbe.playerCount(server));
         Set<ResourceLocation> expected=artifact.preparedRecipes().recipesById().keySet(); Set<ResourceLocation> actual=server.getRecipeManager().getRecipes().stream().map(Recipe::getId).collect(java.util.stream.Collectors.toSet());
         if(!actual.equals(expected))throw new IllegalStateException("RECIPE_COMMIT_VERIFICATION_FAILED");
         for (var entry : candidate.entrySet()) { Registry<?> registry=server.registryAccess().registryOrThrow(entry.getKey()); Map<TagKey<?>, List<Holder<?>>> expectedTags=entry.getValue(); Map<TagKey<?>, List<Holder<?>>> observedTags=new LinkedHashMap<>(); registry.getTags().forEach(pair->{ List<Holder<?>> values=new ArrayList<>(); pair.getSecond().forEach(values::add); observedTags.put(pair.getFirst(),values);}); for (var tag:expectedTags.entrySet()) { if(!observedTags.containsKey(tag.getKey()) || !observedTags.get(tag.getKey()).equals(tag.getValue())) throw new IllegalStateException("TAG_COMMIT_VERIFICATION_FAILED: "+tag.getKey()); } }
     }
+
     @SuppressWarnings({"unchecked", "rawtypes"})
     private void verifyRestoredTagRecipe(MinecraftServer server, ActiveTagRecipeGeneration generation, TagRecipeCommitTransaction tx){
         if (tx.recipeManagerIdentity() != 0 && tx.recipeManagerIdentity() != System.identityHashCode(server.getRecipeManager()))
@@ -869,7 +983,10 @@ public final class PartialReloadService {
                 lastChangeSet.changedResources().size(),
                 preparedArtifact == null ? null : preparedArtifact.preparationId(),
                 preparedArtifact == null ? null : preparedArtifact.isApplicable(),
-                lastError
+                lastError,
+                deferredClientRefreshTracker.activeGeneration(),
+                deferredClientRefreshTracker.lastCommitDeferred(),
+                deferredClientRefreshTracker.staleCount()
         );
     }
 

@@ -1227,6 +1227,18 @@ class Acceptance:
                 "ingredients": [{"tag": "partialreload_test:joint"}],
                 "result": {"item": "minecraft:torch", "count": count},
             }) + "\n",
+            "data/partialreload_test/recipes/removed_recipe.json": json.dumps({
+                **({} if not b else {"conditions": [{"type": "forge:false"}]}),
+                "type": "minecraft:crafting_shapeless",
+                "ingredients": [{"item": "minecraft:stone"}],
+                "result": {"item": "minecraft:coal"},
+            }) + "\n",
+            "data/partialreload_test/recipes/new_recipe.json": json.dumps({
+                **({} if b else {"conditions": [{"type": "forge:false"}]}),
+                "type": "minecraft:crafting_shapeless",
+                "ingredients": [{"item": "minecraft:dirt"}],
+                "result": {"item": "minecraft:diamond"},
+            }) + "\n",
         }
         if not b:
             if pack.exists():
@@ -1613,11 +1625,11 @@ class Acceptance:
         if self.connected_commit_preparation is not None:
             return
         self.rcon.command("partialreload scan")
-        self.wait_rcon_status(r"Last scan:\s*(?!never)", 120)
+        self.wait_rcon_status(r"State:\s*IDLE.*Last scan:\s*(?!never)", 120)
         self.install_joint_commit_fixture("B")
         time.sleep(1.1)
         self.rcon.command("partialreload scan")
-        self.wait_rcon_status(r"Changed resources:\s*[1-9]", 120)
+        self.wait_rcon_status(r"State:\s*IDLE.*Changed resources:\s*[1-9]", 120)
         prepare = self.rcon.command("partialreload prepare tags_recipes")
         if not re.search(r"started|preparation", prepare, re.I):
             raise AssertionError(f"tag/recipe preparation did not start: {prepare}")

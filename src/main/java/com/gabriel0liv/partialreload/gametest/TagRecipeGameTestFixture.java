@@ -4,6 +4,7 @@ import com.gabriel0liv.partialreload.PartialReloadMod;
 import com.gabriel0liv.partialreload.core.PartialReloadService;
 import com.gabriel0liv.partialreload.core.PartialReloadState;
 import com.gabriel0liv.partialreload.core.TagRecipeGameTestState;
+import com.gabriel0liv.partialreload.core.DeferredPlayerSession;
 import com.gabriel0liv.partialreload.joint.ActiveTagRecipeGeneration;
 import com.gabriel0liv.partialreload.joint.TagRecipeCommitTransaction;
 import com.gabriel0liv.partialreload.joint.TagRecipeFaultInjection;
@@ -36,10 +37,13 @@ import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Objects;
+import java.util.List;
 
 final class TagRecipeGameTestFixture implements AutoCloseable {
     private static final ResourceLocation ITEM_TAG_ID = id("item_joint");
     private static final ResourceLocation RECIPE_ID = id("acceptance");
+    private static final ResourceLocation REMOVED_RECIPE_ID = id("removed_recipe");
+    private static final ResourceLocation NEW_RECIPE_ID = id("new_recipe");
 
     private final GameTestHelper helper;
     private final MinecraftServer server;
@@ -145,6 +149,10 @@ final class TagRecipeGameTestFixture implements AutoCloseable {
         service.resetConnectedPlayerProbe();
     }
 
+    void deferredSessions(List<DeferredPlayerSession> sessions) {
+        service.deferredPlayerSessionProbe(ignored -> List.copyOf(sessions));
+    }
+
     void holdSafePoint() {
         service.holdTagRecipeSafePoint();
     }
@@ -166,6 +174,8 @@ final class TagRecipeGameTestFixture implements AutoCloseable {
     void assertGenerationA() {
         assertItemTag("item_joint", "minecraft:stone");
         assertRecipe(1);
+        assertRecipePresent(REMOVED_RECIPE_ID);
+        assertRecipeAbsent(NEW_RECIPE_ID);
     }
 
     void assertPhysicalGenerationA() {
@@ -175,6 +185,8 @@ final class TagRecipeGameTestFixture implements AutoCloseable {
     void assertGenerationB() {
         assertItemTag("item_joint", "minecraft:dirt");
         assertRecipe(2);
+        assertRecipeAbsent(REMOVED_RECIPE_ID);
+        assertRecipePresent(NEW_RECIPE_ID);
     }
 
     void assertLifecycleGenerationA() {
@@ -267,6 +279,14 @@ final class TagRecipeGameTestFixture implements AutoCloseable {
                 "recipe index occurrence mismatch");
     }
 
+    void assertRecipePresent(ResourceLocation id) {
+        helper.assertTrue(server.getRecipeManager().byKey(id).isPresent(), "recipe should be present: " + id);
+    }
+
+    void assertRecipeAbsent(ResourceLocation id) {
+        helper.assertTrue(server.getRecipeManager().byKey(id).isEmpty(), "recipe should be absent: " + id);
+    }
+
     private static long countRecipeOccurrences(RecipeManager manager, Recipe<?> recipe) {
         return countRecipeOccurrencesCaptured(manager, recipe.getType(), recipe.getId());
     }
@@ -335,6 +355,13 @@ final class TagRecipeGameTestFixture implements AutoCloseable {
         }
         resources.put(location("recipes/gametest_tx/acceptance.json"),
                 "{\"type\":\"minecraft:crafting_shapeless\",\"ingredients\":[{\"tag\":\"partialreload:gametest_tx/item_joint\"}],\"result\":{\"item\":\"minecraft:torch\",\"count\":" + count + "}}");
+        if (candidate) {
+            resources.put(location("recipes/gametest_tx/new_recipe.json"),
+                    "{\"type\":\"minecraft:crafting_shapeless\",\"ingredients\":[{\"item\":\"minecraft:dirt\"}],\"result\":{\"item\":\"minecraft:diamond\"}}");
+        } else {
+            resources.put(location("recipes/gametest_tx/removed_recipe.json"),
+                    "{\"type\":\"minecraft:crafting_shapeless\",\"ingredients\":[{\"item\":\"minecraft:stone\"}],\"result\":{\"item\":\"minecraft:coal\"}}");
+        }
         return resources;
     }
 

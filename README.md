@@ -6,7 +6,7 @@ e transacionais em servidores Forge 1.20.1.
 Versão atual: `0.3.0-SNAPSHOT` — preparação conjunta e commit server-only de tags/recipes adicionados; commit de functions vanilla suportado no alvo
 exato Forge 47.4.10.
 
-A fundação opcional de handshake client-side da Fase 4F-A foi aceita: o canal `partialreload:client_sync` é client-optional, a presença é iniciada pelo cliente, clientes sem o mod continuam entrando, clientes com o mod entram em servidor sem Partial Reload, e reconnects/timeout SILENT foram validados. Sincronização de tags/recipes com jogadores conectados continua bloqueada pelo gate server-only; não há payloads de tags/recipes, ACK transacional, recipe book, quiescência ou rollback distribuído.
+A fundação opcional de handshake client-side da Fase 4F-A foi aceita: o canal `partialreload:client_sync` é client-optional, a presença é iniciada pelo cliente, clientes sem o mod continuam entrando, clientes com o mod entram em servidor sem Partial Reload, e reconnects/timeout SILENT foram validados. A Fase 4F-R acrescenta um commit opt-in com refresh do cliente adiado até o relog: o servidor muda imediatamente, fecha menus abertos e mantém os jogadores online, mas recipe book, JEI/REI e informação visual podem permanecer antigos. Não há payloads de tags/recipes, ACK transacional, live sync, quiescência ou rollback distribuído.
 
 ## Implementado
 
@@ -36,11 +36,12 @@ A fundação opcional de handshake client-side da Fase 4F-A foi aceita: o canal 
   safety gate 4E-S aprovado após a matriz completa, GameTests e acceptance
   dedicada;
 - fundação opcional client-side 4F-A aceita por evidência funcional com handshake compatível, cliente ausente, servidor Forge independente sem Partial Reload, reconnects, SILENT, acceptance composta e cleanup fail-closed.
+- modo opt-in `SERVER_COMMIT_DEFERRED_CLIENT_REFRESH`: commit imediato no servidor com jogadores conectados, fechamento fail-closed de menus, rastreamento de clientes stale e atualização pelo fluxo normal de relog.
 
 ## Não implementado
 
 - commit de loot/predicates/item modifiers;
-- sincronização de recipes para clientes, suporte a jogadores ou menus abertos;
+- sincronização live de recipes/tags, atualização de recipe book/viewers durante a sessão ou rollback de clientes;
 - políticas de load diferentes de `DO_NOT_RUN`;
 - rollback após restart ou histórico de gerações;
 - Global Loot Modifiers (provider separado, planejado);
@@ -76,13 +77,16 @@ Requerem nível de operador configurável (padrão 4):
 /partialreload prepared
 /partialreload discard
 /partialreload apply prepared
+/partialreload apply prepared deferred
 /partialreload transaction
 /partialreload rollback functions
 /partialreload active functions
 ```
 
-`reload` continua bloqueado. `apply prepared` aceita somente
-`PreparedFunctions`; candidatos de loot continuam rejeitados.
+`reload` continua bloqueado. `apply prepared` publica `PreparedFunctions` ou
+`PreparedTagsAndRecipes` conforme seus contratos. O subcomando `deferred` é
+exclusivo de tags + recipes, mantém os jogadores online e exige relog para o
+refresh visual; candidatos de loot continuam rejeitados.
 Quando KubeJS não está presente na versão alvo, `prepared` informa
 explicitamente `KubeJS integration: not loaded` e mantém apenas o baseline
 vanilla/Forge.
@@ -92,7 +96,8 @@ handler foi executado e nenhuma aceitação com runtime alvo foi realizada.
 Tags gerais possuem preparação read-only; binding, sincronização e commit ainda
 não são implementados.
 Quando tags e recipes são preparadas juntas, `PreparedTagsAndRecipes` é
-atômico e `apply prepared` permanece recusado.
+atômico no servidor. O comando normal exige zero jogadores; o modo `deferred`
+é opt-in e não fornece atomicidade distribuída nem live sync.
 
 Na preparação conjunta, recipes só são revalidadas quando dependem
 direta/transitivamente de tags realmente alteradas e o hash do JSON permanece
