@@ -23,6 +23,12 @@ import com.gabriel0liv.partialreload.function.TransactionEventType;
 import com.gabriel0liv.partialreload.loot.LootPreparationContext;
 import com.gabriel0liv.partialreload.loot.PreparedLootData;
 import com.gabriel0liv.partialreload.loot.VanillaLootDataProvider;
+import com.gabriel0liv.partialreload.loot.ActiveLootDataGeneration;
+import com.gabriel0liv.partialreload.loot.LootDataCommitTransaction;
+import com.gabriel0liv.partialreload.loot.LootDataFaultInjection;
+import com.gabriel0liv.partialreload.loot.LootDataFaultPoint;
+import com.gabriel0liv.partialreload.loot.LootDataManagerBridge;
+import com.gabriel0liv.partialreload.loot.LootDataTransactionStatus;
 import com.gabriel0liv.partialreload.recipe.PreparedRecipes;
 import com.gabriel0liv.partialreload.recipe.PreparedRecipe;
 import com.gabriel0liv.partialreload.recipe.VanillaRecipesProvider;
@@ -205,6 +211,10 @@ public final class PartialReloadService {
     @Nullable private TagRecipeCommitTransaction tagRecipeTransaction;
     @Nullable private ActiveTagRecipeGeneration retainedTagRecipeGeneration;
     @Nullable private ActiveTagRecipeGeneration activeTagRecipeGeneration;
+    @Nullable private LootDataCommitTransaction lootDataTransaction;
+    @Nullable private ActiveLootDataGeneration retainedLootDataGeneration;
+    @Nullable private ActiveLootDataGeneration activeLootDataGeneration;
+    @Nullable private ResourceSnapshot retainedLootDataSourceSnapshot;
 
     public PartialReloadService(
             ProviderRegistry providerRegistry,
@@ -546,6 +556,212 @@ public final class PartialReloadService {
     public synchronized TagRecipeCommitTransaction tagRecipeTransaction() { return tagRecipeTransaction; }
     public synchronized ActiveTagRecipeGeneration retainedTagRecipeGeneration() { return retainedTagRecipeGeneration; }
     public DeferredClientRefreshTracker deferredClientRefreshTracker() { return deferredClientRefreshTracker; }
+
+    public synchronized LootDataCommitTransaction lootDataTransaction() { return lootDataTransaction; }
+    public synchronized ActiveLootDataGeneration retainedLootDataGeneration() { return retainedLootDataGeneration; }
+    public synchronized ActiveLootDataGeneration activeLootDataGeneration() { return activeLootDataGeneration; }
+
+    public synchronized LootDataCommitTransaction requestLootDataCommit(MinecraftServer server, String requester) {
+        if (stateMachine.state() == PartialReloadState.DEGRADED) {
+            throw new IllegalStateException("LOOT_DATA_TRANSACTION_DEGRADED: restart is required");
+        }
+        if (lootDataTransaction != null && !lootTransactionTerminal(lootDataTransaction.status())) {
+            throw new IllegalStateException("LOOT_COMMIT_TRANSACTION_RUNNING");
+        }
+        if (stateMachine.state() != PartialReloadState.READY) {
+            throw new IllegalStateException("LOOT_COMMIT_ARTIFACT_INVALID: state must be READY");
+        }
+        if (!(preparedArtifact instanceof PreparedLootData artifact) || !artifact.isApplicable()) {
+            throw new IllegalStateException("LOOT_COMMIT_ARTIFACT_INVALID");
+        }
+        if (artifact.expandedCategories().size() != 3
+                || !artifact.expandedCategories().equals(PreparedLootData.COMPLETE_SCOPE)) {
+            throw new IllegalStateException("LOOT_COMMIT_CANDIDATE_INCOMPLETE");
+        }
+        var manager = server.getLootData();
+        ActiveLootDataGeneration active = LootDataManagerBridge.capture(manager);
+        ActiveLootDataGeneration candidate = LootDataManagerBridge.fromPrepared(artifact);
+        LootDataManagerBridge.validateComplete(candidate.elements(), candidate.keysByType());
+        if (!currentLootResourcesMatchReal(server, artifact.sourceSnapshot())) {
+            throw new IllegalStateException("LOOT_COMMIT_SNAPSHOT_STALE");
+        }
+        LootDataCommitTransaction tx = new LootDataCommitTransaction(UUID.randomUUID(), artifact.preparationId(),
+                Instant.now(), requester, System.identityHashCode(manager), active.compatibilityFingerprint());
+        tx.candidateGeneration(candidate);
+        tx.status(LootDataTransactionStatus.READY);
+        lootDataTransaction = tx;
+        stateMachine.transitionTo(PartialReloadState.QUIESCING);
+        return tx;
+    }
+
+    public synchronized LootDataCommitTransaction requestLootDataRollback(MinecraftServer server, String requester) {
+        if (stateMachine.state() == PartialReloadState.DEGRADED) {
+            throw new IllegalStateException("LOOT_DATA_TRANSACTION_DEGRADED: restart is required");
+        }
+        if (retainedLootDataGeneration == null) {
+            throw new IllegalStateException("LOOT_DATA_MANUAL_ROLLBACK_UNAVAILABLE");
+        }
+        if (stateMachine.state() != PartialReloadState.SUCCESS && stateMachine.state() != PartialReloadState.IDLE) {
+            throw new IllegalStateException("LOOT_COMMIT_TRANSACTION_RUNNING");
+        }
+        var manager = server.getLootData();
+        ActiveLootDataGeneration active = LootDataManagerBridge.capture(manager);
+        LootDataCommitTransaction tx = new LootDataCommitTransaction(UUID.randomUUID(), null, Instant.now(), requester,
+                System.identityHashCode(manager), active.compatibilityFingerprint());
+        tx.previousGeneration(retainedLootDataGeneration);
+        tx.candidateGeneration(retainedLootDataGeneration);
+        tx.status(LootDataTransactionStatus.READY);
+        lootDataTransaction = tx;
+        stateMachine.transitionTo(PartialReloadState.QUIESCING);
+        return tx;
+    }
+
+    public synchronized void processLootDataSafePoint(MinecraftServer server) {
+        LootDataCommitTransaction tx = lootDataTransaction;
+        if (tx == null || tx.status() != LootDataTransactionStatus.READY) return;
+        if (!server.isSameThread()) {
+            failLootBeforeMutation(tx, "LOOT_COMMIT_WRONG_THREAD");
+            return;
+        }
+        var manager = server.getLootData();
+        try {
+            preflightLootDataSafePoint(server, manager, tx);
+            ActiveLootDataGeneration previous = LootDataManagerBridge.capture(manager);
+            tx.previousGeneration(previous);
+            if (tx.preparationId() != null) {
+                retainedLootDataSourceSnapshot = activeReference;
+            }
+            retainedLootDataGeneration = previous;
+            stateMachine.transitionTo(PartialReloadState.COMMITTING);
+            tx.status(LootDataTransactionStatus.COMMITTING);
+            LootDataFaultInjection.hit(LootDataFaultPoint.BEFORE_PUBLICATION);
+            LootDataManagerBridge.publishElements(manager, tx.candidateGeneration());
+            tx.elementsPublished(true);
+            LootDataFaultInjection.hit(LootDataFaultPoint.AFTER_ELEMENTS_PUBLICATION);
+            LootDataManagerBridge.publishTypeIndex(manager, tx.candidateGeneration());
+            tx.typeIndexPublished(true);
+            LootDataFaultInjection.hit(LootDataFaultPoint.AFTER_TYPE_INDEX_PUBLICATION);
+            tx.status(LootDataTransactionStatus.VERIFYING);
+            stateMachine.transitionTo(PartialReloadState.VERIFYING);
+            LootDataFaultInjection.hit(LootDataFaultPoint.DURING_VERIFICATION);
+            LootDataManagerBridge.verify(manager, tx.candidateGeneration());
+            tx.verificationPassed(true);
+            tx.status(LootDataTransactionStatus.SUCCESS);
+            activeLootDataGeneration = tx.candidateGeneration();
+            if (tx.preparationId() == null) {
+                retainedLootDataGeneration = null;
+                if (retainedLootDataSourceSnapshot != null) {
+                    activeReference = retainedLootDataSourceSnapshot;
+                    retainedLootDataSourceSnapshot = null;
+                }
+                tx.status(LootDataTransactionStatus.ROLLED_BACK);
+                stateMachine.transitionTo(PartialReloadState.ROLLED_BACK);
+            } else {
+                PreparedLootData artifact = (PreparedLootData) preparedArtifact;
+                activeReference = artifact.sourceSnapshot();
+                if (latestScan != null) lastChangeSet = ChangeDetector.diff(activeReference, latestScan);
+                preparedArtifact = null;
+                stateMachine.transitionTo(PartialReloadState.SUCCESS);
+                com.gabriel0liv.partialreload.PartialReloadMod.LOGGER.info(
+                        "LOOT_DATA_COMMIT_SUCCESS generation={} predicates={} itemModifiers={} lootTables={} playersConnected={}",
+                        activeLootDataGeneration.generationId(), activeLootDataGeneration.predicateCount(),
+                        activeLootDataGeneration.itemModifierCount(), activeLootDataGeneration.lootTableCount(),
+                        connectedPlayerProbe.playerCount(server));
+            }
+        } catch (RuntimeException failure) {
+            String message = failure.getMessage() == null ? failure.getClass().getSimpleName() : failure.getMessage();
+            tx.failure(message);
+            if (!tx.elementsPublished() && !tx.typeIndexPublished()) {
+                failLootBeforeMutation(tx, message);
+                return;
+            }
+            try {
+                tx.status(LootDataTransactionStatus.ROLLING_BACK);
+                LootDataFaultInjection.hit(LootDataFaultPoint.DURING_ROLLBACK);
+                LootDataManagerBridge.publish(manager, tx.previousGeneration());
+                LootDataManagerBridge.verify(manager, tx.previousGeneration());
+                tx.rollbackPerformed(true);
+                tx.verificationPassed(true);
+                tx.status(LootDataTransactionStatus.ROLLED_BACK);
+                activeLootDataGeneration = tx.previousGeneration();
+                retainedLootDataGeneration = null;
+                retainedLootDataSourceSnapshot = null;
+                stateMachine.transitionTo(PartialReloadState.ROLLED_BACK);
+                com.gabriel0liv.partialreload.PartialReloadMod.LOGGER.error(
+                        "LOOT_DATA_COMMIT_FAILED_ROLLED_BACK transaction={} failure={}",
+                        tx.transactionId(), message);
+            } catch (RuntimeException rollbackFailure) {
+                tx.failure(message + "; LOOT_TRANSACTION_DEGRADED: "
+                        + (rollbackFailure.getMessage() == null ? rollbackFailure.getClass().getSimpleName()
+                        : rollbackFailure.getMessage()));
+                tx.status(LootDataTransactionStatus.DEGRADED);
+                lastError = tx.failure();
+                stateMachine.transitionTo(PartialReloadState.DEGRADED);
+                com.gabriel0liv.partialreload.PartialReloadMod.LOGGER.error(
+                        "LOOT_DATA_TRANSACTION_DEGRADED transaction={} failure={}", tx.transactionId(), tx.failure());
+            }
+        }
+    }
+
+    private void preflightLootDataSafePoint(MinecraftServer server,
+                                              net.minecraft.world.level.storage.loot.LootDataManager manager,
+                                              LootDataCommitTransaction tx) {
+        if (stateMachine.state() != PartialReloadState.QUIESCING || lootDataTransaction != tx) {
+            throw new IllegalStateException("LOOT_COMMIT_TRANSACTION_RUNNING");
+        }
+        if (System.identityHashCode(manager) != tx.managerIdentity()) {
+            throw new IllegalStateException("LOOT_COMMIT_MANAGER_CHANGED");
+        }
+        LootDataManagerBridge.validateLayout(manager);
+        if (!LootDataManagerBridge.fingerprint(manager).equals(tx.expectedActiveFingerprint())) {
+            throw new IllegalStateException("LOOT_COMMIT_MANAGER_CHANGED: active fingerprint");
+        }
+        if (tx.preparationId() != null) {
+            if (!(preparedArtifact instanceof PreparedLootData artifact)
+                    || !artifact.preparationId().equals(tx.preparationId()) || !artifact.isApplicable()) {
+                throw new IllegalStateException("LOOT_COMMIT_ARTIFACT_INVALID");
+            }
+            if (!currentLootResourcesMatchReal(server, artifact.sourceSnapshot())) {
+                throw new IllegalStateException("LOOT_COMMIT_SNAPSHOT_STALE");
+            }
+        }
+        LootDataManagerBridge.validateComplete(tx.candidateGeneration().elements(),
+                tx.candidateGeneration().keysByType());
+    }
+
+    private void failLootBeforeMutation(LootDataCommitTransaction tx, String message) {
+        tx.failure(message);
+        tx.status(LootDataTransactionStatus.FAILED);
+        lastError = message;
+        stateMachine.transitionTo(PartialReloadState.FAILED_SAFE);
+    }
+
+    private static boolean lootTransactionTerminal(LootDataTransactionStatus status) {
+        return status == LootDataTransactionStatus.SUCCESS || status == LootDataTransactionStatus.ROLLED_BACK
+                || status == LootDataTransactionStatus.FAILED || status == LootDataTransactionStatus.DEGRADED;
+    }
+
+    private boolean currentLootResourcesMatchReal(MinecraftServer server, ResourceSnapshot expected) {
+        try {
+            ResourceSnapshot current = new ResourceScanner(Clock.systemUTC()).scan(new ScanContext(
+                    server.getResourceManager(), PartialReloadConfig.maxScannedResources(),
+                    java.time.Duration.ofSeconds(PartialReloadConfig.scanTimeoutSeconds()), true));
+            for (var entry : expected.resources().entrySet()) {
+                if (!PreparedLootData.COMPLETE_SCOPE.contains(entry.getValue().category())) continue;
+                var now = current.resources().get(entry.getKey());
+                if (now == null || !now.fingerprint().hash().equals(entry.getValue().fingerprint().hash())
+                        || !now.sourcePack().equals(entry.getValue().sourcePack())) return false;
+            }
+            for (var entry : current.resources().entrySet()) {
+                if (PreparedLootData.COMPLETE_SCOPE.contains(entry.getValue().category())
+                        && !expected.resources().containsKey(entry.getKey())) return false;
+            }
+            return true;
+        } catch (Exception exception) {
+            lastError = "LOOT_COMMIT_SNAPSHOT_STALE: " + exception.getMessage();
+            return false;
+        }
+    }
 
     public void onPlayerLogin(UUID playerId) {
         deferredClientRefreshTracker.remove(playerId);
@@ -986,7 +1202,13 @@ public final class PartialReloadService {
                 lastError,
                 deferredClientRefreshTracker.activeGeneration(),
                 deferredClientRefreshTracker.lastCommitDeferred(),
-                deferredClientRefreshTracker.staleCount()
+                deferredClientRefreshTracker.staleCount(),
+                activeLootDataGeneration == null ? null : activeLootDataGeneration.generationId(),
+                lootDataTransaction == null ? "none" : lootDataTransaction.status().name(),
+                retainedLootDataGeneration != null,
+                activeLootDataGeneration == null ? 0 : activeLootDataGeneration.predicateCount(),
+                activeLootDataGeneration == null ? 0 : activeLootDataGeneration.itemModifierCount(),
+                activeLootDataGeneration == null ? 0 : activeLootDataGeneration.lootTableCount()
         );
     }
 

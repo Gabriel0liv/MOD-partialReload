@@ -9,6 +9,7 @@ import com.gabriel0liv.partialreload.plan.ReloadPlanner;
 import com.gabriel0liv.partialreload.resource.ResourceScanner;
 import com.gabriel0liv.partialreload.function.VanillaFunctionsProvider;
 import com.gabriel0liv.partialreload.loot.VanillaLootDataProvider;
+import com.gabriel0liv.partialreload.loot.LootDataFaultInjection;
 import com.gabriel0liv.partialreload.joint.TagRecipeFaultInjection;
 import com.gabriel0liv.partialreload.network.PartialReloadNetwork;
 import com.gabriel0liv.partialreload.network.server.ClientHandshakeServer;
@@ -40,6 +41,7 @@ public final class PartialReloadMod {
 
     public PartialReloadMod(FMLJavaModLoadingContext context) {
         TagRecipeFaultInjection.clear();
+        LootDataFaultInjection.clear();
         PartialReloadNetwork.register();
         DistExecutor.unsafeRunWhenOn(Dist.CLIENT,
                 () -> com.gabriel0liv.partialreload.client.network.ClientHandshakeController::registerClientListeners);
@@ -76,6 +78,7 @@ public final class PartialReloadMod {
 
     private void serverStopping(ServerStoppingEvent event) {
         TagRecipeFaultInjection.clear();
+        LootDataFaultInjection.clear();
         service.clearDeferredClientRefreshState();
         if (handshakeServer != null) {
             handshakeServer.clear();
@@ -98,6 +101,7 @@ public final class PartialReloadMod {
         if (event.phase == TickEvent.Phase.END) {
             service.processFunctionSafePoint(event.getServer());
             service.processTagRecipeSafePoint(event.getServer());
+            service.processLootDataSafePoint(event.getServer());
             if (handshakeServer != null) {
                 handshakeServer.tick(event.getServer().getTickCount());
             }

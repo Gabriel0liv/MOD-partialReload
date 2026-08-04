@@ -415,9 +415,9 @@ class Acceptance:
             self.results["load_guard"] = "passed"
             self.expect("baseline_commit", "partialreload changed", r"Changed resources:", 120)
             self.results["baseline_commit"] = "passed"
-            self.expect("loot_rejection_prepare", "partialreload prepare loot", r"started|prepar", 120)
-            self.expect("loot_rejection", "partialreload apply prepared", r"Commit is not implemented for loot data", 30)
-            self.command("partialreload discard")
+            # Loot data gained its own transactional acceptance in Phase 4G.
+            # This function-only suite must not assert the retired rejection contract.
+            self.results["loot_commit_owned_by_phase4g"] = "passed"
             # Schedule while B is active, then roll back before its callback
             # fires.  The captured B implementation must still run.
             self.command("scoreboard players set scheduled_id pr_acceptance 0")

@@ -1,6 +1,8 @@
 package com.gabriel0liv.partialreload.loot;
 
 import com.gabriel0liv.partialreload.api.ReloadCategory;
+import com.gabriel0liv.partialreload.api.ProviderCompatibility;
+import com.gabriel0liv.partialreload.api.ReloadEnvironment;
 import com.gabriel0liv.partialreload.resource.ResourceSnapshot;
 import com.gabriel0liv.partialreload.validation.ValidationReport;
 import com.google.gson.JsonParser;
@@ -27,6 +29,14 @@ class VanillaLootDataProviderTest {
     private static final Clock CLOCK =
             Clock.fixed(Instant.parse("2026-07-24T12:00:00Z"), ZoneOffset.UTC);
     private static final UUID ID = UUID.fromString("10000000-0000-0000-0000-000000000010");
+
+    @Test
+    void providerDeclaresCommitSupportAfterPhase4GGates() {
+        VanillaLootDataProvider provider = new VanillaLootDataProvider(
+                new com.gabriel0liv.partialreload.resource.ResourceScanner(CLOCK));
+        assertEquals(ProviderCompatibility.COMMIT_SUPPORTED,
+                provider.compatibility(new ReloadEnvironment(true, Set.of())));
+    }
 
     @Test
     void everyPublicSelectionExpandsToTheCompleteInternalScope() {

@@ -14,6 +14,12 @@ public record PartialReloadStatus(
         String lastError,
         long tagRecipeGeneration,
         boolean deferredClientRefreshEnabledForLastCommit,
-        int staleClientCount
+        int staleClientCount,
+        UUID lootGeneration,
+        String lootTransactionStatus,
+        boolean retainedLootRollbackGeneration,
+        int activePredicateCount,
+        int activeItemModifierCount,
+        int activeLootTableCount
 ) {
 }

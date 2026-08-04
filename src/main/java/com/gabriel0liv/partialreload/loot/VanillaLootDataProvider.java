@@ -72,7 +72,7 @@ public final class VanillaLootDataProvider implements ReloadProvider {
 
     @Override
     public ProviderCompatibility compatibility(ReloadEnvironment environment) {
-        return ProviderCompatibility.PREPARE_SUPPORTED;
+        return ProviderCompatibility.COMMIT_SUPPORTED;
     }
 
     @Override

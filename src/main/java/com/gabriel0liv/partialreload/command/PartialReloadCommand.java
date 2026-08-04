@@ -14,6 +14,8 @@ import com.gabriel0liv.partialreload.function.FunctionPreparationContext;
 import com.gabriel0liv.partialreload.function.PreparedFunctions;
 import com.gabriel0liv.partialreload.function.VanillaFunctionsProvider;
 import com.gabriel0liv.partialreload.loot.LootPreparationContext;
+import com.gabriel0liv.partialreload.loot.LootDataFaultInjection;
+import com.gabriel0liv.partialreload.loot.LootDataFaultPoint;
 import com.gabriel0liv.partialreload.loot.PreparedLootData;
 import com.gabriel0liv.partialreload.loot.VanillaLootDataProvider;
 import com.gabriel0liv.partialreload.recipe.PreparedRecipes;
@@ -107,7 +109,11 @@ public final class PartialReloadCommand {
                         .then(Commands.literal("functions")
                                 .executes(context -> rollbackFunctions(context.getSource(), service)))
                         .then(Commands.literal("tags_recipes")
-                                .executes(context -> rollbackTagsRecipes(context.getSource(), service))))
+                                .executes(context -> rollbackTagsRecipes(context.getSource(), service)))
+                        .then(Commands.literal("loot")
+                                .executes(context -> rollbackLootData(context.getSource(), service)))
+                        .then(Commands.literal("loot_data")
+                                .executes(context -> rollbackLootData(context.getSource(), service))))
                 .then(Commands.literal("active")
                         .then(Commands.literal("functions")
                                 .executes(context -> activeFunctions(context.getSource())))
@@ -152,7 +158,15 @@ public final class PartialReloadCommand {
                                                         .then(Commands.argument("second", StringArgumentType.word())
                                                                 .executes(context -> debugFaultSequence(context.getSource(), StringArgumentType.getString(context, "first"), StringArgumentType.getString(context, "second"))))))
                                         .then(Commands.literal("clear").requires(source -> !net.minecraftforge.fml.loading.FMLEnvironment.production && source.hasPermission(4)).executes(context -> { TagRecipeFaultInjection.clear(); context.getSource().sendSuccess(() -> Component.literal("Tag/recipe fault cleared"), false); return 1; }))
-                                        .then(Commands.literal("status").executes(context -> debugFaultStatus(context.getSource())))))
+                                        .then(Commands.literal("status").executes(context -> debugFaultStatus(context.getSource()))))
+                                .then(Commands.literal("loot_data")
+                                        .then(Commands.literal("set")
+                                                .requires(source -> !net.minecraftforge.fml.loading.FMLEnvironment.production && source.hasPermission(4))
+                                                .then(Commands.argument("point", StringArgumentType.word())
+                                                        .executes(context -> debugLootFaultSet(context.getSource(), StringArgumentType.getString(context, "point")))))
+                                        .then(Commands.literal("clear")
+                                                .requires(source -> !net.minecraftforge.fml.loading.FMLEnvironment.production && source.hasPermission(4))
+                                                .executes(context -> { LootDataFaultInjection.clear(); context.getSource().sendSuccess(() -> Component.literal("Loot-data fault cleared"), false); return 1; }))))
                         .then(Commands.literal("tag_recipe_journal")
                                 .requires(source -> !net.minecraftforge.fml.loading.FMLEnvironment.production)
                                 .executes(context -> debugTagRecipeJournal(context.getSource(), service)))
@@ -203,6 +217,18 @@ public final class PartialReloadCommand {
         return 1;
     }
 
+    private static int debugLootFaultSet(CommandSourceStack source, String name) {
+        try {
+            LootDataFaultInjection.clear();
+            LootDataFaultInjection.arm(LootDataFaultPoint.valueOf(name.toUpperCase(java.util.Locale.ROOT)));
+            source.sendSuccess(() -> Component.literal("Loot-data fault armed: " + name), false);
+            return 1;
+        } catch (IllegalArgumentException ex) {
+            source.sendFailure(Component.literal("Unknown loot-data fault point: " + name));
+            return 0;
+        }
+    }
+
     private static int debugTagRecipeJournal(CommandSourceStack source, PartialReloadService service) {
         var tx = service.tagRecipeTransaction();
         if (tx == null) { source.sendSuccess(() -> Component.literal("No tag/recipe transaction"), false); return 1; }
@@ -242,7 +268,12 @@ public final class PartialReloadCommand {
                 "Last scan: " + (status.lastScanAt() == null ? "never" : status.lastScanAt())
         ), false);
         source.sendSuccess(() -> Component.literal("Changed resources: " + status.changedResources()), false);
-        source.sendSuccess(() -> Component.literal("Loot data commit: not implemented"), false);
+        source.sendSuccess(() -> Component.literal("lootGeneration=" + status.lootGeneration()
+                + " lootTransactionStatus=" + status.lootTransactionStatus()
+                + " retainedLootRollbackGeneration=" + status.retainedLootRollbackGeneration()), false);
+        source.sendSuccess(() -> Component.literal("activePredicates=" + status.activePredicateCount()
+                + " activeItemModifiers=" + status.activeItemModifierCount()
+                + " activeLootTables=" + status.activeLootTableCount()), false);
         source.sendSuccess(() -> Component.literal("Recipe/tag commit default: SERVER_ONLY_NO_PLAYERS"), false);
         source.sendSuccess(() -> Component.literal("Recipe/tag commit opt-in: SERVER_COMMIT_DEFERRED_CLIENT_REFRESH (relog required)"), false);
         source.sendSuccess(() -> Component.literal("tagRecipeGeneration=" + status.tagRecipeGeneration()
@@ -817,7 +848,7 @@ public final class PartialReloadCommand {
                 source.sendSuccess(() -> message, false);
             }
         });
-        source.sendFailure(Component.literal("Commit support: not implemented"));
+        source.sendSuccess(() -> Component.literal("Commit support: joint loot data transaction"), false);
         source.sendSuccess(() -> Component.literal("Active LootDataManager: unchanged"), false);
         return 1;
     }
@@ -838,6 +869,15 @@ public final class PartialReloadCommand {
     private static int applyPrepared(CommandSourceStack source, PartialReloadService service,
                                      TagRecipeConnectedPlayerPolicy policy) {
         try {
+            if (service.preparedArtifact() instanceof PreparedLootData) {
+                if (policy == TagRecipeConnectedPlayerPolicy.DEFER_CLIENT_REFRESH_UNTIL_RELOGIN) {
+                    throw new IllegalStateException("TAG_RECIPE_DEFERRED_REQUIRES_TAGS_AND_RECIPES");
+                }
+                var tx = service.requestLootDataCommit(source.getServer(), source.getTextName());
+                source.sendSuccess(() -> Component.literal("Loot data transaction " + tx.transactionId()
+                        + " queued for the next safe point."), false);
+                return 1;
+            }
             if (service.preparedArtifact() instanceof PreparedTagsAndRecipes) {
                 var tx = service.requestTagRecipeCommit(source.getServer(), source.getTextName(), policy);
                 source.sendSuccess(() -> Component.literal("Tag/recipe transaction " + tx.transactionId()
@@ -860,6 +900,19 @@ public final class PartialReloadCommand {
     }
 
     private static int transaction(CommandSourceStack source, PartialReloadService service) {
+        var loot = service.lootDataTransaction();
+        if (loot != null) {
+            source.sendSuccess(() -> Component.literal("Loot transaction: " + loot.transactionId()), false);
+            source.sendSuccess(() -> Component.literal("Preparation: " + loot.preparationId()), false);
+            source.sendSuccess(() -> Component.literal("Status: " + loot.status()), false);
+            source.sendSuccess(() -> Component.literal("Elements published: " + loot.elementsPublished()
+                    + " type index published: " + loot.typeIndexPublished()), false);
+            source.sendSuccess(() -> Component.literal("Verification: " + loot.verificationPassed()), false);
+            source.sendSuccess(() -> Component.literal("Rollback retained: "
+                    + (service.retainedLootDataGeneration() != null)), false);
+            if (loot.failure() != null) source.sendFailure(Component.literal("Failure: " + loot.failure()));
+            return 1;
+        }
         var joint = service.tagRecipeTransaction();
         if (joint != null) {
             source.sendSuccess(() -> Component.literal("Transaction: " + joint.transactionId()), false);
@@ -908,6 +961,18 @@ public final class PartialReloadCommand {
     private static int rollbackTagsRecipes(CommandSourceStack source, PartialReloadService service) {
         try { var tx=service.requestTagRecipeRollback(source.getServer(), source.getTextName()); source.sendSuccess(() -> Component.literal("Tag/recipe rollback " + tx.transactionId() + " queued for the next safe point."), false); return 1; }
         catch(RuntimeException exception){source.sendFailure(Component.literal(exception.getMessage())); return 0;}
+    }
+
+    private static int rollbackLootData(CommandSourceStack source, PartialReloadService service) {
+        try {
+            var tx = service.requestLootDataRollback(source.getServer(), source.getTextName());
+            source.sendSuccess(() -> Component.literal("Loot data rollback " + tx.transactionId()
+                    + " queued for the next safe point."), false);
+            return 1;
+        } catch (RuntimeException exception) {
+            source.sendFailure(Component.literal(exception.getMessage()));
+            return 0;
+        }
     }
 
     private static int activeTagsRecipes(CommandSourceStack source, PartialReloadService service) {

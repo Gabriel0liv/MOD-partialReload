@@ -1,5 +1,9 @@
 # Spec 010 — Preparação conjunta de loot data
 
+> A publicação transacional server-side deste artefato é especificada em
+> `018-loot-data-transactional-commit.md`. Esta spec continua autoritativa para
+> scan, parsing, validação e construção do bundle conjunto.
+
 ## 1. Contexto
 
 As fases anteriores implementaram observação, planejamento e preparação passiva

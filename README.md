@@ -3,8 +3,8 @@
 Framework estritamente server-side para reloads parciais seguros, categorizados
 e transacionais em servidores Forge 1.20.1.
 
-Versão atual: `0.3.0-SNAPSHOT` — preparação conjunta e commit server-only de tags/recipes adicionados; commit de functions vanilla suportado no alvo
-exato Forge 47.4.10.
+Versão atual: `0.3.0-SNAPSHOT` — commits transacionais de functions, do bundle
+tags+recipes e do bundle predicates+item modifiers+loot no alvo Forge 47.4.10.
 
 A fundação opcional de handshake client-side da Fase 4F-A foi aceita: o canal `partialreload:client_sync` é client-optional, a presença é iniciada pelo cliente, clientes sem o mod continuam entrando, clientes com o mod entram em servidor sem Partial Reload, e reconnects/timeout SILENT foram validados. A Fase 4F-R acrescenta um commit opt-in com refresh do cliente adiado até o relog: o servidor muda imediatamente, fecha menus abertos e mantém os jogadores online, mas recipe book, JEI/REI e informação visual podem permanecer antigos. Não há payloads de tags/recipes, ACK transacional, live sync, quiescência ou rollback distribuído.
 
@@ -37,10 +37,12 @@ A fundação opcional de handshake client-side da Fase 4F-A foi aceita: o canal 
   dedicada;
 - fundação opcional client-side 4F-A aceita por evidência funcional com handshake compatível, cliente ausente, servidor Forge independente sem Partial Reload, reconnects, SILENT, acceptance composta e cleanup fail-closed.
 - modo opt-in `SERVER_COMMIT_DEFERRED_CLIENT_REFRESH`: commit imediato no servidor com jogadores conectados, fechamento fail-closed de menus, rastreamento de clientes stale e atualização pelo fluxo normal de relog.
+- commit transacional conjunto de predicates, item modifiers e loot tables,
+  preservando a identidade do `LootDataManager`, permitindo jogadores
+  conectados e retendo uma geração para rollback.
 
 ## Não implementado
 
-- commit de loot/predicates/item modifiers;
 - sincronização live de recipes/tags, atualização de recipe book/viewers durante a sessão ou rollback de clientes;
 - políticas de load diferentes de `DO_NOT_RUN`;
 - rollback após restart ou histórico de gerações;
@@ -48,8 +50,8 @@ A fundação opcional de handshake client-side da Fase 4F-A foi aceita: o canal 
 - integrações KubeJS, Origins e Silent Gear.
 - execução de handlers KubeJS e candidato combinado de recipes (**bloqueado** sem runtime Forge 1.20.1 exato);
 
-O commit transacional de functions vanilla foi validado em servidor dedicado
-headless no alvo exato Forge 47.4.10. Loot continua apenas em preparação.
+Os commits transacionais de functions e loot data foram validados em servidor
+dedicado headless no alvo exato Forge 47.4.10.
 Recipes agora possuem preparação completa para o contrato server-only
 (serializers reais, conditions, índices, dependências e delta); sincronização
 de clientes permanece não implementada.
@@ -80,13 +82,15 @@ Requerem nível de operador configurável (padrão 4):
 /partialreload apply prepared deferred
 /partialreload transaction
 /partialreload rollback functions
+/partialreload rollback loot
 /partialreload active functions
 ```
 
 `reload` continua bloqueado. `apply prepared` publica `PreparedFunctions` ou
-`PreparedTagsAndRecipes` conforme seus contratos. O subcomando `deferred` é
+`PreparedTagsAndRecipes` ou `PreparedLootData` conforme seus contratos. O subcomando `deferred` é
 exclusivo de tags + recipes, mantém os jogadores online e exige relog para o
-refresh visual; candidatos de loot continuam rejeitados.
+refresh visual. Loot data publica os três tipos juntos, aceita jogadores
+conectados e não requer client sync.
 Quando KubeJS não está presente na versão alvo, `prepared` informa
 explicitamente `KubeJS integration: not loaded` e mantém apenas o baseline
 vanilla/Forge.
@@ -123,6 +127,7 @@ python scripts/run-dedicated-recipe-acceptance.py
 python scripts/run-dedicated-tag-acceptance.py
 python scripts/run-dedicated-tags-recipes-acceptance.py
 python scripts/run-dedicated-tags-recipes-commit-acceptance.py
+python scripts/run-dedicated-loot-data-commit-acceptance.py
 python scripts/run-dedicated-kubejs-recipe-acceptance.py
 python scripts/run-all-acceptance.py
 ```
@@ -149,6 +154,12 @@ de LootDataManager, RecipeManager e AdvancementManager.
 O projeto segue Spec-Driven Development. Leia `AGENTS.md`,
 `docs/specs/010-loot-data-prepare.md` e as ADRs antes de alterar
 comportamento.
+
+A acceptance de loot data mantém um cliente real sem o mod principal online,
+publica uma geração completa nova, prova comportamento determinístico pelos
+comandos vanilla de predicate/item/loot, remove IDs e executa rollback manual.
+Itens já gerados não são reescritos, GLMs não são publicados e referências
+externas previamente retidas podem continuar apontando para objetos antigos.
 
 ## Safety gate 4E-S
 

@@ -38,9 +38,10 @@ Transformer com nomes SRG exatos do Forge 47.4.10, publica apenas no safe point
 `ServerTickEvent.END` e aplica `DO_NOT_RUN` para load functions. Uma geração
 anterior é retida em memória para rollback único.
 
-A fase 3B continua somente preparação conjunta e passiva de predicates, item
-modifiers e loot tables; `VanillaLootDataProvider` nunca publica no
-`LootDataManager`. GLM permanece separado conforme ADR-007.
+A fase 3B fornece a preparação conjunta de predicates, item modifiers e loot
+tables. A Fase 4G publica esse bundle completo transacionalmente no
+`LootDataManager` ativo, preserva sua identidade e permite jogadores
+conectados. GLM permanece separado conforme ADR-007 e ADR-047.
 
 A Fase 4F-A foi promovida: a fundação opcional de protocolo e handshake está aceita por evidência funcional. Clientes sem canal compatível entram normalmente, clientes com mod entram em servidor Forge sem Partial Reload, reconnects e SILENT foram validados. A Fase 4F-R acrescenta o opt-in `SERVER_COMMIT_DEFERRED_CLIENT_REFRESH`: o servidor publica tags + recipes imediatamente com jogadores conectados, fecha todos os menus antes da primeira mutação e marca aquelas sessões stale até relog. O comando normal continua `SERVER_ONLY_NO_PLAYERS`. As fases 4F-B/C/D permanecem fora do escopo: nenhum payload, recipe-book live refresh, ACK transacional, quiescência ou rollback compensatório é permitido.
 
@@ -64,8 +65,9 @@ A Fase 4C prepara tags gerais em `PreparedTags` read-only. `tags/functions` são
 delegadas ao provider de functions; nunca chame `Registry.bindTags`, eventos de
 tags, packets ou sincronização de clientes.
 
-`reload` e qualquer apply de loot devem falhar de modo explícito e seguro. Não
-escreva os maps privados do `LootDataManager`.
+`reload` permanece proibido. Apply de loot só pode usar o bridge tipado da
+Fase 4G e os dois campos exatos autorizados pelo AT; não escreva outros maps
+privados do `LootDataManager`.
 
 A Fase 4D prepara `PreparedTagsAndRecipes` somente quando tags e recipes são
 solicitadas juntas. O artefato usa um snapshot compartilhado e
@@ -104,3 +106,8 @@ dedicada com cliente Forge real sem o mod principal e runner consolidado com
 `ALL_ACCEPTANCE_PASSED`. No modo deferred, o servidor muda imediatamente e o
 cliente conectado permanece visualmente stale até o relog; não existe packet
 novo, live sync, ACK ou rollback distribuído.
+
+Atualização 2026-08-04: a Fase 4G foi aceita com 24 novos GameTests (60/60 no
+total), acceptance dedicada e runner consolidado aprovados. Predicates, item
+modifiers e loot tables são publicados sempre juntos; jogadores conectados são
+permitidos, GLMs ficam intactos e apenas uma geração anterior é retida.
