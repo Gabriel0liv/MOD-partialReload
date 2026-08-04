@@ -23,6 +23,7 @@ public final class ResourceScanner {
             "recipes",
             "loot_tables",
             "item_modifiers",
+            "loot_modifiers",
             "tags",
             "powers",
             "origins",
@@ -98,6 +99,7 @@ public final class ResourceScanner {
         if (matchesJsonDirectory(path, "recipes")) return ReloadCategory.RECIPES;
         if (matchesJsonDirectory(path, "loot_tables")) return ReloadCategory.LOOT;
         if (matchesJsonDirectory(path, "item_modifiers")) return ReloadCategory.ITEM_MODIFIERS;
+        if (matchesJsonDirectory(path, "loot_modifiers")) return ReloadCategory.GLOBAL_LOOT_MODIFIERS;
         if (matchesJsonDirectory(path, "tags/functions")) return ReloadCategory.FUNCTIONS;
         if (matchesJsonDirectory(path, "tags")) return ReloadCategory.TAGS;
         if (matchesJsonDirectory(path, "powers")
@@ -133,6 +135,7 @@ public final class ResourceScanner {
             case RECIPES -> "recipes/";
             case LOOT -> "loot_tables/";
             case ITEM_MODIFIERS -> "item_modifiers/";
+            case GLOBAL_LOOT_MODIFIERS -> "loot_modifiers/";
             case TAGS -> "tags/";
             case ORIGINS, SILENTGEAR, DYNAMIC_REGISTRIES, KUBEJS, UNKNOWN -> "";
         };

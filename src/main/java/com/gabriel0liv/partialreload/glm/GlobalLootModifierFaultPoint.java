@@ -1,0 +1,11 @@
+package com.gabriel0liv.partialreload.glm;
+
+public enum GlobalLootModifierFaultPoint {
+    BEFORE_GLM_PUBLICATION,
+    AFTER_GLM_PUBLICATION,
+    DURING_GLM_VERIFICATION,
+    AFTER_LOOT_BEFORE_GLM,
+    DURING_JOINT_VERIFICATION,
+    DURING_JOINT_ROLLBACK_GLM,
+    DURING_JOINT_ROLLBACK_LOOT
+}

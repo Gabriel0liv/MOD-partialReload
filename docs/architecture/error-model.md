@@ -62,6 +62,17 @@
 Falha antes da primeira mutação termina fail-safe; falha posterior exige
 rollback integral e verificado.
 
+## Códigos de Global Loot Modifiers
+
+`GLM_ENTRY_FILE_MISSING`, `GLM_TYPE_MISSING`, `GLM_TYPE_UNKNOWN`,
+`GLM_CODEC_ERROR`, `GLM_REGISTRY_REFERENCE_MISSING`, `GLM_CONDITION_INVALID`,
+`GLM_DECODE_FAILED`, `LOOT_MODIFIER_MANAGER_LAYOUT_UNSUPPORTED`,
+`GLM_COMMIT_WRONG_THREAD`, `GLM_COMMIT_REQUIRES_JOINT_LOOT_TRANSACTION`,
+`LOOT_COMMIT_REQUIRES_JOINT_GLM_TRANSACTION` e
+`LOOT_GLM_TRANSACTION_DEGRADED`. Conteúdo inválido bloqueia o artefato inteiro;
+falha posterior à primeira atribuição exige rollback verificado dos managers
+afetados, sem aceitar restauração parcial.
+
 WARNING não invalida candidato. ERROR e BLOCKER tornam
 `PreparedReloadArtifact.isApplicable()` falso.
 

@@ -13,6 +13,7 @@ public final class LootDataCommitTransaction {
     private final String requester;
     private final int managerIdentity;
     private final String expectedActiveFingerprint;
+    private final ActiveLootDataGeneration expectedActiveGeneration;
     private final List<String> events = new ArrayList<>();
     private LootDataTransactionStatus status = LootDataTransactionStatus.PREPARING;
     private ActiveLootDataGeneration previousGeneration;
@@ -24,13 +25,15 @@ public final class LootDataCommitTransaction {
     private boolean rollbackPerformed;
 
     public LootDataCommitTransaction(UUID transactionId, UUID preparationId, Instant createdAt,
-                                     String requester, int managerIdentity, String expectedActiveFingerprint) {
+                                     String requester, int managerIdentity, String expectedActiveFingerprint,
+                                     ActiveLootDataGeneration expectedActiveGeneration) {
         this.transactionId = Objects.requireNonNull(transactionId);
         this.preparationId = preparationId;
         this.createdAt = Objects.requireNonNull(createdAt);
         this.requester = Objects.requireNonNull(requester);
         this.managerIdentity = managerIdentity;
         this.expectedActiveFingerprint = Objects.requireNonNull(expectedActiveFingerprint);
+        this.expectedActiveGeneration = Objects.requireNonNull(expectedActiveGeneration);
     }
 
     public UUID transactionId() { return transactionId; }
@@ -39,6 +42,7 @@ public final class LootDataCommitTransaction {
     public String requester() { return requester; }
     public int managerIdentity() { return managerIdentity; }
     public String expectedActiveFingerprint() { return expectedActiveFingerprint; }
+    public ActiveLootDataGeneration expectedActiveGeneration() { return expectedActiveGeneration; }
     public LootDataTransactionStatus status() { return status; }
     public void status(LootDataTransactionStatus value) { status = Objects.requireNonNull(value); events.add(value.name()); }
     public ActiveLootDataGeneration previousGeneration() { return previousGeneration; }

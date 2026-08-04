@@ -21,6 +21,11 @@ ProviderRegistry
             |---- parsers Forge/vanilla + candidate LootDataResolver
             |---- ValidationContext / LootDataType validators
             +---- LootDependencyGraph + LootDataDelta -> PreparedLootData
+   |
+   +---- ForgeGlobalLootModifierProvider
+            |---- stack forge:loot_modifiers (replace + ordem)
+            |---- IGlobalLootModifier.DIRECT_CODEC
+            +---- PreparedGlobalLootModifiers -> LootModifierManagerBridge
 ```
 
 ## Fronteiras
@@ -32,6 +37,8 @@ ProviderRegistry
 - `function`: captura, compilação, tags, grafo e candidato passivo;
 - `loot`: captura conjunta, parsers, resolver, validator, grafo, delta,
   geração ativa imutável e bridge transacional do `LootDataManager`;
+- `glm`: stack ordenada Forge, codecs, geração imutável, bridge do
+  `LootModifierManager` e transação conjunta com loot data;
 - `validation`: issues/reports estruturados;
 - `core`: registry, estado e orquestração;
 - `command`: adaptação Brigadier;
@@ -76,11 +83,19 @@ Providers futuros poderão adicionar contratos `PreparedReload`, quiesce, commit
 2. o worker captura vencedores e stacks completas, bytes, pack e fingerprints;
 3. parsers reais constroem maps temporários dos três tipos;
 4. um `LootDataResolver` candidato e `ValidationContext` validam o grafo inteiro;
-5. grafo, delta e diagnósticos de GLM/loaders externos são agregados;
+5. grafo, delta e diagnóstico de acoplamento com o provider GLM são agregados;
 6. uma segunda captura bloqueia TOCTOU;
 7. a server thread publica `PreparedLootData` em READY sem mutar o manager;
 8. somente `apply prepared` cria a transação 4G e publica a geração completa no
    safe point.
+
+## Commit transacional de Global Loot Modifiers
+
+`LootModifierManagerBridge` preserva a identidade do manager Forge e publica o
+mapa ordenado completo. Mudança GLM isolada usa transação própria; mudança da
+mesma captura em loot data exige `PreparedLootAndGlobalModifiers`, publicação
+loot→GLM e rollback GLM→loot. Jogadores conectados são permitidos, sem client
+sync e sem reescrever itens ou loot já produzidos.
 
 ## Commit transacional de loot data
 

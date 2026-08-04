@@ -13,6 +13,8 @@ SUITES = [
     ("joint_safety_acceptance", "run-dedicated-tags-recipes-safety-acceptance.py", "dedicated-tags-recipes-safety-acceptance.json", "DEDICATED_TAGS_RECIPES_SAFETY_ACCEPTANCE_PASSED"),
     ("deferred_client_refresh_acceptance", "run-deferred-client-refresh-acceptance.py", "deferred-client-refresh-acceptance.json", "DEFERRED_CLIENT_REFRESH_ACCEPTANCE_PASSED"),
     ("loot_data_commit_acceptance", "run-dedicated-loot-data-commit-acceptance.py", "dedicated-loot-data-commit-acceptance.json", "LOOT_DATA_COMMIT_ACCEPTANCE_PASSED"),
+    ("glm_commit_acceptance", "run-dedicated-glm-commit-acceptance.py", "dedicated-glm-commit-acceptance.json", "GLM_COMMIT_ACCEPTANCE_PASSED"),
+    ("loot_glm_joint_commit_acceptance", "run-dedicated-loot-glm-joint-acceptance.py", "dedicated-loot-glm-joint-acceptance.json", "LOOT_GLM_JOINT_COMMIT_ACCEPTANCE_PASSED"),
     ("kubejs_expected_block", "run-dedicated-kubejs-recipe-acceptance.py", "dedicated-kubejs-recipe-acceptance.json", "KUBEJS_RECIPE_PREPARATION_BLOCKED"),
 ]
 SUITE_TIMEOUT_SECONDS = 1800

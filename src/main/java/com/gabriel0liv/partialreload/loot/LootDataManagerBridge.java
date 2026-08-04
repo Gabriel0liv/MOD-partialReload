@@ -110,6 +110,34 @@ public final class LootDataManagerBridge {
         return capture(manager).compatibilityFingerprint();
     }
 
+    /**
+     * Exact TOCTOU guard. The diagnostic fingerprint is deliberately not used:
+     * every logical ID must still resolve to the very same object reference and
+     * the complete per-type key index must be unchanged.
+     */
+    public static boolean matchesExactly(LootDataManager manager, ActiveLootDataGeneration expected) {
+        Objects.requireNonNull(expected, "expected");
+        validateLayout(manager);
+        validateComplete(expected.elements(), expected.keysByType());
+        @SuppressWarnings("unchecked")
+        Map<LootDataId<?>, Object> actual = (Map<LootDataId<?>, Object>) manager.elements;
+        return sameGenerationReferences(expected.elements(), expected.keysByType(), actual,
+                ImmutableMultimap.copyOf(manager.typeKeys))
+                && actual.get(LootDataManager.EMPTY_LOOT_TABLE_KEY) == LootTable.EMPTY;
+    }
+
+    public static boolean sameGenerationReferences(
+            Map<LootDataId<?>, Object> expectedElements,
+            Multimap<LootDataType<?>, ResourceLocation> expectedKeys,
+            Map<LootDataId<?>, Object> actualElements,
+            Multimap<LootDataType<?>, ResourceLocation> actualKeys) {
+        if (!actualElements.keySet().equals(expectedElements.keySet()) || !actualKeys.equals(expectedKeys)) return false;
+        for (Map.Entry<LootDataId<?>, Object> entry : expectedElements.entrySet()) {
+            if (actualElements.get(entry.getKey()) != entry.getValue()) return false;
+        }
+        return true;
+    }
+
     private static ActiveLootDataGeneration generation(
             Map<LootDataId<?>, Object> elements,
             Multimap<LootDataType<?>, ResourceLocation> keys

@@ -5,6 +5,8 @@ import org.junit.jupiter.api.Test;
 
 import java.time.Instant;
 import java.util.UUID;
+import java.util.Map;
+import com.google.common.collect.ImmutableMultimap;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -19,7 +21,7 @@ class LootDataCommitTransactionTest {
         UUID id = UUID.randomUUID();
         UUID preparation = UUID.randomUUID();
         LootDataCommitTransaction tx = new LootDataCommitTransaction(id, preparation, Instant.EPOCH,
-                "test", 12, "active");
+                "test", 12, "active", generation());
         tx.status(LootDataTransactionStatus.READY);
         tx.elementsPublished(true);
         tx.typeIndexPublished(true);
@@ -28,6 +30,7 @@ class LootDataCommitTransactionTest {
         assertEquals(preparation, tx.preparationId());
         assertEquals(12, tx.managerIdentity());
         assertEquals("active", tx.expectedActiveFingerprint());
+        assertTrue(tx.expectedActiveGeneration().elements().isEmpty());
         assertEquals(LootDataTransactionStatus.READY, tx.status());
         assertTrue(tx.elementsPublished());
         assertTrue(tx.typeIndexPublished());
@@ -109,6 +112,12 @@ class LootDataCommitTransactionTest {
 
     private static LootDataCommitTransaction transaction() {
         return new LootDataCommitTransaction(UUID.randomUUID(), UUID.randomUUID(), Instant.EPOCH,
-                "test", 42, "fingerprint");
+                "test", 42, "fingerprint", generation());
+    }
+
+    private static ActiveLootDataGeneration generation() {
+        return new ActiveLootDataGeneration(
+                Map.of(),
+                ImmutableMultimap.of(), UUID.randomUUID(), "fingerprint");
     }
 }

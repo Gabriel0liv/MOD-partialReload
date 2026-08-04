@@ -83,6 +83,12 @@ public final class ReloadPlanner {
                     ));
                     warnings.add("LOOT_CATEGORY_SCOPE_EXPANDED: prepare predicates, item modifiers and loot together");
                 }
+                case GLOBAL_LOOT_MODIFIERS -> {
+                    dependencies.add("ordered Forge LootModifierManager generation");
+                    risk = ReloadRisk.max(risk, ReloadRisk.MODERATE);
+                    support = SupportStatus.PREPARE_SUPPORTED;
+                    providers.add(ResourceLocation.fromNamespaceAndPath("partialreload", "forge_glm"));
+                }
                 case TAGS -> dependencies.add("registry tag binding, Forge events and client synchronization");
             }
         }

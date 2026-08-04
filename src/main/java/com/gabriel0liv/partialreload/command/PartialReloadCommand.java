@@ -18,6 +18,8 @@ import com.gabriel0liv.partialreload.loot.LootDataFaultInjection;
 import com.gabriel0liv.partialreload.loot.LootDataFaultPoint;
 import com.gabriel0liv.partialreload.loot.PreparedLootData;
 import com.gabriel0liv.partialreload.loot.VanillaLootDataProvider;
+import com.gabriel0liv.partialreload.glm.PreparedGlobalLootModifiers;
+import com.gabriel0liv.partialreload.glm.PreparedLootAndGlobalModifiers;
 import com.gabriel0liv.partialreload.recipe.PreparedRecipes;
 import com.gabriel0liv.partialreload.recipe.PreparedRecipe;
 import com.gabriel0liv.partialreload.tags.PreparedTags;
@@ -86,6 +88,14 @@ public final class PartialReloadCommand {
                         .then(Commands.literal("loot")
                                 .executes(context -> prepareLootData(
                                         context.getSource(), service, ReloadCategory.LOOT, false)))
+                        .then(Commands.literal("glm")
+                                .executes(context -> prepareGlobalLootModifiers(context.getSource(), service, false)))
+                        .then(Commands.literal("global_loot_modifiers")
+                                .executes(context -> prepareGlobalLootModifiers(context.getSource(), service, false)))
+                        .then(Commands.literal("loot_glm")
+                                .executes(context -> prepareLootAndGlm(context.getSource(), service)))
+                        .then(Commands.literal("loot_and_glm")
+                                .executes(context -> prepareLootAndGlm(context.getSource(), service)))
                         .then(Commands.literal("recipes")
                                 .executes(context -> prepareRecipes(context.getSource(), service, false)))
                         .then(Commands.literal("tags")
@@ -113,7 +123,13 @@ public final class PartialReloadCommand {
                         .then(Commands.literal("loot")
                                 .executes(context -> rollbackLootData(context.getSource(), service)))
                         .then(Commands.literal("loot_data")
-                                .executes(context -> rollbackLootData(context.getSource(), service))))
+                                .executes(context -> rollbackLootData(context.getSource(), service)))
+                        .then(Commands.literal("glm")
+                                .executes(context -> rollbackGlm(context.getSource(), service)))
+                        .then(Commands.literal("global_loot_modifiers")
+                                .executes(context -> rollbackGlm(context.getSource(), service)))
+                        .then(Commands.literal("loot_glm")
+                                .executes(context -> rollbackLootAndGlm(context.getSource(), service))))
                 .then(Commands.literal("active")
                         .then(Commands.literal("functions")
                                 .executes(context -> activeFunctions(context.getSource())))
@@ -145,6 +161,12 @@ public final class PartialReloadCommand {
                                 .requires(source -> !net.minecraftforge.fml.loading.FMLEnvironment.production)
                                 .then(Commands.argument("recipe", ResourceLocationArgument.id())
                                         .executes(context -> debugActiveRecipe(context.getSource(), ResourceLocationArgument.getId(context, "recipe")))))
+                        .then(Commands.literal("active_glm")
+                                .requires(source -> !net.minecraftforge.fml.loading.FMLEnvironment.production)
+                                .executes(context -> debugActiveGlm(context.getSource())))
+                        .then(Commands.literal("joint_glm_fault_after_loot")
+                                .requires(source -> !net.minecraftforge.fml.loading.FMLEnvironment.production)
+                                .executes(context -> debugJointGlmFaultAfterLoot(context.getSource())))
                         .then(Commands.literal("fault")
                                 .requires(source -> !net.minecraftforge.fml.loading.FMLEnvironment.production)
                                 .then(Commands.literal("tags_recipes")
@@ -167,6 +189,14 @@ public final class PartialReloadCommand {
                                         .then(Commands.literal("clear")
                                                 .requires(source -> !net.minecraftforge.fml.loading.FMLEnvironment.production && source.hasPermission(4))
                                                 .executes(context -> { LootDataFaultInjection.clear(); context.getSource().sendSuccess(() -> Component.literal("Loot-data fault cleared"), false); return 1; }))))
+                                .then(Commands.literal("glm")
+                                        .then(Commands.literal("after_loot_before_glm")
+                                                .executes(context -> debugJointGlmFaultAfterLoot(context.getSource())))
+                                        .then(Commands.literal("set")
+                                                .then(Commands.argument("point", StringArgumentType.word())
+                                                        .executes(context -> debugGlmFaultSet(context.getSource(), StringArgumentType.getString(context, "point")))))
+                                        .then(Commands.literal("clear")
+                                                .executes(context -> { com.gabriel0liv.partialreload.glm.GlobalLootModifierFaultInjection.clear(); context.getSource().sendSuccess(() -> Component.literal("GLM fault cleared"), false); return 1; })))
                         .then(Commands.literal("tag_recipe_journal")
                                 .requires(source -> !net.minecraftforge.fml.loading.FMLEnvironment.production)
                                 .executes(context -> debugTagRecipeJournal(context.getSource(), service)))
@@ -229,6 +259,37 @@ public final class PartialReloadCommand {
         }
     }
 
+    private static int debugActiveGlm(CommandSourceStack source) {
+        var generation = com.gabriel0liv.partialreload.glm.LootModifierManagerBridge.capture(
+                com.gabriel0liv.partialreload.glm.LootModifierManagerBridge.activeManager());
+        source.sendSuccess(() -> Component.literal("Active GLM IDs: "
+                + generation.orderedModifiers().keySet()), false);
+        source.sendSuccess(() -> Component.literal("Active GLM digest: " + generation.diagnosticDigest()), false);
+        return 1;
+    }
+
+    private static int debugGlmFaultSet(CommandSourceStack source, String name) {
+        try {
+            com.gabriel0liv.partialreload.glm.GlobalLootModifierFaultInjection.clear();
+            com.gabriel0liv.partialreload.glm.GlobalLootModifierFaultInjection.arm(
+                    com.gabriel0liv.partialreload.glm.GlobalLootModifierFaultPoint.valueOf(
+                            name.toUpperCase(java.util.Locale.ROOT)));
+            source.sendSuccess(() -> Component.literal("GLM fault armed: " + name), false);
+            return 1;
+        } catch (IllegalArgumentException error) {
+            source.sendFailure(Component.literal("Unknown GLM fault point: " + name));
+            return 0;
+        }
+    }
+
+    private static int debugJointGlmFaultAfterLoot(CommandSourceStack source) {
+        com.gabriel0liv.partialreload.glm.GlobalLootModifierFaultInjection.clear();
+        com.gabriel0liv.partialreload.glm.GlobalLootModifierFaultInjection.arm(
+                com.gabriel0liv.partialreload.glm.GlobalLootModifierFaultPoint.AFTER_LOOT_BEFORE_GLM);
+        source.sendSuccess(() -> Component.literal("GLM fault armed: AFTER_LOOT_BEFORE_GLM"), false);
+        return 1;
+    }
+
     private static int debugTagRecipeJournal(CommandSourceStack source, PartialReloadService service) {
         var tx = service.tagRecipeTransaction();
         if (tx == null) { source.sendSuccess(() -> Component.literal("No tag/recipe transaction"), false); return 1; }
@@ -274,6 +335,11 @@ public final class PartialReloadCommand {
         source.sendSuccess(() -> Component.literal("activePredicates=" + status.activePredicateCount()
                 + " activeItemModifiers=" + status.activeItemModifierCount()
                 + " activeLootTables=" + status.activeLootTableCount()), false);
+        source.sendSuccess(() -> Component.literal("glmGeneration=" + status.globalLootModifierGeneration()
+                + " glmTransactionStatus=" + status.globalLootModifierTransactionStatus()
+                + " retainedGlmRollbackGeneration=" + status.retainedGlobalLootModifierGeneration()
+                + " activeGlobalLootModifiers=" + status.activeGlobalLootModifierCount()
+                + " lootGlmTransactionStatus=" + status.lootAndGlmTransactionStatus()), false);
         source.sendSuccess(() -> Component.literal("Recipe/tag commit default: SERVER_ONLY_NO_PLAYERS"), false);
         source.sendSuccess(() -> Component.literal("Recipe/tag commit opt-in: SERVER_COMMIT_DEFERRED_CLIENT_REFRESH (relog required)"), false);
         source.sendSuccess(() -> Component.literal("tagRecipeGeneration=" + status.tagRecipeGeneration()
@@ -297,7 +363,7 @@ public final class PartialReloadCommand {
             String support = switch (category) {
                 case DYNAMIC_REGISTRIES -> "RESTART_REQUIRED";
                 case UNKNOWN -> "UNKNOWN";
-                case FUNCTIONS, PREDICATES, ITEM_MODIFIERS, LOOT, TAGS -> "PREPARE_SUPPORTED";
+                case FUNCTIONS, PREDICATES, ITEM_MODIFIERS, LOOT, TAGS, GLOBAL_LOOT_MODIFIERS -> "PREPARE_SUPPORTED";
                 case ORIGINS, KUBEJS, SILENTGEAR -> "PLANNED";
                 default -> "SUPPORTED_READ_ONLY";
             };
@@ -485,6 +551,10 @@ public final class PartialReloadCommand {
             return 0;
         }
         if (service.hasFunctionChanges()) return prepareFunctions(source, service, true);
+        if (service.hasLootDataChanges() && service.hasGlobalLootModifierChanges()) {
+            return prepareLootAndGlm(source, service);
+        }
+        if (service.hasGlobalLootModifierChanges()) return prepareGlobalLootModifiers(source, service, true);
         if (service.hasLootDataChanges()) {
             Set<ReloadCategory> changed = service.lastChangeSet().changedResources().stream()
                     .map(ResourceChange::category)
@@ -662,6 +732,10 @@ public final class PartialReloadCommand {
             source.sendFailure(Component.literal("No changed loot data are present."));
             return 0;
         }
+        if (service.hasGlobalLootModifierChanges()) {
+            source.sendFailure(Component.literal("LOOT_COMMIT_REQUIRES_JOINT_GLM_TRANSACTION"));
+            return 0;
+        }
         LootPreparationContext preparationContext = new LootPreparationContext(
                 source.getServer().getResourceManager(),
                 Set.of(requested),
@@ -706,6 +780,54 @@ public final class PartialReloadCommand {
         return 1;
     }
 
+    private static LootPreparationContext lootPreparationContext(CommandSourceStack source,
+                                                                 PartialReloadService service,
+                                                                 ReloadCategory requested) {
+        return new LootPreparationContext(source.getServer().getResourceManager(), Set.of(requested),
+                service.activeReference(), Duration.ofSeconds(PartialReloadConfig.lootPrepareTimeoutSeconds()),
+                PartialReloadConfig.maxPredicates(), PartialReloadConfig.maxItemModifiers(),
+                PartialReloadConfig.maxLootTables(), PartialReloadConfig.maxTotalJsonBytes(),
+                PartialReloadConfig.maxDependencyEdges(), Clock.systemUTC(), UUID::randomUUID, System::nanoTime);
+    }
+
+    private static int prepareGlobalLootModifiers(CommandSourceStack source, PartialReloadService service,
+                                                   boolean changedOnly) {
+        if (changedOnly && !service.hasGlobalLootModifierChanges()) {
+            source.sendFailure(Component.literal("No changed global loot modifiers are present.")); return 0;
+        }
+        if (service.hasLootDataChanges()) {
+            source.sendFailure(Component.literal("GLM_COMMIT_REQUIRES_JOINT_LOOT_TRANSACTION")); return 0;
+        }
+        try {
+            service.prepareGlobalLootModifiersAsync(source.getServer().getResourceManager(),
+                    Util.backgroundExecutor(), source.getServer()).whenComplete((artifact, failure) -> {
+                if (failure != null) source.sendFailure(Component.literal("GLM preparation failed safely: " + rootMessage(failure)));
+                else showPreparedGlm(source, artifact);
+            });
+            source.sendSuccess(() -> Component.literal("Global loot modifier preparation started; active manager unchanged."), false);
+            return 1;
+        } catch (RuntimeException failure) {
+            source.sendFailure(Component.literal(failure.getMessage())); return 0;
+        }
+    }
+
+    private static int prepareLootAndGlm(CommandSourceStack source, PartialReloadService service) {
+        if (!service.hasLootDataChanges() || !service.hasGlobalLootModifierChanges()) {
+            source.sendFailure(Component.literal("LOOT_GLM_JOINT_CHANGES_REQUIRED")); return 0;
+        }
+        try {
+            service.prepareLootAndGlobalModifiersAsync(lootPreparationContext(source, service, ReloadCategory.LOOT),
+                    Util.backgroundExecutor(), source.getServer()).whenComplete((artifact, failure) -> {
+                if (failure != null) source.sendFailure(Component.literal("Joint loot/GLM preparation failed safely: " + rootMessage(failure)));
+                else showPreparedLootAndGlm(source, artifact);
+            });
+            source.sendSuccess(() -> Component.literal("Joint loot and GLM preparation started; both managers unchanged."), false);
+            return 1;
+        } catch (RuntimeException failure) {
+            source.sendFailure(Component.literal(failure.getMessage())); return 0;
+        }
+    }
+
     private static int prepared(CommandSourceStack source, PartialReloadService service) {
         PreparedReloadArtifact artifact = service.preparedArtifact();
         if (artifact == null) {
@@ -714,11 +836,32 @@ public final class PartialReloadCommand {
         }
         if (artifact instanceof PreparedFunctions functions) return showPrepared(source, functions);
         if (artifact instanceof PreparedLootData lootData) return showPreparedLoot(source, lootData);
+        if (artifact instanceof PreparedGlobalLootModifiers glm) return showPreparedGlm(source, glm);
+        if (artifact instanceof PreparedLootAndGlobalModifiers jointLoot) return showPreparedLootAndGlm(source, jointLoot);
         if (artifact instanceof PreparedRecipes recipes) return showPreparedRecipes(source, recipes);
         if (artifact instanceof PreparedTags tags) return showPreparedTags(source, tags);
         if (artifact instanceof PreparedTagsAndRecipes joint) return showPreparedTagsAndRecipes(source, joint);
         source.sendFailure(Component.literal("Unknown prepared artifact type."));
         return 0;
+    }
+
+    private static int showPreparedGlm(CommandSourceStack source, PreparedGlobalLootModifiers artifact) {
+        source.sendSuccess(() -> Component.literal("PreparedGlobalLootModifiers #" + artifact.preparationId()), false);
+        source.sendSuccess(() -> Component.literal("Ordered modifiers: " + artifact.orderedIds().size()
+                + " changed=" + artifact.delta().changedCount()), false);
+        source.sendSuccess(() -> Component.literal("Applicable: " + artifact.isApplicable()), false);
+        artifact.validation().issues().forEach(issue -> source.sendFailure(Component.literal(issue.code() + ": " + issue.message())));
+        return artifact.isApplicable() ? 1 : 0;
+    }
+
+    private static int showPreparedLootAndGlm(CommandSourceStack source, PreparedLootAndGlobalModifiers artifact) {
+        source.sendSuccess(() -> Component.literal("PreparedLootAndGlobalModifiers #" + artifact.preparationId()), false);
+        source.sendSuccess(() -> Component.literal("Loot elements="
+                + (artifact.lootData().predicates().size() + artifact.lootData().itemModifiers().size()
+                + artifact.lootData().lootTables().size()) + " GLMs="
+                + artifact.globalLootModifiers().orderedIds().size()), false);
+        source.sendSuccess(() -> Component.literal("Applicable: " + artifact.isApplicable()), false);
+        return artifact.isApplicable() ? 1 : 0;
     }
 
     private static int showPrepared(CommandSourceStack source, PreparedFunctions artifact) {
@@ -869,6 +1012,24 @@ public final class PartialReloadCommand {
     private static int applyPrepared(CommandSourceStack source, PartialReloadService service,
                                      TagRecipeConnectedPlayerPolicy policy) {
         try {
+            if (service.preparedArtifact() instanceof PreparedLootAndGlobalModifiers) {
+                if (policy == TagRecipeConnectedPlayerPolicy.DEFER_CLIENT_REFRESH_UNTIL_RELOGIN) {
+                    throw new IllegalStateException("TAG_RECIPE_DEFERRED_REQUIRES_TAGS_AND_RECIPES");
+                }
+                var tx = service.requestLootAndGlmCommit(source.getServer(), source.getTextName());
+                source.sendSuccess(() -> Component.literal("Joint loot/GLM transaction " + tx.transactionId()
+                        + " queued for the next safe point."), false);
+                return 1;
+            }
+            if (service.preparedArtifact() instanceof PreparedGlobalLootModifiers) {
+                if (policy == TagRecipeConnectedPlayerPolicy.DEFER_CLIENT_REFRESH_UNTIL_RELOGIN) {
+                    throw new IllegalStateException("TAG_RECIPE_DEFERRED_REQUIRES_TAGS_AND_RECIPES");
+                }
+                var tx = service.requestGlobalLootModifierCommit(source.getServer(), source.getTextName());
+                source.sendSuccess(() -> Component.literal("GLM transaction " + tx.transactionId()
+                        + " queued for the next safe point."), false);
+                return 1;
+            }
             if (service.preparedArtifact() instanceof PreparedLootData) {
                 if (policy == TagRecipeConnectedPlayerPolicy.DEFER_CLIENT_REFRESH_UNTIL_RELOGIN) {
                     throw new IllegalStateException("TAG_RECIPE_DEFERRED_REQUIRES_TAGS_AND_RECIPES");
@@ -900,6 +1061,22 @@ public final class PartialReloadCommand {
     }
 
     private static int transaction(CommandSourceStack source, PartialReloadService service) {
+        var jointLoot = service.lootAndGlmTransaction();
+        if (jointLoot != null) {
+            source.sendSuccess(() -> Component.literal("Joint loot/GLM transaction: " + jointLoot.transactionId()
+                    + " status=" + jointLoot.status() + " lootPublished=" + jointLoot.lootPublished()
+                    + " glmPublished=" + jointLoot.glmPublished()), false);
+            if (jointLoot.failure() != null) source.sendFailure(Component.literal(jointLoot.failure()));
+            return 1;
+        }
+        var glm = service.globalLootModifierTransaction();
+        if (glm != null) {
+            source.sendSuccess(() -> Component.literal("GLM transaction: " + glm.transactionId()
+                    + " status=" + glm.status() + " modifiers="
+                    + (glm.candidateGeneration() == null ? 0 : glm.candidateGeneration().orderedModifiers().size())), false);
+            if (glm.failure() != null) source.sendFailure(Component.literal(glm.failure()));
+            return 1;
+        }
         var loot = service.lootDataTransaction();
         if (loot != null) {
             source.sendSuccess(() -> Component.literal("Loot transaction: " + loot.transactionId()), false);
@@ -972,6 +1149,26 @@ public final class PartialReloadCommand {
         } catch (RuntimeException exception) {
             source.sendFailure(Component.literal(exception.getMessage()));
             return 0;
+        }
+    }
+
+    private static int rollbackGlm(CommandSourceStack source, PartialReloadService service) {
+        try {
+            var tx = service.requestGlobalLootModifierRollback(source.getServer(), source.getTextName());
+            source.sendSuccess(() -> Component.literal("GLM rollback " + tx.transactionId()
+                    + " queued for the next safe point."), false); return 1;
+        } catch (RuntimeException exception) {
+            source.sendFailure(Component.literal(exception.getMessage())); return 0;
+        }
+    }
+
+    private static int rollbackLootAndGlm(CommandSourceStack source, PartialReloadService service) {
+        try {
+            var tx = service.requestLootAndGlmRollback(source.getServer(), source.getTextName());
+            source.sendSuccess(() -> Component.literal("Joint loot/GLM rollback " + tx.transactionId()
+                    + " queued for the next safe point."), false); return 1;
+        } catch (RuntimeException exception) {
+            source.sendFailure(Component.literal(exception.getMessage())); return 0;
         }
     }
 

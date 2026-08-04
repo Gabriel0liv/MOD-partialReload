@@ -254,6 +254,7 @@ tasks.named('processResources', ProcessResources).configure {
 }
 
 tasks.named('jar', Jar).configure {
+    exclude 'com/gabriel0liv/partialreload/gametest/**'
     manifest {
         attributes([
                 'Specification-Title': mod_id,

@@ -40,7 +40,9 @@ dedicado aos dois campos exatos; incompatibilidade falha com
   preflight repetido imediatamente antes da primeira mutação.
 - Jogadores conectados não bloqueiam, não têm menus fechados, não ficam stale e
   não recebem sincronização ou aviso.
-- O `LootModifierManager` e sua geração ativa não são alterados.
+- No commit 4G isolado, o `LootModifierManager` e sua geração ativa não são
+  alterados. Se a mesma captura também mudou GLM, a Spec 019 bloqueia o caminho
+  isolado e exige transação conjunta.
 - Uma geração anterior confirmada é retida para rollback único.
 
 ## Preflight

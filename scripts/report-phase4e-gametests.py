@@ -16,6 +16,8 @@ REPORT = ROOT / "build" / "reports" / "phase4e-tag-recipe-gametests.json"
 BATCH = "phase4e-tag-recipe-transaction"
 LOOT_BATCH = "phase4g-loot-transaction"
 REQUIRED_LOOT_BATCH_TOTAL = 24
+GLM_BATCH = "phase4h-glm-transaction"
+REQUIRED_GLM_BATCH_TOTAL = 24
 # The task's risk matrix requires ten transacted scenarios in addition to the
 # three existing smoke tests.  This is a coverage floor, not a global test
 # count requirement.
@@ -50,6 +52,7 @@ def parse(log: str) -> dict[str, object]:
     batch_runs = re.findall(r"Running test batch ['\"]?([^'\"]+)['\"]?\s*\((\d+) tests?\)", log, re.I)
     batch_total = sum(int(count) for name, count in batch_runs if name.startswith(BATCH))
     loot_batch_total = sum(int(count) for name, count in batch_runs if name.startswith(LOOT_BATCH))
+    glm_batch_total = sum(int(count) for name, count in batch_runs if name.startswith(GLM_BATCH))
     failed = int(failed_match.group(1)) if failed_match else (0 if totals and "failed" not in log.lower() else None)
     global_total = int(totals.group(1)) if totals else None
     markers = re.findall(r"PHASE4E_GAMETEST_PASSED:([A-Za-z0-9_]+)", log)
@@ -59,8 +62,9 @@ def parse(log: str) -> dict[str, object]:
     duplicates = sorted(name for name, count in counts.items() if count > 1)
     unexpected = sorted(set(markers) - required)
     loot_coverage_complete = loot_batch_total == REQUIRED_LOOT_BATCH_TOTAL
+    glm_coverage_complete = glm_batch_total == REQUIRED_GLM_BATCH_TOTAL
     complete = bool(totals and batch_seen and failed == 0 and not missing and not duplicates
-                    and loot_coverage_complete)
+                    and loot_coverage_complete and glm_coverage_complete)
     return {
         "status": "passed" if complete else "failed",
         "batch": BATCH,
@@ -70,6 +74,10 @@ def parse(log: str) -> dict[str, object]:
         "loot_batch_total": loot_batch_total,
         "loot_required_tests": REQUIRED_LOOT_BATCH_TOTAL,
         "loot_coverage_complete": loot_coverage_complete,
+        "glm_batch": GLM_BATCH,
+        "glm_batch_total": glm_batch_total,
+        "glm_required_tests": REQUIRED_GLM_BATCH_TOTAL,
+        "glm_coverage_complete": glm_coverage_complete,
         "global_failed": failed,
         "observed_passed": len(set(markers)),
         "coverage_complete": not missing and not duplicates,
@@ -80,6 +88,7 @@ def parse(log: str) -> dict[str, object]:
         "observed_tests": markers,
         "tests": [{"batch": name, "count": int(count)} for name, count in batch_runs if name.startswith(BATCH)],
         "loot_tests": [{"batch": name, "count": int(count)} for name, count in batch_runs if name.startswith(LOOT_BATCH)],
+        "glm_tests": [{"batch": name, "count": int(count)} for name, count in batch_runs if name.startswith(GLM_BATCH)],
     }
 
 

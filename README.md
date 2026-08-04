@@ -46,8 +46,9 @@ A fundação opcional de handshake client-side da Fase 4F-A foi aceita: o canal 
 - sincronização live de recipes/tags, atualização de recipe book/viewers durante a sessão ou rollback de clientes;
 - políticas de load diferentes de `DO_NOT_RUN`;
 - rollback após restart ou histórico de gerações;
-- Global Loot Modifiers (provider separado, planejado);
 - integrações KubeJS, Origins e Silent Gear.
+- promoção do commit GLM e loot+GLM (implementação candidata com gate final
+  ainda pendente por identity mismatch do harness).
 - execução de handlers KubeJS e candidato combinado de recipes (**bloqueado** sem runtime Forge 1.20.1 exato);
 
 Os commits transacionais de functions e loot data foram validados em servidor
@@ -128,6 +129,8 @@ python scripts/run-dedicated-tag-acceptance.py
 python scripts/run-dedicated-tags-recipes-acceptance.py
 python scripts/run-dedicated-tags-recipes-commit-acceptance.py
 python scripts/run-dedicated-loot-data-commit-acceptance.py
+python scripts/run-dedicated-glm-commit-acceptance.py
+python scripts/run-dedicated-loot-glm-joint-acceptance.py
 python scripts/run-dedicated-kubejs-recipe-acceptance.py
 python scripts/run-all-acceptance.py
 ```
@@ -158,8 +161,10 @@ comportamento.
 A acceptance de loot data mantém um cliente real sem o mod principal online,
 publica uma geração completa nova, prova comportamento determinístico pelos
 comandos vanilla de predicate/item/loot, remove IDs e executa rollback manual.
-Itens já gerados não são reescritos, GLMs não são publicados e referências
-externas previamente retidas podem continuar apontando para objetos antigos.
+Itens já gerados não são reescritos e referências externas previamente retidas
+podem continuar apontando para objetos antigos. A implementação candidata da
+Fase 4H mantém GLMs num manager separado e exige transação conjunta quando loot
+data também mudou, mas ainda não está promovida.
 
 ## Safety gate 4E-S
 

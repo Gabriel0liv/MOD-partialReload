@@ -87,7 +87,9 @@ sem error/blocker para um commit futuro que ainda não existe.
 - RF-010-17: `prepare changed` escolhe o candidato loot quando qualquer das três
   categorias mudou; se functions e loot mudaram juntos, rejeita a ambiguidade e
   exige seleção explícita.
-- RF-010-18: GLM é reportado como `GLM_NOT_INCLUDED` conforme ADR-007.
+- RF-010-18: neste provider, GLM é reportado como `GLM_NOT_INCLUDED`; a Spec
+  019 define seu provider próprio e a transação conjunta quando ambas as
+  famílias mudam.
 - RF-010-19: padrões externos comprovados são reportados por
   `LOOT_EXTERNAL_PROVIDER_UNSUPPORTED`; não são declarados integrados.
 - RF-010-20: `apply`, `reload` e `rollback` continuam recusando mutação.
@@ -165,7 +167,8 @@ publicação e testes de identidade/não mutação.
 5. resolver/validator conjunto detecta referências e contexts inválidos;
 6. grafo/delta/snapshot são imutáveis e explicáveis;
 7. TOCTOU, timeout, limites e concorrência falham com segurança;
-8. GLM/loaders externos são explicitamente reportados;
+8. GLM é explicitamente delegado ao provider da Spec 019 e loaders externos
+   sem contrato continuam reportados;
 9. comandos exibem candidato e recusam mutações;
 10. manager/instâncias/comportamento e outros managers permanecem inalterados;
 11. nenhum `/reload`, `reloadResources`, cliente, Mixin, AT ou reflection é
@@ -191,8 +194,8 @@ comportamento ativo representativo igual e discard restrito ao artefato.
 
 Commit futuro deve escolher a referência a trocar, barreira para geração de loot
 em andamento, destino de contexts já criados, política para containers ainda não
-abertos, mods que retêm instâncias, sincronização, atomicidade com GLM, rollback
-e eventual necessidade de AT/Mixin. Preparação GLM terá spec/provider próprios.
+abertos, mods que retêm instâncias e sincronização. Atomicidade com GLM,
+rollback e o provider GLM são definidos pela Spec 019/ADR-048.
 Integrações Silent Gear, Starcatcher, KubeJS/LootJS permanecem não comprovadas.
 
 ## 14. Relação com outras specs

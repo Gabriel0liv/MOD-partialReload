@@ -3,6 +3,7 @@ package com.gabriel0liv.partialreload.core;
 import com.gabriel0liv.partialreload.api.ReloadCategory;
 import com.gabriel0liv.partialreload.api.ReloadProvider;
 import com.gabriel0liv.partialreload.api.PreparedReloadArtifact;
+import com.gabriel0liv.partialreload.api.PartialReloadException;
 import com.gabriel0liv.partialreload.api.ScanContext;
 import com.gabriel0liv.partialreload.api.ScanResult;
 import com.gabriel0liv.partialreload.change.ChangeDetector;
@@ -29,6 +30,17 @@ import com.gabriel0liv.partialreload.loot.LootDataFaultInjection;
 import com.gabriel0liv.partialreload.loot.LootDataFaultPoint;
 import com.gabriel0liv.partialreload.loot.LootDataManagerBridge;
 import com.gabriel0liv.partialreload.loot.LootDataTransactionStatus;
+import com.gabriel0liv.partialreload.glm.ActiveGlobalLootModifierGeneration;
+import com.gabriel0liv.partialreload.glm.ForgeGlobalLootModifierProvider;
+import com.gabriel0liv.partialreload.glm.GlobalLootModifierCommitTransaction;
+import com.gabriel0liv.partialreload.glm.GlobalLootModifierFaultInjection;
+import com.gabriel0liv.partialreload.glm.GlobalLootModifierFaultPoint;
+import com.gabriel0liv.partialreload.glm.GlobalLootModifierPreparationContext;
+import com.gabriel0liv.partialreload.glm.GlobalLootModifierTransactionStatus;
+import com.gabriel0liv.partialreload.glm.LootAndGlobalModifiersCommitTransaction;
+import com.gabriel0liv.partialreload.glm.LootModifierManagerBridge;
+import com.gabriel0liv.partialreload.glm.PreparedGlobalLootModifiers;
+import com.gabriel0liv.partialreload.glm.PreparedLootAndGlobalModifiers;
 import com.gabriel0liv.partialreload.recipe.PreparedRecipes;
 import com.gabriel0liv.partialreload.recipe.PreparedRecipe;
 import com.gabriel0liv.partialreload.recipe.VanillaRecipesProvider;
@@ -95,6 +107,7 @@ public final class PartialReloadService {
     private final ReloadPlanner planner;
     private final VanillaFunctionsProvider functionsProvider;
     private final VanillaLootDataProvider lootDataProvider;
+    private final ForgeGlobalLootModifierProvider globalLootModifierProvider;
     private final VanillaRecipesProvider recipesProvider = new VanillaRecipesProvider();
     private final VanillaTagsProvider tagsProvider = new VanillaTagsProvider();
     private final PartialReloadStateMachine stateMachine = new PartialReloadStateMachine();
@@ -215,19 +228,36 @@ public final class PartialReloadService {
     @Nullable private ActiveLootDataGeneration retainedLootDataGeneration;
     @Nullable private ActiveLootDataGeneration activeLootDataGeneration;
     @Nullable private ResourceSnapshot retainedLootDataSourceSnapshot;
+    @Nullable private GlobalLootModifierCommitTransaction globalLootModifierTransaction;
+    @Nullable private ActiveGlobalLootModifierGeneration retainedGlobalLootModifierGeneration;
+    @Nullable private ActiveGlobalLootModifierGeneration activeGlobalLootModifierGeneration;
+    @Nullable private LootAndGlobalModifiersCommitTransaction lootAndGlmTransaction;
+    @Nullable private ActiveLootDataGeneration retainedJointLootGeneration;
+    @Nullable private ActiveGlobalLootModifierGeneration retainedJointGlmGeneration;
+    @Nullable private ResourceSnapshot retainedJointSourceSnapshot;
 
     public PartialReloadService(
             ProviderRegistry providerRegistry,
             ReloadProvider scannerProvider,
             ReloadPlanner planner,
             VanillaFunctionsProvider functionsProvider,
-            VanillaLootDataProvider lootDataProvider
+            VanillaLootDataProvider lootDataProvider,
+            ForgeGlobalLootModifierProvider globalLootModifierProvider
     ) {
         this.providerRegistry = Objects.requireNonNull(providerRegistry, "providerRegistry");
         this.scannerProvider = Objects.requireNonNull(scannerProvider, "scannerProvider");
         this.planner = Objects.requireNonNull(planner, "planner");
         this.functionsProvider = Objects.requireNonNull(functionsProvider, "functionsProvider");
         this.lootDataProvider = Objects.requireNonNull(lootDataProvider, "lootDataProvider");
+        this.globalLootModifierProvider = Objects.requireNonNull(globalLootModifierProvider, "globalLootModifierProvider");
+    }
+
+    /** Compatibility constructor for isolated lifecycle tests. */
+    public PartialReloadService(ProviderRegistry providerRegistry, ReloadProvider scannerProvider,
+                                ReloadPlanner planner, VanillaFunctionsProvider functionsProvider,
+                                VanillaLootDataProvider lootDataProvider) {
+        this(providerRegistry, scannerProvider, planner, functionsProvider, lootDataProvider,
+                new ForgeGlobalLootModifierProvider(new ResourceScanner(Clock.systemUTC())));
     }
 
     public CompletableFuture<ScanResult> scanAsync(ScanContext context, Executor background, Executor owner) {
@@ -346,9 +376,89 @@ public final class PartialReloadService {
         }, owner);
     }
 
+    public CompletableFuture<PreparedGlobalLootModifiers> prepareGlobalLootModifiersAsync(
+            net.minecraft.server.packs.resources.ResourceManager resourceManager,
+            Executor background, Executor owner) {
+        synchronized (this) {
+            resetTerminalState();
+            stateMachine.transitionTo(PartialReloadState.PREPARING);
+            preparedArtifact = null;
+            lastError = null;
+        }
+        ResourceSnapshot baseline;
+        synchronized (this) { baseline = activeReference; }
+        List<net.minecraft.resources.ResourceLocation> activeGlmOrder = List.copyOf(
+                LootModifierManagerBridge.capture(LootModifierManagerBridge.activeManager())
+                        .orderedModifiers().keySet());
+        return CompletableFuture.supplyAsync(() -> {
+            try {
+                ResourceSnapshot snapshot = scanCurrent(resourceManager);
+                return globalLootModifierProvider.prepare(new GlobalLootModifierPreparationContext(
+                        resourceManager, snapshot, baseline, activeGlmOrder,
+                        Clock.systemUTC(), UUID::randomUUID));
+            } catch (Exception exception) {
+                throw new CompletionException(exception);
+            }
+        }, background).handleAsync((artifact, throwable) -> finishPreparation(artifact, throwable), owner);
+    }
+
+    public CompletableFuture<PreparedLootAndGlobalModifiers> prepareLootAndGlobalModifiersAsync(
+            LootPreparationContext lootContext, Executor background, Executor owner) {
+        synchronized (this) {
+            resetTerminalState();
+            stateMachine.transitionTo(PartialReloadState.PREPARING);
+            preparedArtifact = null;
+            lastError = null;
+        }
+        List<net.minecraft.resources.ResourceLocation> activeGlmOrder = List.copyOf(
+                LootModifierManagerBridge.capture(LootModifierManagerBridge.activeManager())
+                        .orderedModifiers().keySet());
+        return CompletableFuture.supplyAsync(() -> {
+            try {
+                PreparedLootData loot = lootDataProvider.prepare(lootContext);
+                ResourceSnapshot full = scanCurrent(lootContext.resourceManager());
+                PreparedLootData sharedLoot = new PreparedLootData(loot.preparationId(), loot.createdAt(), full,
+                        loot.requestedCategories(), loot.predicates(), loot.itemModifiers(), loot.lootTables(),
+                        loot.dependencyGraph(), loot.delta(), loot.validation());
+                PreparedGlobalLootModifiers glm = globalLootModifierProvider.prepare(
+                        new GlobalLootModifierPreparationContext(lootContext.resourceManager(), full,
+                                lootContext.activeReference(), activeGlmOrder,
+                                lootContext.clock(), lootContext.idSupplier()));
+                return new PreparedLootAndGlobalModifiers(UUID.randomUUID(), Instant.now(lootContext.clock()),
+                        full, sharedLoot, glm, null);
+            } catch (Exception exception) {
+                throw new CompletionException(exception);
+            }
+        }, background).handleAsync((artifact, throwable) -> finishPreparation(artifact, throwable), owner);
+    }
+
+    private synchronized <T extends PreparedReloadArtifact> T finishPreparation(T artifact, Throwable throwable) {
+        if (throwable != null) {
+            lastError = rootMessage(throwable);
+            stateMachine.transitionTo(PartialReloadState.FAILED_SAFE);
+            throw new CompletionException(throwable);
+        }
+        stateMachine.transitionTo(PartialReloadState.VALIDATING);
+        preparedArtifact = artifact;
+        lastError = null;
+        stateMachine.transitionTo(PartialReloadState.READY);
+        return artifact;
+    }
+
+    private ResourceSnapshot scanCurrent(net.minecraft.server.packs.resources.ResourceManager resourceManager)
+            throws PartialReloadException {
+        return scannerProvider.scan(new ScanContext(resourceManager, PartialReloadConfig.maxScannedResources(),
+                java.time.Duration.ofSeconds(PartialReloadConfig.scanTimeoutSeconds()), true)).snapshot();
+    }
+
     public synchronized boolean hasLootDataChanges() {
         return lastChangeSet.changedResources().stream()
                 .anyMatch(change -> PreparedLootData.COMPLETE_SCOPE.contains(change.category()));
+    }
+
+    public synchronized boolean hasGlobalLootModifierChanges() {
+        return lastChangeSet.changedResources().stream()
+                .anyMatch(change -> change.category() == ReloadCategory.GLOBAL_LOOT_MODIFIERS);
     }
 
     public synchronized boolean hasMixedFunctionAndLootChanges() {
@@ -357,6 +467,14 @@ public final class PartialReloadService {
 
     public synchronized PreparedLootData preparedLootData() {
         return preparedArtifact instanceof PreparedLootData lootData ? lootData : null;
+    }
+
+    public synchronized PreparedGlobalLootModifiers preparedGlobalLootModifiers() {
+        return preparedArtifact instanceof PreparedGlobalLootModifiers value ? value : null;
+    }
+
+    public synchronized PreparedLootAndGlobalModifiers preparedLootAndGlobalModifiers() {
+        return preparedArtifact instanceof PreparedLootAndGlobalModifiers value ? value : null;
     }
 
     public synchronized PreparedRecipes preparedRecipes() {
@@ -571,6 +689,9 @@ public final class PartialReloadService {
         if (stateMachine.state() != PartialReloadState.READY) {
             throw new IllegalStateException("LOOT_COMMIT_ARTIFACT_INVALID: state must be READY");
         }
+        if (hasGlobalLootModifierChanges()) {
+            throw new IllegalStateException("LOOT_COMMIT_REQUIRES_JOINT_GLM_TRANSACTION");
+        }
         if (!(preparedArtifact instanceof PreparedLootData artifact) || !artifact.isApplicable()) {
             throw new IllegalStateException("LOOT_COMMIT_ARTIFACT_INVALID");
         }
@@ -586,7 +707,7 @@ public final class PartialReloadService {
             throw new IllegalStateException("LOOT_COMMIT_SNAPSHOT_STALE");
         }
         LootDataCommitTransaction tx = new LootDataCommitTransaction(UUID.randomUUID(), artifact.preparationId(),
-                Instant.now(), requester, System.identityHashCode(manager), active.compatibilityFingerprint());
+                Instant.now(), requester, System.identityHashCode(manager), active.compatibilityFingerprint(), active);
         tx.candidateGeneration(candidate);
         tx.status(LootDataTransactionStatus.READY);
         lootDataTransaction = tx;
@@ -607,7 +728,7 @@ public final class PartialReloadService {
         var manager = server.getLootData();
         ActiveLootDataGeneration active = LootDataManagerBridge.capture(manager);
         LootDataCommitTransaction tx = new LootDataCommitTransaction(UUID.randomUUID(), null, Instant.now(), requester,
-                System.identityHashCode(manager), active.compatibilityFingerprint());
+                System.identityHashCode(manager), active.compatibilityFingerprint(), active);
         tx.previousGeneration(retainedLootDataGeneration);
         tx.candidateGeneration(retainedLootDataGeneration);
         tx.status(LootDataTransactionStatus.READY);
@@ -713,8 +834,8 @@ public final class PartialReloadService {
             throw new IllegalStateException("LOOT_COMMIT_MANAGER_CHANGED");
         }
         LootDataManagerBridge.validateLayout(manager);
-        if (!LootDataManagerBridge.fingerprint(manager).equals(tx.expectedActiveFingerprint())) {
-            throw new IllegalStateException("LOOT_COMMIT_MANAGER_CHANGED: active fingerprint");
+        if (!LootDataManagerBridge.matchesExactly(manager, tx.expectedActiveGeneration())) {
+            throw new IllegalStateException("LOOT_COMMIT_MANAGER_CHANGED: active generation");
         }
         if (tx.preparationId() != null) {
             if (!(preparedArtifact instanceof PreparedLootData artifact)
@@ -739,6 +860,295 @@ public final class PartialReloadService {
     private static boolean lootTransactionTerminal(LootDataTransactionStatus status) {
         return status == LootDataTransactionStatus.SUCCESS || status == LootDataTransactionStatus.ROLLED_BACK
                 || status == LootDataTransactionStatus.FAILED || status == LootDataTransactionStatus.DEGRADED;
+    }
+
+    public synchronized GlobalLootModifierCommitTransaction globalLootModifierTransaction() {
+        return globalLootModifierTransaction;
+    }
+    public synchronized LootAndGlobalModifiersCommitTransaction lootAndGlmTransaction() {
+        return lootAndGlmTransaction;
+    }
+    public synchronized ActiveGlobalLootModifierGeneration retainedGlobalLootModifierGeneration() {
+        return retainedGlobalLootModifierGeneration;
+    }
+
+    public synchronized GlobalLootModifierCommitTransaction requestGlobalLootModifierCommit(
+            MinecraftServer server, String requester) {
+        requireMutationAvailable();
+        if (hasLootDataChanges()) throw new IllegalStateException("GLM_COMMIT_REQUIRES_JOINT_LOOT_TRANSACTION");
+        if (!(preparedArtifact instanceof PreparedGlobalLootModifiers artifact) || !artifact.isApplicable()) {
+            throw new IllegalStateException("GLM_COMMIT_ARTIFACT_INVALID");
+        }
+        var manager = LootModifierManagerBridge.activeManager();
+        ActiveGlobalLootModifierGeneration active = LootModifierManagerBridge.capture(manager);
+        GlobalLootModifierCommitTransaction tx = new GlobalLootModifierCommitTransaction(UUID.randomUUID(),
+                artifact.preparationId(), Instant.now(), requester, System.identityHashCode(manager), active);
+        tx.candidateGeneration(LootModifierManagerBridge.fromPrepared(artifact));
+        tx.status(GlobalLootModifierTransactionStatus.READY);
+        globalLootModifierTransaction = tx;
+        stateMachine.transitionTo(PartialReloadState.QUIESCING);
+        return tx;
+    }
+
+    public synchronized GlobalLootModifierCommitTransaction requestGlobalLootModifierRollback(
+            MinecraftServer server, String requester) {
+        requireMutationAvailable();
+        if (retainedGlobalLootModifierGeneration == null) {
+            throw new IllegalStateException("GLM_MANUAL_ROLLBACK_UNAVAILABLE");
+        }
+        var manager = LootModifierManagerBridge.activeManager();
+        ActiveGlobalLootModifierGeneration active = LootModifierManagerBridge.capture(manager);
+        GlobalLootModifierCommitTransaction tx = new GlobalLootModifierCommitTransaction(UUID.randomUUID(), null,
+                Instant.now(), requester, System.identityHashCode(manager), active);
+        tx.candidateGeneration(retainedGlobalLootModifierGeneration);
+        tx.previousGeneration(retainedGlobalLootModifierGeneration);
+        tx.status(GlobalLootModifierTransactionStatus.READY);
+        globalLootModifierTransaction = tx;
+        stateMachine.transitionTo(PartialReloadState.QUIESCING);
+        return tx;
+    }
+
+    public synchronized LootAndGlobalModifiersCommitTransaction requestLootAndGlmCommit(
+            MinecraftServer server, String requester) {
+        requireMutationAvailable();
+        if (!(preparedArtifact instanceof PreparedLootAndGlobalModifiers artifact) || !artifact.isApplicable()) {
+            throw new IllegalStateException("LOOT_GLM_COMMIT_ARTIFACT_INVALID");
+        }
+        var lootManager = server.getLootData();
+        var glmManager = LootModifierManagerBridge.activeManager();
+        ActiveLootDataGeneration activeLoot = LootDataManagerBridge.capture(lootManager);
+        ActiveGlobalLootModifierGeneration activeGlm = LootModifierManagerBridge.capture(glmManager);
+        LootAndGlobalModifiersCommitTransaction tx = new LootAndGlobalModifiersCommitTransaction(UUID.randomUUID(),
+                artifact.preparationId(), Instant.now(), requester, System.identityHashCode(lootManager),
+                System.identityHashCode(glmManager), activeLoot, activeGlm);
+        tx.candidateLootGeneration(LootDataManagerBridge.fromPrepared(artifact.lootData()));
+        tx.candidateGlmGeneration(LootModifierManagerBridge.fromPrepared(artifact.globalLootModifiers()));
+        tx.status(GlobalLootModifierTransactionStatus.READY);
+        lootAndGlmTransaction = tx;
+        stateMachine.transitionTo(PartialReloadState.QUIESCING);
+        return tx;
+    }
+
+    public synchronized LootAndGlobalModifiersCommitTransaction requestLootAndGlmRollback(
+            MinecraftServer server, String requester) {
+        requireMutationAvailable();
+        if (retainedJointLootGeneration == null || retainedJointGlmGeneration == null) {
+            throw new IllegalStateException("LOOT_GLM_MANUAL_ROLLBACK_UNAVAILABLE");
+        }
+        var lootManager = server.getLootData();
+        var glmManager = LootModifierManagerBridge.activeManager();
+        var activeLoot = LootDataManagerBridge.capture(lootManager);
+        var activeGlm = LootModifierManagerBridge.capture(glmManager);
+        LootAndGlobalModifiersCommitTransaction tx = new LootAndGlobalModifiersCommitTransaction(UUID.randomUUID(),
+                null, Instant.now(), requester, System.identityHashCode(lootManager),
+                System.identityHashCode(glmManager), activeLoot, activeGlm);
+        tx.candidateLootGeneration(retainedJointLootGeneration);
+        tx.candidateGlmGeneration(retainedJointGlmGeneration);
+        tx.status(GlobalLootModifierTransactionStatus.READY);
+        lootAndGlmTransaction = tx;
+        stateMachine.transitionTo(PartialReloadState.QUIESCING);
+        return tx;
+    }
+
+    private void requireMutationAvailable() {
+        if (stateMachine.state() == PartialReloadState.DEGRADED) {
+            throw new IllegalStateException("LOOT_GLM_TRANSACTION_DEGRADED");
+        }
+        if (stateMachine.state() != PartialReloadState.READY
+                && stateMachine.state() != PartialReloadState.SUCCESS
+                && stateMachine.state() != PartialReloadState.IDLE) {
+            throw new IllegalStateException("GLM_COMMIT_TRANSACTION_RUNNING");
+        }
+    }
+
+    public synchronized void processGlobalLootModifierSafePoint(MinecraftServer server) {
+        GlobalLootModifierCommitTransaction tx = globalLootModifierTransaction;
+        if (tx == null || tx.status() != GlobalLootModifierTransactionStatus.READY) return;
+        if (!server.isSameThread()) { failGlmBeforeMutation(tx, "GLM_COMMIT_WRONG_THREAD"); return; }
+        var manager = LootModifierManagerBridge.activeManager();
+        try {
+            if (System.identityHashCode(manager) != tx.managerIdentity()
+                    || !LootModifierManagerBridge.matchesExactly(manager, tx.expectedActiveGeneration())) {
+                throw new IllegalStateException("GLM_COMMIT_MANAGER_CHANGED");
+            }
+            if (tx.preparationId() != null) {
+                if (!(preparedArtifact instanceof PreparedGlobalLootModifiers artifact)
+                        || !artifact.preparationId().equals(tx.preparationId()) || !artifact.isApplicable()) {
+                    throw new IllegalStateException("GLM_COMMIT_ARTIFACT_INVALID");
+                }
+                if (!currentCategoriesMatch(server, artifact.sourceSnapshot(),
+                        Set.of(ReloadCategory.GLOBAL_LOOT_MODIFIERS))) {
+                    throw new IllegalStateException("GLM_COMMIT_SNAPSHOT_STALE");
+                }
+            }
+            ActiveGlobalLootModifierGeneration previous = LootModifierManagerBridge.capture(manager);
+            tx.previousGeneration(previous);
+            retainedGlobalLootModifierGeneration = previous;
+            tx.status(GlobalLootModifierTransactionStatus.COMMITTING);
+            stateMachine.transitionTo(PartialReloadState.COMMITTING);
+            GlobalLootModifierFaultInjection.hit(GlobalLootModifierFaultPoint.BEFORE_GLM_PUBLICATION);
+            LootModifierManagerBridge.publish(manager, tx.candidateGeneration());
+            tx.published(true);
+            GlobalLootModifierFaultInjection.hit(GlobalLootModifierFaultPoint.AFTER_GLM_PUBLICATION);
+            tx.status(GlobalLootModifierTransactionStatus.VERIFYING);
+            stateMachine.transitionTo(PartialReloadState.VERIFYING);
+            GlobalLootModifierFaultInjection.hit(GlobalLootModifierFaultPoint.DURING_GLM_VERIFICATION);
+            LootModifierManagerBridge.verify(manager, tx.candidateGeneration());
+            tx.verificationPassed(true);
+            activeGlobalLootModifierGeneration = tx.candidateGeneration();
+            if (tx.preparationId() == null) {
+                retainedGlobalLootModifierGeneration = null;
+                tx.status(GlobalLootModifierTransactionStatus.ROLLED_BACK);
+                stateMachine.transitionTo(PartialReloadState.ROLLED_BACK);
+            } else {
+                activeReference = ((PreparedGlobalLootModifiers) preparedArtifact).sourceSnapshot();
+                preparedArtifact = null;
+                tx.status(GlobalLootModifierTransactionStatus.SUCCESS);
+                stateMachine.transitionTo(PartialReloadState.SUCCESS);
+                com.gabriel0liv.partialreload.PartialReloadMod.LOGGER.info(
+                        "GLM_COMMIT_SUCCESS generation={} modifiers={} playersConnected={}",
+                        activeGlobalLootModifierGeneration.generationId(),
+                        activeGlobalLootModifierGeneration.orderedModifiers().size(),
+                        connectedPlayerProbe.playerCount(server));
+            }
+        } catch (RuntimeException failure) {
+            String message = rootMessage(failure);
+            tx.failure(message);
+            if (!tx.published()) { failGlmBeforeMutation(tx, message); return; }
+            try {
+                tx.status(GlobalLootModifierTransactionStatus.ROLLING_BACK);
+                LootModifierManagerBridge.publish(manager, tx.previousGeneration());
+                LootModifierManagerBridge.verify(manager, tx.previousGeneration());
+                tx.rollbackPerformed(true);
+                retainedGlobalLootModifierGeneration = null;
+                activeGlobalLootModifierGeneration = tx.previousGeneration();
+                tx.status(GlobalLootModifierTransactionStatus.ROLLED_BACK);
+                stateMachine.transitionTo(PartialReloadState.ROLLED_BACK);
+            } catch (RuntimeException rollbackFailure) {
+                tx.failure(message + "; LOOT_GLM_TRANSACTION_DEGRADED: " + rootMessage(rollbackFailure));
+                tx.status(GlobalLootModifierTransactionStatus.DEGRADED);
+                stateMachine.transitionTo(PartialReloadState.DEGRADED);
+            }
+        }
+    }
+
+    private void failGlmBeforeMutation(GlobalLootModifierCommitTransaction tx, String message) {
+        tx.failure(message);
+        tx.status(GlobalLootModifierTransactionStatus.FAILED);
+        lastError = message;
+        stateMachine.transitionTo(PartialReloadState.FAILED_SAFE);
+    }
+
+    public synchronized void processLootAndGlmSafePoint(MinecraftServer server) {
+        LootAndGlobalModifiersCommitTransaction tx = lootAndGlmTransaction;
+        if (tx == null || tx.status() != GlobalLootModifierTransactionStatus.READY) return;
+        if (!server.isSameThread()) { failJointBeforeMutation(tx, "GLM_COMMIT_WRONG_THREAD"); return; }
+        var lootManager = server.getLootData();
+        var glmManager = LootModifierManagerBridge.activeManager();
+        try {
+            if (System.identityHashCode(lootManager) != tx.lootManagerIdentity()
+                    || System.identityHashCode(glmManager) != tx.glmManagerIdentity()
+                    || !LootDataManagerBridge.matchesExactly(lootManager, tx.expectedLootGeneration())
+                    || !LootModifierManagerBridge.matchesExactly(glmManager, tx.expectedGlmGeneration())) {
+                throw new IllegalStateException("LOOT_GLM_COMMIT_MANAGER_CHANGED");
+            }
+            if (tx.preparationId() != null) {
+                if (!(preparedArtifact instanceof PreparedLootAndGlobalModifiers artifact)
+                        || !artifact.preparationId().equals(tx.preparationId()) || !artifact.isApplicable()) {
+                    throw new IllegalStateException("LOOT_GLM_COMMIT_ARTIFACT_INVALID");
+                }
+                if (!currentCategoriesMatch(server, artifact.sourceSnapshot(), Set.of(
+                        ReloadCategory.PREDICATES, ReloadCategory.ITEM_MODIFIERS,
+                        ReloadCategory.LOOT, ReloadCategory.GLOBAL_LOOT_MODIFIERS))) {
+                    throw new IllegalStateException("LOOT_GLM_COMMIT_SNAPSHOT_STALE");
+                }
+            }
+            tx.previousLootGeneration(LootDataManagerBridge.capture(lootManager));
+            tx.previousGlmGeneration(LootModifierManagerBridge.capture(glmManager));
+            retainedJointLootGeneration = tx.previousLootGeneration();
+            retainedJointGlmGeneration = tx.previousGlmGeneration();
+            retainedJointSourceSnapshot = activeReference;
+            tx.status(GlobalLootModifierTransactionStatus.COMMITTING);
+            stateMachine.transitionTo(PartialReloadState.COMMITTING);
+            LootDataManagerBridge.publishElements(lootManager, tx.candidateLootGeneration());
+            LootDataManagerBridge.publishTypeIndex(lootManager, tx.candidateLootGeneration());
+            tx.lootPublished(true);
+            GlobalLootModifierFaultInjection.hit(GlobalLootModifierFaultPoint.AFTER_LOOT_BEFORE_GLM);
+            LootModifierManagerBridge.publish(glmManager, tx.candidateGlmGeneration());
+            tx.glmPublished(true);
+            tx.status(GlobalLootModifierTransactionStatus.VERIFYING);
+            stateMachine.transitionTo(PartialReloadState.VERIFYING);
+            GlobalLootModifierFaultInjection.hit(GlobalLootModifierFaultPoint.DURING_JOINT_VERIFICATION);
+            LootDataManagerBridge.verify(lootManager, tx.candidateLootGeneration());
+            LootModifierManagerBridge.verify(glmManager, tx.candidateGlmGeneration());
+            tx.verificationPassed(true);
+            activeLootDataGeneration = tx.candidateLootGeneration();
+            activeGlobalLootModifierGeneration = tx.candidateGlmGeneration();
+            if (tx.preparationId() == null) {
+                retainedJointLootGeneration = null; retainedJointGlmGeneration = null;
+                if (retainedJointSourceSnapshot != null) activeReference = retainedJointSourceSnapshot;
+                retainedJointSourceSnapshot = null;
+                tx.status(GlobalLootModifierTransactionStatus.ROLLED_BACK);
+                stateMachine.transitionTo(PartialReloadState.ROLLED_BACK);
+            } else {
+                activeReference = ((PreparedLootAndGlobalModifiers) preparedArtifact).sourceSnapshot();
+                preparedArtifact = null;
+                tx.status(GlobalLootModifierTransactionStatus.SUCCESS);
+                stateMachine.transitionTo(PartialReloadState.SUCCESS);
+                com.gabriel0liv.partialreload.PartialReloadMod.LOGGER.info(
+                        "LOOT_GLM_JOINT_COMMIT_SUCCESS lootGeneration={} glmGeneration={} predicates={} itemModifiers={} lootTables={} globalLootModifiers={} playersConnected={}",
+                        activeLootDataGeneration.generationId(), activeGlobalLootModifierGeneration.generationId(),
+                        activeLootDataGeneration.predicateCount(), activeLootDataGeneration.itemModifierCount(),
+                        activeLootDataGeneration.lootTableCount(), activeGlobalLootModifierGeneration.orderedModifiers().size(),
+                        connectedPlayerProbe.playerCount(server));
+            }
+        } catch (RuntimeException failure) {
+            String message = rootMessage(failure); tx.failure(message);
+            if (!tx.lootPublished() && !tx.glmPublished()) { failJointBeforeMutation(tx, message); return; }
+            try {
+                tx.status(GlobalLootModifierTransactionStatus.ROLLING_BACK);
+                GlobalLootModifierFaultInjection.hit(GlobalLootModifierFaultPoint.DURING_JOINT_ROLLBACK_GLM);
+                LootModifierManagerBridge.publish(glmManager, tx.previousGlmGeneration());
+                LootModifierManagerBridge.verify(glmManager, tx.previousGlmGeneration());
+                GlobalLootModifierFaultInjection.hit(GlobalLootModifierFaultPoint.DURING_JOINT_ROLLBACK_LOOT);
+                LootDataManagerBridge.publish(lootManager, tx.previousLootGeneration());
+                LootDataManagerBridge.verify(lootManager, tx.previousLootGeneration());
+                activeLootDataGeneration = tx.previousLootGeneration();
+                activeGlobalLootModifierGeneration = tx.previousGlmGeneration();
+                retainedJointLootGeneration = null; retainedJointGlmGeneration = null; retainedJointSourceSnapshot = null;
+                tx.status(GlobalLootModifierTransactionStatus.ROLLED_BACK);
+                stateMachine.transitionTo(PartialReloadState.ROLLED_BACK);
+            } catch (RuntimeException rollbackFailure) {
+                tx.failure(message + "; LOOT_GLM_TRANSACTION_DEGRADED: " + rootMessage(rollbackFailure));
+                tx.status(GlobalLootModifierTransactionStatus.DEGRADED);
+                stateMachine.transitionTo(PartialReloadState.DEGRADED);
+            }
+        }
+    }
+
+    private void failJointBeforeMutation(LootAndGlobalModifiersCommitTransaction tx, String message) {
+        tx.failure(message); tx.status(GlobalLootModifierTransactionStatus.FAILED);
+        lastError = message; stateMachine.transitionTo(PartialReloadState.FAILED_SAFE);
+    }
+
+    private boolean currentCategoriesMatch(MinecraftServer server, ResourceSnapshot expected,
+                                           Set<ReloadCategory> categories) {
+        try {
+            ResourceSnapshot current = scanCurrent(server.getResourceManager());
+            for (var entry : expected.resources().entrySet()) {
+                if (!categories.contains(entry.getValue().category())) continue;
+                var now = current.resources().get(entry.getKey());
+                if (now == null || !now.fingerprint().hash().equals(entry.getValue().fingerprint().hash())
+                        || !now.sourcePack().equals(entry.getValue().sourcePack())) return false;
+            }
+            for (var entry : current.resources().entrySet()) {
+                if (categories.contains(entry.getValue().category()) && !expected.resources().containsKey(entry.getKey())) return false;
+            }
+            return true;
+        } catch (Exception error) {
+            lastError = "LOOT_GLM_COMMIT_SNAPSHOT_STALE: " + rootMessage(error);
+            return false;
+        }
     }
 
     private boolean currentLootResourcesMatchReal(MinecraftServer server, ResourceSnapshot expected) {
@@ -1208,7 +1618,12 @@ public final class PartialReloadService {
                 retainedLootDataGeneration != null,
                 activeLootDataGeneration == null ? 0 : activeLootDataGeneration.predicateCount(),
                 activeLootDataGeneration == null ? 0 : activeLootDataGeneration.itemModifierCount(),
-                activeLootDataGeneration == null ? 0 : activeLootDataGeneration.lootTableCount()
+                activeLootDataGeneration == null ? 0 : activeLootDataGeneration.lootTableCount(),
+                activeGlobalLootModifierGeneration == null ? null : activeGlobalLootModifierGeneration.generationId(),
+                globalLootModifierTransaction == null ? "none" : globalLootModifierTransaction.status().name(),
+                retainedGlobalLootModifierGeneration != null,
+                activeGlobalLootModifierGeneration == null ? 0 : activeGlobalLootModifierGeneration.orderedModifiers().size(),
+                lootAndGlmTransaction == null ? "none" : lootAndGlmTransaction.status().name()
         );
     }
 

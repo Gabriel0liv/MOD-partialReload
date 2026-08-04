@@ -215,7 +215,7 @@ def run_once() -> int:
         if loot_probe(rcon, "PRLoot", "partialreload_loot:removed", "minecraft:coal") != 1:
             raise AssertionError("rollback did not restore removed table")
 
-        cleanup = acceptance.cleanup_attempt(client, "loot-client", "PRLoot", True, True)
+        cleanup = acceptance.cleanup_attempt(client, client.name, "PRLoot", True, True)
         if cleanup.get("status") != "passed":
             raise AssertionError(f"client cleanup failed: {cleanup}")
         result.update({

@@ -20,6 +20,11 @@ public record PartialReloadStatus(
         boolean retainedLootRollbackGeneration,
         int activePredicateCount,
         int activeItemModifierCount,
-        int activeLootTableCount
+        int activeLootTableCount,
+        UUID globalLootModifierGeneration,
+        String globalLootModifierTransactionStatus,
+        boolean retainedGlobalLootModifierGeneration,
+        int activeGlobalLootModifierCount,
+        String lootAndGlmTransactionStatus
 ) {
 }

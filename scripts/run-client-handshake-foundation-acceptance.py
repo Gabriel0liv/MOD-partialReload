@@ -1381,6 +1381,9 @@ class Acceptance:
     def cleanup_attempt(self, client: OwnedProcess, name: str, username: str,
                         entered_server: bool, expect_server_disconnect: bool,
                         expect_exit_request: bool = True) -> dict[str, object]:
+        # The owned process is authoritative. Retry-based callers may have launched
+        # ``name-2``/``name-3`` and must never signal a stale run directory.
+        name = client.name
         control = self.run_root / name / "control"
         control.mkdir(parents=True, exist_ok=True)
         client_cursor = client.cursor()
