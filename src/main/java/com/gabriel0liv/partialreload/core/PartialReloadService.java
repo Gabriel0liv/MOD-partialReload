@@ -67,6 +67,7 @@ import com.gabriel0liv.partialreload.config.PartialReloadConfig;
 import com.gabriel0liv.partialreload.resource.ResourceSnapshot;
 import com.gabriel0liv.partialreload.resource.ResourceScanner;
 import com.gabriel0liv.partialreload.resource.ResourceScanException;
+import com.gabriel0liv.partialreload.advancement.*;
 
 import javax.annotation.Nullable;
 import java.util.Objects;
@@ -108,6 +109,7 @@ public final class PartialReloadService {
     private final VanillaFunctionsProvider functionsProvider;
     private final VanillaLootDataProvider lootDataProvider;
     private final ForgeGlobalLootModifierProvider globalLootModifierProvider;
+    private final VanillaAdvancementProvider advancementProvider;
     private final VanillaRecipesProvider recipesProvider = new VanillaRecipesProvider();
     private final VanillaTagsProvider tagsProvider = new VanillaTagsProvider();
     private final PartialReloadStateMachine stateMachine = new PartialReloadStateMachine();
@@ -235,6 +237,10 @@ public final class PartialReloadService {
     @Nullable private ActiveLootDataGeneration retainedJointLootGeneration;
     @Nullable private ActiveGlobalLootModifierGeneration retainedJointGlmGeneration;
     @Nullable private ResourceSnapshot retainedJointSourceSnapshot;
+    @Nullable private AdvancementCommitTransaction advancementTransaction;
+    @Nullable private ActiveAdvancementGeneration activeAdvancementGeneration;
+    private int lastAdvancementPlayersRebound;
+    private String lastAdvancementClientSyncResult = "none";
 
     public PartialReloadService(
             ProviderRegistry providerRegistry,
@@ -242,7 +248,8 @@ public final class PartialReloadService {
             ReloadPlanner planner,
             VanillaFunctionsProvider functionsProvider,
             VanillaLootDataProvider lootDataProvider,
-            ForgeGlobalLootModifierProvider globalLootModifierProvider
+            ForgeGlobalLootModifierProvider globalLootModifierProvider,
+            VanillaAdvancementProvider advancementProvider
     ) {
         this.providerRegistry = Objects.requireNonNull(providerRegistry, "providerRegistry");
         this.scannerProvider = Objects.requireNonNull(scannerProvider, "scannerProvider");
@@ -250,6 +257,15 @@ public final class PartialReloadService {
         this.functionsProvider = Objects.requireNonNull(functionsProvider, "functionsProvider");
         this.lootDataProvider = Objects.requireNonNull(lootDataProvider, "lootDataProvider");
         this.globalLootModifierProvider = Objects.requireNonNull(globalLootModifierProvider, "globalLootModifierProvider");
+        this.advancementProvider = Objects.requireNonNull(advancementProvider, "advancementProvider");
+    }
+
+    public PartialReloadService(ProviderRegistry providerRegistry, ReloadProvider scannerProvider,
+                                ReloadPlanner planner, VanillaFunctionsProvider functionsProvider,
+                                VanillaLootDataProvider lootDataProvider,
+                                ForgeGlobalLootModifierProvider globalLootModifierProvider) {
+        this(providerRegistry, scannerProvider, planner, functionsProvider, lootDataProvider,
+                globalLootModifierProvider, new VanillaAdvancementProvider(new ResourceScanner(Clock.systemUTC())));
     }
 
     /** Compatibility constructor for isolated lifecycle tests. */
@@ -257,7 +273,8 @@ public final class PartialReloadService {
                                 ReloadPlanner planner, VanillaFunctionsProvider functionsProvider,
                                 VanillaLootDataProvider lootDataProvider) {
         this(providerRegistry, scannerProvider, planner, functionsProvider, lootDataProvider,
-                new ForgeGlobalLootModifierProvider(new ResourceScanner(Clock.systemUTC())));
+                new ForgeGlobalLootModifierProvider(new ResourceScanner(Clock.systemUTC())),
+                new VanillaAdvancementProvider(new ResourceScanner(Clock.systemUTC())));
     }
 
     public CompletableFuture<ScanResult> scanAsync(ScanContext context, Executor background, Executor owner) {
@@ -432,6 +449,27 @@ public final class PartialReloadService {
         }, background).handleAsync((artifact, throwable) -> finishPreparation(artifact, throwable), owner);
     }
 
+    public CompletableFuture<PreparedAdvancements> prepareAdvancementsAsync(
+            net.minecraft.server.packs.resources.ResourceManager resourceManager,
+            MinecraftServer server, Executor background, Executor owner) {
+        ResourceSnapshot snapshot; ResourceSnapshot baseline;
+        synchronized (this) {
+            snapshot = latestScan;
+            if (snapshot == null) throw new IllegalStateException("ADVANCEMENT_PREPARATION_REQUIRED: scan first");
+            if (lastChangeSet.changedResources().stream().anyMatch(change ->
+                    change.category() != ReloadCategory.ADVANCEMENTS && change.category() != ReloadCategory.UNKNOWN)) {
+                throw new IllegalStateException("ADVANCEMENT_PREPARATION_DEPENDENCIES_CHANGED");
+            }
+            resetTerminalState(); stateMachine.transitionTo(PartialReloadState.PREPARING);
+            preparedArtifact = null; lastError = null; baseline = activeReference;
+        }
+        AdvancementPreparationContext context = new AdvancementPreparationContext(resourceManager, server,
+                snapshot, baseline, java.time.Duration.ofSeconds(60), 100000, 268435456L,
+                Clock.systemUTC(), UUID::randomUUID);
+        return CompletableFuture.supplyAsync(() -> advancementProvider.prepare(context), background)
+                .handleAsync((artifact, throwable) -> finishPreparation(artifact, throwable), owner);
+    }
+
     private synchronized <T extends PreparedReloadArtifact> T finishPreparation(T artifact, Throwable throwable) {
         if (throwable != null) {
             lastError = rootMessage(throwable);
@@ -459,6 +497,15 @@ public final class PartialReloadService {
     public synchronized boolean hasGlobalLootModifierChanges() {
         return lastChangeSet.changedResources().stream()
                 .anyMatch(change -> change.category() == ReloadCategory.GLOBAL_LOOT_MODIFIERS);
+    }
+
+    public synchronized boolean hasAdvancementChanges() {
+        return lastChangeSet.changedResources().stream()
+                .anyMatch(change -> change.category() == ReloadCategory.ADVANCEMENTS);
+    }
+
+    public synchronized PreparedAdvancements preparedAdvancements() {
+        return preparedArtifact instanceof PreparedAdvancements value ? value : null;
     }
 
     public synchronized boolean hasMixedFunctionAndLootChanges() {
@@ -678,6 +725,75 @@ public final class PartialReloadService {
     public synchronized LootDataCommitTransaction lootDataTransaction() { return lootDataTransaction; }
     public synchronized ActiveLootDataGeneration retainedLootDataGeneration() { return retainedLootDataGeneration; }
     public synchronized ActiveLootDataGeneration activeLootDataGeneration() { return activeLootDataGeneration; }
+
+    public synchronized AdvancementCommitTransaction advancementTransaction() { return advancementTransaction; }
+    public synchronized ActiveAdvancementGeneration activeAdvancementGeneration() { return activeAdvancementGeneration; }
+
+    public synchronized AdvancementCommitTransaction requestAdvancementCommit(MinecraftServer server, String requester) {
+        if (stateMachine.state() == PartialReloadState.DEGRADED) throw new IllegalStateException("ADVANCEMENT_TRANSACTION_DEGRADED");
+        if (advancementTransaction != null && !advancementTerminal(advancementTransaction.status()))
+            throw new IllegalStateException("ADVANCEMENT_COMMIT_TRANSACTION_RUNNING");
+        if (stateMachine.state() != PartialReloadState.READY || !(preparedArtifact instanceof PreparedAdvancements artifact) || !artifact.isApplicable())
+            throw new IllegalStateException("ADVANCEMENT_COMMIT_ARTIFACT_INVALID");
+        if (!currentCategoriesMatch(server, artifact.sourceSnapshot(), Set.of(ReloadCategory.ADVANCEMENTS)))
+            throw new IllegalStateException("ADVANCEMENT_COMMIT_SNAPSHOT_STALE");
+        var manager=server.getAdvancements(); ActiveAdvancementGeneration active=ServerAdvancementManagerBridge.capture(manager);
+        if (!advancementDependenciesMatch(server,artifact.dependencies())) throw new IllegalStateException("ADVANCEMENT_COMMIT_DEPENDENCY_CHANGED");
+        AdvancementCommitTransaction tx=new AdvancementCommitTransaction(UUID.randomUUID(),artifact.preparationId(),Instant.now(),requester,
+                System.identityHashCode(manager),active,artifact.dependencies());
+        tx.candidateGeneration(ServerAdvancementManagerBridge.fromPrepared(artifact)); tx.status(AdvancementTransactionStatus.READY);
+        advancementTransaction=tx;stateMachine.transitionTo(PartialReloadState.QUIESCING);return tx;
+    }
+
+    public synchronized void processAdvancementSafePoint(MinecraftServer server) {
+        AdvancementCommitTransaction tx=advancementTransaction;if(tx==null||tx.status()!=AdvancementTransactionStatus.READY)return;
+        if(!server.isSameThread()){failAdvancementBeforeMutation(tx,"ADVANCEMENT_COMMIT_WRONG_THREAD");return;}
+        var manager=server.getAdvancements();
+        try{
+            preflightAdvancementSafePoint(server,manager,tx);
+            List<net.minecraft.server.level.ServerPlayer> players=List.copyOf(server.getPlayerList().getPlayers());
+            List<PlayerAdvancementStateSnapshot> snapshots=new ArrayList<>();for(var player:players)snapshots.add(PlayerAdvancementBridge.saveAndCapture(player));tx.playerSnapshots(snapshots);
+            players.forEach(player->player.getAdvancements().stopListening());
+            tx.previousGeneration(ServerAdvancementManagerBridge.capture(manager));stateMachine.transitionTo(PartialReloadState.COMMITTING);tx.status(AdvancementTransactionStatus.COMMITTING);
+            AdvancementFaultInjection.hit(AdvancementFaultPoint.BEFORE_MANAGER_PUBLICATION);
+            ServerAdvancementManagerBridge.publish(manager,tx.candidateGeneration());tx.managerPublished(true);
+            AdvancementFaultInjection.hit(AdvancementFaultPoint.AFTER_MANAGER_PUBLICATION);tx.status(AdvancementTransactionStatus.VERIFYING);
+            AdvancementFaultInjection.hit(AdvancementFaultPoint.DURING_MANAGER_VERIFICATION);ServerAdvancementManagerBridge.verify(manager,tx.candidateGeneration());
+            tx.status(AdvancementTransactionStatus.REBINDING_PLAYERS);AdvancementFaultInjection.hit(AdvancementFaultPoint.BEFORE_PLAYER_REBIND);
+            int rebound=0;for(PlayerAdvancementStateSnapshot snapshot:snapshots){var player=server.getPlayerList().getPlayer(snapshot.playerId());if(player==null||!player.connection.connection.isConnected())continue;PlayerAdvancementBridge.rebind(player,manager,snapshot);tx.playerRebound(snapshot.playerId());rebound++;if(rebound==1)AdvancementFaultInjection.hit(AdvancementFaultPoint.AFTER_FIRST_PLAYER_REBIND);}
+            tx.status(AdvancementTransactionStatus.SYNCING_CLIENTS);AdvancementFaultInjection.hit(AdvancementFaultPoint.DURING_CLIENT_SYNC);for(UUID ignored:tx.playersRebound())tx.clientSynced();
+            tx.status(AdvancementTransactionStatus.VERIFYING);ServerAdvancementManagerBridge.verify(manager,tx.candidateGeneration());
+            for(PlayerAdvancementStateSnapshot snapshot:snapshots){var player=server.getPlayerList().getPlayer(snapshot.playerId());if(player!=null&&player.connection.connection.isConnected())PlayerAdvancementBridge.verifyCompatibleProgress(player.getAdvancements(),manager,snapshot);}
+            tx.status(AdvancementTransactionStatus.SUCCESS);activeAdvancementGeneration=tx.candidateGeneration();lastAdvancementPlayersRebound=tx.playersRebound().size();lastAdvancementClientSyncResult="passed:"+tx.clientsSynced();
+            PreparedAdvancements artifact=(PreparedAdvancements)preparedArtifact;activeReference=artifact.sourceSnapshot();if(latestScan!=null)lastChangeSet=ChangeDetector.diff(activeReference,latestScan);preparedArtifact=null;stateMachine.transitionTo(PartialReloadState.VERIFYING);stateMachine.transitionTo(PartialReloadState.SUCCESS);
+            com.gabriel0liv.partialreload.PartialReloadMod.LOGGER.info("ADVANCEMENT_COMMIT_SUCCESS generation={} advancements={} added={} removed={} modified={} playersRebound={} clientsSynced={}",activeAdvancementGeneration.generationId(),activeAdvancementGeneration.advancements().size(),artifact.delta().added().size(),artifact.delta().removed().size(),artifact.delta().modified().size(),lastAdvancementPlayersRebound,tx.clientsSynced());
+        }catch(RuntimeException failure){
+            String message=rootMessage(failure);tx.failure(message);
+            if(tx.previousGeneration()==null){failAdvancementBeforeMutation(tx,message);return;}
+            try{tx.status(AdvancementTransactionStatus.ROLLING_BACK);AdvancementFaultInjection.hit(AdvancementFaultPoint.DURING_ROLLBACK_MANAGER);ServerAdvancementManagerBridge.publish(manager,tx.previousGeneration());ServerAdvancementManagerBridge.verify(manager,tx.previousGeneration());AdvancementFaultInjection.hit(AdvancementFaultPoint.DURING_ROLLBACK_PLAYERS);
+                for(PlayerAdvancementStateSnapshot snapshot:tx.playerSnapshots()){var player=server.getPlayerList().getPlayer(snapshot.playerId());if(player!=null&&player.connection.connection.isConnected())PlayerAdvancementBridge.restoreFileAndRebind(player,manager,snapshot);}tx.rollbackPerformed(true);tx.status(AdvancementTransactionStatus.ROLLED_BACK);activeAdvancementGeneration=tx.previousGeneration();lastAdvancementClientSyncResult="rolled_back";stateMachine.transitionTo(PartialReloadState.ROLLED_BACK);com.gabriel0liv.partialreload.PartialReloadMod.LOGGER.error("ADVANCEMENT_COMMIT_FAILED_ROLLED_BACK transaction={} failure={}",tx.transactionId(),message);
+            }catch(RuntimeException rollbackFailure){tx.failure(message+"; ADVANCEMENT_TRANSACTION_DEGRADED: "+rootMessage(rollbackFailure));tx.status(AdvancementTransactionStatus.DEGRADED);lastError=tx.failure();lastAdvancementClientSyncResult="degraded";stateMachine.transitionTo(PartialReloadState.DEGRADED);}
+        }
+    }
+
+    private void preflightAdvancementSafePoint(MinecraftServer server,net.minecraft.server.ServerAdvancementManager manager,AdvancementCommitTransaction tx){
+        if(stateMachine.state()!=PartialReloadState.QUIESCING||advancementTransaction!=tx)throw new IllegalStateException("ADVANCEMENT_COMMIT_TRANSACTION_RUNNING");
+        if(System.identityHashCode(manager)!=tx.managerIdentity()||!ServerAdvancementManagerBridge.matchesExactly(manager,tx.expectedActiveGeneration()))throw new IllegalStateException("ADVANCEMENT_COMMIT_MANAGER_CHANGED");
+        if(!(preparedArtifact instanceof PreparedAdvancements artifact)||!artifact.preparationId().equals(tx.preparationId())||!artifact.isApplicable())throw new IllegalStateException("ADVANCEMENT_COMMIT_ARTIFACT_INVALID");
+        if(!currentCategoriesMatch(server,artifact.sourceSnapshot(),Set.of(ReloadCategory.ADVANCEMENTS)))throw new IllegalStateException("ADVANCEMENT_COMMIT_SNAPSHOT_STALE");
+        if(!advancementDependenciesMatch(server,tx.expectedDependencies()))throw new IllegalStateException("ADVANCEMENT_COMMIT_DEPENDENCY_CHANGED");
+    }
+
+    private boolean advancementDependenciesMatch(MinecraftServer server,AdvancementDependencySnapshot expected){
+        if(System.identityHashCode(server.getLootData())!=expected.lootManagerIdentity()||!LootDataManagerBridge.matchesExactly(server.getLootData(),expected.lootGeneration()))return false;
+        if(System.identityHashCode(server.getRecipeManager())!=expected.recipeManagerIdentity())return false;
+        Map<ResourceLocation,Recipe<?>> recipes=new LinkedHashMap<>();server.getRecipeManager().getRecipes().forEach(r->recipes.put(r.getId(),r));if(!recipes.keySet().equals(expected.recipes().keySet()))return false;for(var e:expected.recipes().entrySet())if(recipes.get(e.getKey())!=e.getValue())return false;
+        if(System.identityHashCode(server.getFunctions())!=expected.functionManagerIdentity()||System.identityHashCode(FunctionLibraryBridge.activeLibrary(server.getFunctions()))!=expected.functionLibraryIdentity()||System.identityHashCode(server.registryAccess())!=expected.registryAccessIdentity())return false;
+        Set<ResourceLocation> functions=new LinkedHashSet<>();server.getFunctions().getFunctionNames().forEach(functions::add);return functions.equals(expected.functionIds());
+    }
+
+    private void failAdvancementBeforeMutation(AdvancementCommitTransaction tx,String message){tx.failure(message);tx.status(AdvancementTransactionStatus.FAILED);lastError=message;stateMachine.transitionTo(PartialReloadState.FAILED_SAFE);}
+    private static boolean advancementTerminal(AdvancementTransactionStatus status){return status==AdvancementTransactionStatus.SUCCESS||status==AdvancementTransactionStatus.ROLLED_BACK||status==AdvancementTransactionStatus.FAILED||status==AdvancementTransactionStatus.DEGRADED;}
 
     public synchronized LootDataCommitTransaction requestLootDataCommit(MinecraftServer server, String requester) {
         if (stateMachine.state() == PartialReloadState.DEGRADED) {
@@ -1623,7 +1739,12 @@ public final class PartialReloadService {
                 globalLootModifierTransaction == null ? "none" : globalLootModifierTransaction.status().name(),
                 retainedGlobalLootModifierGeneration != null,
                 activeGlobalLootModifierGeneration == null ? 0 : activeGlobalLootModifierGeneration.orderedModifiers().size(),
-                lootAndGlmTransaction == null ? "none" : lootAndGlmTransaction.status().name()
+                lootAndGlmTransaction == null ? "none" : lootAndGlmTransaction.status().name(),
+                activeAdvancementGeneration == null ? null : activeAdvancementGeneration.generationId(),
+                advancementTransaction == null ? "none" : advancementTransaction.status().name(),
+                activeAdvancementGeneration == null ? 0 : activeAdvancementGeneration.advancements().size(),
+                lastAdvancementPlayersRebound,
+                lastAdvancementClientSyncResult
         );
     }
 

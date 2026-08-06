@@ -55,3 +55,27 @@ Forge expõe `RegisterCommandsEvent` para registro no dispatcher do servidor. De
 ## Conclusão
 
 O único contrato seguro na fase 1 é leitura da visão `ResourceManager`. Preparação/commit parciais exigirão managers candidatos, dependências explícitas, quiesce, sincronização e verificação especificados por provider; não serão simulados.
+
+## Pesquisa da Fase 4I — advancements
+
+O JAR mapped oficial e as sources de Forge 47.4.10 confirmam que
+`ServerAdvancementManager` mantém `AdvancementList advancements`,
+`LootDataManager lootData` e o contexto Forge. O `apply` desserializa via
+`Advancement.Builder.fromJson`, constrói uma lista completa, resolve roots e
+executa `TreeNodePosition` antes de substituir o campo.
+
+`AdvancementList` mantém map por ID, roots e tasks. As APIs públicas permitem
+listar roots, listar todos e resolver ID, mas não substituir a lista do manager.
+
+`PlayerAdvancements.reload` chama `stopListening`, limpa progresso/visibilidade,
+define `isFirstPacket=true`, limpa `lastSelectedTab`, relê o JSON do jogador,
+chama `checkForAutomaticTriggers` e registra listeners. O check automático
+concede rewards a advancements sem critérios; portanto candidatos automáticos
+com reward são inseguros para uma transação compensável e devem falhar antes da
+mutação. `flushDirty` constrói `ClientboundUpdateAdvancementsPacket` e
+`setSelectedTab` envia `ClientboundSelectAdvancementsTabPacket`.
+
+`AdvancementProgress.update` preserva `CriterionProgress` de nomes ainda
+existentes e remove/adiciona critérios conforme a definição nova; as datas são
+serializadas no arquivo vanilla. Essa é a base do rebind por ID sem parser de
+progresso próprio.

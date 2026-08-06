@@ -1,0 +1,2 @@
+package com.gabriel0liv.partialreload.advancement;
+public enum AdvancementTransactionStatus { PREPARING,READY,QUIESCING,COMMITTING,REBINDING_PLAYERS,SYNCING_CLIENTS,VERIFYING,SUCCESS,ROLLING_BACK,ROLLED_BACK,FAILED,DEGRADED }

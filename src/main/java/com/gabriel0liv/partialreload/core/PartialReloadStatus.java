@@ -25,6 +25,11 @@ public record PartialReloadStatus(
         String globalLootModifierTransactionStatus,
         boolean retainedGlobalLootModifierGeneration,
         int activeGlobalLootModifierCount,
-        String lootAndGlmTransactionStatus
+        String lootAndGlmTransactionStatus,
+        UUID advancementGeneration,
+        String advancementTransactionStatus,
+        int activeAdvancementCount,
+        int connectedPlayerRebindCount,
+        String lastAdvancementClientSyncResult
 ) {
 }

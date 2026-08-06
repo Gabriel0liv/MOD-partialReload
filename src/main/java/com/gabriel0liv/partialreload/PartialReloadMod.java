@@ -12,6 +12,8 @@ import com.gabriel0liv.partialreload.loot.VanillaLootDataProvider;
 import com.gabriel0liv.partialreload.loot.LootDataFaultInjection;
 import com.gabriel0liv.partialreload.glm.ForgeGlobalLootModifierProvider;
 import com.gabriel0liv.partialreload.glm.GlobalLootModifierFaultInjection;
+import com.gabriel0liv.partialreload.advancement.VanillaAdvancementProvider;
+import com.gabriel0liv.partialreload.advancement.AdvancementFaultInjection;
 import com.gabriel0liv.partialreload.joint.TagRecipeFaultInjection;
 import com.gabriel0liv.partialreload.network.PartialReloadNetwork;
 import com.gabriel0liv.partialreload.network.server.ClientHandshakeServer;
@@ -45,6 +47,7 @@ public final class PartialReloadMod {
         TagRecipeFaultInjection.clear();
         LootDataFaultInjection.clear();
         GlobalLootModifierFaultInjection.clear();
+        AdvancementFaultInjection.clear();
         PartialReloadNetwork.register();
         DistExecutor.unsafeRunWhenOn(Dist.CLIENT,
                 () -> com.gabriel0liv.partialreload.client.network.ClientHandshakeController::registerClientListeners);
@@ -64,17 +67,20 @@ public final class PartialReloadMod {
         VanillaFunctionsProvider functionsProvider = new VanillaFunctionsProvider(scanner);
         VanillaLootDataProvider lootDataProvider = new VanillaLootDataProvider(scanner);
         ForgeGlobalLootModifierProvider globalLootModifierProvider = new ForgeGlobalLootModifierProvider(scanner);
+        VanillaAdvancementProvider advancementProvider = new VanillaAdvancementProvider(scanner);
         registry.register(provider);
         registry.register(functionsProvider);
         registry.register(lootDataProvider);
         registry.register(globalLootModifierProvider);
+        registry.register(advancementProvider);
         this.service = new PartialReloadService(
                 registry,
                 provider,
                 new ReloadPlanner(clock, UUID::randomUUID),
                 functionsProvider,
                 lootDataProvider,
-                globalLootModifierProvider
+                globalLootModifierProvider,
+                advancementProvider
         );
 
         MinecraftForge.EVENT_BUS.addListener(this::registerCommands);
@@ -90,6 +96,7 @@ public final class PartialReloadMod {
         TagRecipeFaultInjection.clear();
         LootDataFaultInjection.clear();
         GlobalLootModifierFaultInjection.clear();
+        AdvancementFaultInjection.clear();
         service.clearDeferredClientRefreshState();
         if (handshakeServer != null) {
             handshakeServer.clear();
@@ -115,6 +122,7 @@ public final class PartialReloadMod {
             service.processTagRecipeSafePoint(event.getServer());
             service.processLootDataSafePoint(event.getServer());
             service.processGlobalLootModifierSafePoint(event.getServer());
+            service.processAdvancementSafePoint(event.getServer());
             if (handshakeServer != null) {
                 handshakeServer.tick(event.getServer().getTickCount());
             }

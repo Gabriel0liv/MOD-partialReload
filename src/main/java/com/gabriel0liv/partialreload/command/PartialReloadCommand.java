@@ -27,6 +27,9 @@ import com.gabriel0liv.partialreload.joint.PreparedTagsAndRecipes;
 import com.gabriel0liv.partialreload.joint.TagRecipeFaultInjection;
 import com.gabriel0liv.partialreload.joint.TagRecipeFaultPoint;
 import com.gabriel0liv.partialreload.joint.TagRecipeConnectedPlayerPolicy;
+import com.gabriel0liv.partialreload.advancement.PreparedAdvancements;
+import com.gabriel0liv.partialreload.advancement.AdvancementFaultInjection;
+import com.gabriel0liv.partialreload.advancement.AdvancementFaultPoint;
 import com.gabriel0liv.partialreload.validation.ValidationSeverity;
 import com.mojang.brigadier.CommandDispatcher;
 import com.mojang.brigadier.arguments.StringArgumentType;
@@ -96,6 +99,8 @@ public final class PartialReloadCommand {
                                 .executes(context -> prepareLootAndGlm(context.getSource(), service)))
                         .then(Commands.literal("loot_and_glm")
                                 .executes(context -> prepareLootAndGlm(context.getSource(), service)))
+                        .then(Commands.literal("advancements")
+                                .executes(context -> prepareAdvancements(context.getSource(), service, false)))
                         .then(Commands.literal("recipes")
                                 .executes(context -> prepareRecipes(context.getSource(), service, false)))
                         .then(Commands.literal("tags")
@@ -142,6 +147,18 @@ public final class PartialReloadCommand {
                         .then(Commands.literal("manager_fingerprints")
                                 .requires(source -> !net.minecraftforge.fml.loading.FMLEnvironment.production)
                                 .executes(context -> managerFingerprints(context.getSource())))
+                        .then(Commands.literal("advancement_fault")
+                                .requires(source -> !net.minecraftforge.fml.loading.FMLEnvironment.production && source.hasPermission(4))
+                                .then(Commands.literal("set")
+                                        .then(Commands.argument("point", StringArgumentType.word())
+                                                .executes(context -> debugAdvancementFaultSet(
+                                                        context.getSource(), StringArgumentType.getString(context, "point")))))
+                                .then(Commands.literal("clear")
+                                        .executes(context -> {
+                                            AdvancementFaultInjection.clear();
+                                            context.getSource().sendSuccess(() -> Component.literal("Advancement fault cleared"), false);
+                                            return 1;
+                                        })))
                         .then(Commands.literal("prepared_tag")
                                 .requires(source -> !net.minecraftforge.fml.loading.FMLEnvironment.production)
                                 .then(Commands.argument("registry", StringArgumentType.word())
@@ -197,6 +214,10 @@ public final class PartialReloadCommand {
                                                         .executes(context -> debugGlmFaultSet(context.getSource(), StringArgumentType.getString(context, "point")))))
                                         .then(Commands.literal("clear")
                                                 .executes(context -> { com.gabriel0liv.partialreload.glm.GlobalLootModifierFaultInjection.clear(); context.getSource().sendSuccess(() -> Component.literal("GLM fault cleared"), false); return 1; })))
+                                .then(Commands.literal("advancements")
+                                        .then(Commands.literal("set").then(Commands.argument("point",StringArgumentType.greedyString())
+                                                .executes(context->debugAdvancementFaultSet(context.getSource(),StringArgumentType.getString(context,"point")))))
+                                        .then(Commands.literal("clear").executes(context->{AdvancementFaultInjection.clear();context.getSource().sendSuccess(()->Component.literal("Advancement fault cleared"),false);return 1;})))
                         .then(Commands.literal("tag_recipe_journal")
                                 .requires(source -> !net.minecraftforge.fml.loading.FMLEnvironment.production)
                                 .executes(context -> debugTagRecipeJournal(context.getSource(), service)))
@@ -229,6 +250,8 @@ public final class PartialReloadCommand {
             return 0;
         }
     }
+
+    private static int debugAdvancementFaultSet(CommandSourceStack source,String name){try{AdvancementFaultInjection.arm(AdvancementFaultPoint.valueOf(name.toUpperCase(java.util.Locale.ROOT)));source.sendSuccess(()->Component.literal("Advancement fault armed: "+name),false);return 1;}catch(IllegalArgumentException ex){source.sendFailure(Component.literal("Unknown advancement fault point: "+name));return 0;}}
 
     private static int debugFaultSequence(CommandSourceStack source, String first, String second) {
         try {
@@ -340,6 +363,11 @@ public final class PartialReloadCommand {
                 + " retainedGlmRollbackGeneration=" + status.retainedGlobalLootModifierGeneration()
                 + " activeGlobalLootModifiers=" + status.activeGlobalLootModifierCount()
                 + " lootGlmTransactionStatus=" + status.lootAndGlmTransactionStatus()), false);
+        source.sendSuccess(() -> Component.literal("advancementGeneration=" + status.advancementGeneration()
+                + " advancementTransactionStatus=" + status.advancementTransactionStatus()
+                + " activeAdvancements=" + status.activeAdvancementCount()
+                + " connectedPlayerRebindCount=" + status.connectedPlayerRebindCount()
+                + " lastClientSyncResult=" + status.lastAdvancementClientSyncResult()), false);
         source.sendSuccess(() -> Component.literal("Recipe/tag commit default: SERVER_ONLY_NO_PLAYERS"), false);
         source.sendSuccess(() -> Component.literal("Recipe/tag commit opt-in: SERVER_COMMIT_DEFERRED_CLIENT_REFRESH (relog required)"), false);
         source.sendSuccess(() -> Component.literal("tagRecipeGeneration=" + status.tagRecipeGeneration()
@@ -363,7 +391,7 @@ public final class PartialReloadCommand {
             String support = switch (category) {
                 case DYNAMIC_REGISTRIES -> "RESTART_REQUIRED";
                 case UNKNOWN -> "UNKNOWN";
-                case FUNCTIONS, PREDICATES, ITEM_MODIFIERS, LOOT, TAGS, GLOBAL_LOOT_MODIFIERS -> "PREPARE_SUPPORTED";
+                case FUNCTIONS, PREDICATES, ITEM_MODIFIERS, LOOT, TAGS, GLOBAL_LOOT_MODIFIERS, ADVANCEMENTS -> "PREPARE_SUPPORTED";
                 case ORIGINS, KUBEJS, SILENTGEAR -> "PLANNED";
                 default -> "SUPPORTED_READ_ONLY";
             };
@@ -528,6 +556,11 @@ public final class PartialReloadCommand {
     }
 
     private static int prepareChanged(CommandSourceStack source, PartialReloadService service) {
+        if (service.hasAdvancementChanges()) {
+            boolean onlyAdvancements=service.lastChangeSet().changedResources().stream().allMatch(c->c.category()==ReloadCategory.ADVANCEMENTS);
+            if(!onlyAdvancements){source.sendFailure(Component.literal("ADVANCEMENT_PREPARATION_DEPENDENCIES_CHANGED"));return 0;}
+            return prepareAdvancements(source,service,true);
+        }
         boolean tags = service.hasTagChanges();
         boolean recipes = service.hasRecipeChanges();
         boolean onlyTagsRecipes = service.lastChangeSet().changedResources().stream()
@@ -780,6 +813,17 @@ public final class PartialReloadCommand {
         return 1;
     }
 
+    private static int prepareAdvancements(CommandSourceStack source,PartialReloadService service,boolean changedOnly){
+        if(changedOnly&&!service.hasAdvancementChanges()){source.sendFailure(Component.literal("No changed advancements are present."));return 0;}
+        try{service.prepareAdvancementsAsync(source.getServer().getResourceManager(),source.getServer(),Util.backgroundExecutor(),source.getServer()).whenComplete((artifact,failure)->{if(failure!=null)source.sendFailure(Component.literal("Advancement preparation failed safely: "+rootMessage(failure)));else showPreparedAdvancements(source,artifact);});source.sendSuccess(()->Component.literal("Advancement preparation started. Active ServerAdvancementManager remains unchanged."),false);return 1;}catch(RuntimeException failure){source.sendFailure(Component.literal(failure.getMessage()));return 0;}
+    }
+
+    private static int showPreparedAdvancements(CommandSourceStack source,PreparedAdvancements artifact){
+        source.sendSuccess(()->Component.literal("PreparedAdvancements #"+artifact.preparationId()+" advancements="+artifact.advancements().size()+" added="+artifact.delta().added().size()+" removed="+artifact.delta().removed().size()+" modified="+artifact.delta().modified().size()),false);
+        source.sendSuccess(()->Component.literal("Applicable: "+artifact.isApplicable()+" roots="+artifact.tree().roots().size()),false);
+        artifact.validation().issues().stream().limit(30).forEach(issue->source.sendFailure(Component.literal(issue.severity()+" "+issue.code()+" "+issue.message())));return artifact.isApplicable()?1:0;
+    }
+
     private static LootPreparationContext lootPreparationContext(CommandSourceStack source,
                                                                  PartialReloadService service,
                                                                  ReloadCategory requested) {
@@ -838,6 +882,7 @@ public final class PartialReloadCommand {
         if (artifact instanceof PreparedLootData lootData) return showPreparedLoot(source, lootData);
         if (artifact instanceof PreparedGlobalLootModifiers glm) return showPreparedGlm(source, glm);
         if (artifact instanceof PreparedLootAndGlobalModifiers jointLoot) return showPreparedLootAndGlm(source, jointLoot);
+        if (artifact instanceof PreparedAdvancements advancements) return showPreparedAdvancements(source, advancements);
         if (artifact instanceof PreparedRecipes recipes) return showPreparedRecipes(source, recipes);
         if (artifact instanceof PreparedTags tags) return showPreparedTags(source, tags);
         if (artifact instanceof PreparedTagsAndRecipes joint) return showPreparedTagsAndRecipes(source, joint);
@@ -1012,6 +1057,10 @@ public final class PartialReloadCommand {
     private static int applyPrepared(CommandSourceStack source, PartialReloadService service,
                                      TagRecipeConnectedPlayerPolicy policy) {
         try {
+            if(service.preparedArtifact() instanceof PreparedAdvancements){
+                if(policy==TagRecipeConnectedPlayerPolicy.DEFER_CLIENT_REFRESH_UNTIL_RELOGIN)throw new IllegalStateException("ADVANCEMENT_COMMIT_DOES_NOT_USE_DEFERRED");
+                var tx=service.requestAdvancementCommit(source.getServer(),source.getTextName());source.sendSuccess(()->Component.literal("Advancement transaction "+tx.transactionId()+" queued for the next safe point; clients will use vanilla advancement sync."),false);return 1;
+            }
             if (service.preparedArtifact() instanceof PreparedLootAndGlobalModifiers) {
                 if (policy == TagRecipeConnectedPlayerPolicy.DEFER_CLIENT_REFRESH_UNTIL_RELOGIN) {
                     throw new IllegalStateException("TAG_RECIPE_DEFERRED_REQUIRES_TAGS_AND_RECIPES");
@@ -1061,6 +1110,8 @@ public final class PartialReloadCommand {
     }
 
     private static int transaction(CommandSourceStack source, PartialReloadService service) {
+        var advancement=service.advancementTransaction();
+        if(advancement!=null){source.sendSuccess(()->Component.literal("Advancement transaction: "+advancement.transactionId()+" status="+advancement.status()+" playersRebound="+advancement.playersRebound().size()+" clientsSynced="+advancement.clientsSynced()),false);if(advancement.failure()!=null)source.sendFailure(Component.literal(advancement.failure()));return 1;}
         var jointLoot = service.lootAndGlmTransaction();
         if (jointLoot != null) {
             source.sendSuccess(() -> Component.literal("Joint loot/GLM transaction: " + jointLoot.transactionId()

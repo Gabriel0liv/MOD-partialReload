@@ -12,6 +12,9 @@ import net.minecraft.client.gui.screens.AccessibilityOnboardingScreen;
 import net.minecraft.client.gui.screens.ConnectScreen;
 import net.minecraft.client.gui.screens.TitleScreen;
 import net.minecraft.client.multiplayer.ServerData;
+import net.minecraft.client.multiplayer.ClientAdvancements;
+import net.minecraft.advancements.Advancement;
+import net.minecraft.advancements.AdvancementProgress;
 import net.minecraft.client.multiplayer.resolver.ServerAddress;
 import net.minecraft.network.chat.Component;
 import net.minecraft.core.registries.BuiltInRegistries;
@@ -48,6 +51,7 @@ public final class HandshakeAcceptanceClientMod {
     private long ticksSinceRequest;
     private String previousScreen;
     private boolean nonInventoryContainerObserved;
+    private AdvancementObserver advancementObserver;
 
     private enum PendingAction { INITIAL_CONNECT, RECONNECT }
 
@@ -138,6 +142,14 @@ public final class HandshakeAcceptanceClientMod {
         }
         if (minecraft.getConnection() != null && Files.exists(control.resolve("probe-data.request"))) {
             probeData(minecraft, control.resolve("probe-data.request"));
+            return;
+        }
+        if (minecraft.getConnection() != null && Files.exists(control.resolve("select-advancement.request"))) {
+            selectAdvancement(minecraft, control.resolve("select-advancement.request"));
+            return;
+        }
+        if (minecraft.getConnection() != null && Files.exists(control.resolve("probe-advancements.request"))) {
+            probeAdvancements(minecraft, control.resolve("probe-advancements.request"));
             return;
         }
         if (state == AcceptanceClientState.BOOTING || state == AcceptanceClientState.READY) {
@@ -268,6 +280,63 @@ public final class HandshakeAcceptanceClientMod {
                     runId(), attemptId(), resultCount, members);
         } catch (IOException | RuntimeException exception) {
             fail("DEFERRED_REFRESH_ACCEPTANCE_CLIENT_DATA_FAILED", exception);
+        }
+    }
+
+    private void selectAdvancement(Minecraft minecraft, Path request) {
+        try {
+            Files.deleteIfExists(request);
+            if (minecraft.getConnection() == null) throw new IllegalStateException("client connection unavailable");
+            var advancements = minecraft.getConnection().getAdvancements();
+            Advancement root = advancements.getAdvancements().get(
+                    ResourceLocation.fromNamespaceAndPath("partialreload_advancement", "root"));
+            if (root == null) throw new IllegalStateException("acceptance advancement root absent");
+            advancements.setSelectedTab(root, true);
+            LOGGER.info("ADVANCEMENT_ACCEPTANCE_CLIENT_TAB_SELECTED run={} attempt={} selected={}",
+                    runId(), attemptId(), root.getId());
+        } catch (IOException | RuntimeException exception) {
+            fail("ADVANCEMENT_ACCEPTANCE_CLIENT_TAB_SELECT_FAILED", exception);
+        }
+    }
+
+    private void probeAdvancements(Minecraft minecraft, Path request) {
+        try {
+            Files.deleteIfExists(request);
+            if (minecraft.getConnection() == null) throw new IllegalStateException("client connection unavailable");
+            advancementObserver = new AdvancementObserver();
+            minecraft.getConnection().getAdvancements().setListener(advancementObserver);
+            ResourceLocation child = ResourceLocation.fromNamespaceAndPath("partialreload_advancement", "child");
+            AdvancementProgress progress = advancementObserver.progress.get(child);
+            String completed = progress == null ? "<none>" : java.util.stream.StreamSupport
+                    .stream(progress.getCompletedCriteria().spliterator(), false).sorted()
+                    .collect(java.util.stream.Collectors.joining(","));
+            String remaining = progress == null ? "<none>" : java.util.stream.StreamSupport
+                    .stream(progress.getRemainingCriteria().spliterator(), false).sorted()
+                    .collect(java.util.stream.Collectors.joining(","));
+            String ids = advancementObserver.ids.stream().map(ResourceLocation::toString).sorted()
+                    .collect(java.util.stream.Collectors.joining(","));
+            LOGGER.info("ADVANCEMENT_ACCEPTANCE_CLIENT_STATE run={} attempt={} ids={} childCompleted={} childRemaining={} selected={}",
+                    runId(), attemptId(), ids, completed, remaining,
+                    advancementObserver.selected == null ? "<none>" : advancementObserver.selected);
+        } catch (IOException | RuntimeException exception) {
+            fail("ADVANCEMENT_ACCEPTANCE_CLIENT_PROBE_FAILED", exception);
+        }
+    }
+
+    private static final class AdvancementObserver implements ClientAdvancements.Listener {
+        private final java.util.Set<ResourceLocation> ids = new java.util.LinkedHashSet<>();
+        private final java.util.Map<ResourceLocation, AdvancementProgress> progress = new java.util.LinkedHashMap<>();
+        private ResourceLocation selected;
+        @Override public void onAddAdvancementRoot(Advancement value) { ids.add(value.getId()); }
+        @Override public void onRemoveAdvancementRoot(Advancement value) { ids.remove(value.getId()); }
+        @Override public void onAddAdvancementTask(Advancement value) { ids.add(value.getId()); }
+        @Override public void onRemoveAdvancementTask(Advancement value) { ids.remove(value.getId()); }
+        @Override public void onAdvancementsCleared() { ids.clear(); progress.clear(); selected = null; }
+        @Override public void onUpdateAdvancementProgress(Advancement value, AdvancementProgress state) {
+            progress.put(value.getId(), state);
+        }
+        @Override public void onSelectedTabChanged(Advancement value) {
+            selected = value == null ? null : value.getId();
         }
     }
 

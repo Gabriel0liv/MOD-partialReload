@@ -15,6 +15,7 @@ SUITES = [
     ("loot_data_commit_acceptance", "run-dedicated-loot-data-commit-acceptance.py", "dedicated-loot-data-commit-acceptance.json", "LOOT_DATA_COMMIT_ACCEPTANCE_PASSED"),
     ("glm_commit_acceptance", "run-dedicated-glm-commit-acceptance.py", "dedicated-glm-commit-acceptance.json", "GLM_COMMIT_ACCEPTANCE_PASSED"),
     ("loot_glm_joint_commit_acceptance", "run-dedicated-loot-glm-joint-acceptance.py", "dedicated-loot-glm-joint-acceptance.json", "LOOT_GLM_JOINT_COMMIT_ACCEPTANCE_PASSED"),
+    ("advancement_commit_acceptance", "run-dedicated-advancement-commit-acceptance.py", "dedicated-advancement-commit-acceptance.json", "ADVANCEMENT_COMMIT_ACCEPTANCE_PASSED"),
     ("kubejs_expected_block", "run-dedicated-kubejs-recipe-acceptance.py", "dedicated-kubejs-recipe-acceptance.json", "KUBEJS_RECIPE_PREPARATION_BLOCKED"),
 ]
 SUITE_TIMEOUT_SECONDS = 1800
