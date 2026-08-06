@@ -38,7 +38,7 @@ public final class ForgeGlobalLootModifierProvider implements ReloadProvider {
     @Override public ResourceLocation id() { return ID; }
     @Override public Set<ReloadCategory> categories() { return Set.of(ReloadCategory.GLOBAL_LOOT_MODIFIERS); }
     @Override public ProviderCompatibility compatibility(ReloadEnvironment environment) {
-        return ProviderCompatibility.PREPARE_SUPPORTED;
+        return ProviderCompatibility.COMMIT_SUPPORTED;
     }
     @Override public ScanResult scan(ScanContext context) throws PartialReloadException {
         return new ScanResult(scanner.scan(context));

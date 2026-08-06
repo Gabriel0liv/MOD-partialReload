@@ -3,8 +3,8 @@
 Framework estritamente server-side para reloads parciais seguros, categorizados
 e transacionais em servidores Forge 1.20.1.
 
-Versão atual: `0.3.0-SNAPSHOT` — commits transacionais de functions, do bundle
-tags+recipes e do bundle predicates+item modifiers+loot no alvo Forge 47.4.10.
+Versão atual: `0.3.0-SNAPSHOT` — commits transacionais de functions,
+tags+recipes, loot data, GLM e do bundle conjunto loot+GLM no Forge 47.4.10.
 
 A fundação opcional de handshake client-side da Fase 4F-A foi aceita: o canal `partialreload:client_sync` é client-optional, a presença é iniciada pelo cliente, clientes sem o mod continuam entrando, clientes com o mod entram em servidor sem Partial Reload, e reconnects/timeout SILENT foram validados. A Fase 4F-R acrescenta um commit opt-in com refresh do cliente adiado até o relog: o servidor muda imediatamente, fecha menus abertos e mantém os jogadores online, mas recipe book, JEI/REI e informação visual podem permanecer antigos. Não há payloads de tags/recipes, ACK transacional, live sync, quiescência ou rollback distribuído.
 
@@ -40,6 +40,9 @@ A fundação opcional de handshake client-side da Fase 4F-A foi aceita: o canal 
 - commit transacional conjunto de predicates, item modifiers e loot tables,
   preservando a identidade do `LootDataManager`, permitindo jogadores
   conectados e retendo uma geração para rollback.
+- commit transacional de GLM ordenado e commit conjunto obrigatório loot+GLM,
+  preservando ambos os managers, permitindo jogadores conectados e retendo uma
+  geração anterior para rollback.
 
 ## Não implementado
 
@@ -47,8 +50,6 @@ A fundação opcional de handshake client-side da Fase 4F-A foi aceita: o canal 
 - políticas de load diferentes de `DO_NOT_RUN`;
 - rollback após restart ou histórico de gerações;
 - integrações KubeJS, Origins e Silent Gear.
-- promoção do commit GLM e loot+GLM (implementação candidata com gate final
-  ainda pendente por identity mismatch do harness).
 - execução de handlers KubeJS e candidato combinado de recipes (**bloqueado** sem runtime Forge 1.20.1 exato);
 
 Os commits transacionais de functions e loot data foram validados em servidor
@@ -162,9 +163,10 @@ A acceptance de loot data mantém um cliente real sem o mod principal online,
 publica uma geração completa nova, prova comportamento determinístico pelos
 comandos vanilla de predicate/item/loot, remove IDs e executa rollback manual.
 Itens já gerados não são reescritos e referências externas previamente retidas
-podem continuar apontando para objetos antigos. A implementação candidata da
-Fase 4H mantém GLMs num manager separado e exige transação conjunta quando loot
-data também mudou, mas ainda não está promovida.
+podem continuar apontando para objetos antigos. A Fase 4H mantém GLMs num
+manager separado, exige transação conjunta quando loot data também mudou e foi
+promovida após 84/84 GameTests, acceptances GLM, conjunta e 4G, runner
+consolidado com 11 suítes e clean build.
 
 ## Safety gate 4E-S
 

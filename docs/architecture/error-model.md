@@ -73,6 +73,15 @@ rollback integral e verificado.
 falha posterior à primeira atribuição exige rollback verificado dos managers
 afetados, sem aceitar restauração parcial.
 
+## Erros e diagnóstico do harness Windows
+
+`IDENTITY_MISMATCH` permanece `HARNESS_FAILURE` quando a identidade atual não
+pode ser separada com segurança da identidade owned. Somente exit previamente
+confirmado, `creation_time` posterior e ausência de descendência, referências
+ao run, TCP, reader threads, locks e manifests residuais permitem classificar
+`PID_REUSED_AFTER_OWNED_PROCESS_EXIT`. Esse evento fica em `pid_reuse_events` e
+não é processo residual.
+
 WARNING não invalida candidato. ERROR e BLOCKER tornam
 `PreparedReloadArtifact.isApplicable()` falso.
 

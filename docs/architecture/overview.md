@@ -97,6 +97,11 @@ mesma captura em loot data exige `PreparedLootAndGlobalModifiers`, publicação
 loot→GLM e rollback GLM→loot. Jogadores conectados são permitidos, sem client
 sync e sem reescrever itens ou loot já produzidos.
 
+Esse caminho está promovido como `COMMIT_SUPPORTED`. O gate final aprovou
+84/84 GameTests, as acceptances dedicadas GLM, loot+GLM e 4G, e o runner
+consolidado com 11 suítes. Ownership dos harnesses é por identidade e geração,
+não pelo número do PID isolado.
+
 ## Commit transacional de loot data
 
 `LootDataManagerBridge` captura cópias imutáveis de `elements` e `typeKeys`,

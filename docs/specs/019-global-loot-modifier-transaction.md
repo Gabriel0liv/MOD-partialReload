@@ -1,6 +1,6 @@
 # Spec 019 — transação de Global Loot Modifiers
 
-Status: implementação concluída; promoção pendente do gate consolidado final
+Status: implementada, validada e promovida
 
 ## Objetivo
 
@@ -101,8 +101,13 @@ LootJS, KubeJS loot handlers, regeneração retroativa, reload global,
 ## Aceitação
 
 Testes unitários e 24 GameTests da Fase 4H cobrem stack, codec, delta, gerações,
-TOCTOU, fault injection e rollback. As acceptances dedicadas comprovaram GLM
-isolado e loot + GLM com jogador conectado. A primeira execução consolidada
-terminou com `ALL_ACCEPTANCE_PASSED`; a repetição final encontrou identity
-mismatch por PID reutilizado numa suíte anterior de loot data. Até novo gate
-integral limpo, o provider permanece `PREPARE_SUPPORTED`.
+TOCTOU, fault injection e rollback. A execução final aprovou 84/84 GameTests,
+incluindo 24/24 da 4G e 24/24 da 4H. As acceptances dedicadas comprovaram GLM
+isolado, loot + GLM com jogador conectado e novamente o commit 4G. O runner
+consolidado aprovou 11 suítes com `ALL_ACCEPTANCE_PASSED`; o provider declara
+`COMMIT_SUPPORTED`.
+
+O harness distingue identidade de processo do número do PID. Reuse posterior
+ao exit confirmado, com ordem temporal e ausência de ownership residual
+comprovadas, é preservado em `pid_reuse_events`; identidade divergente sem essa
+prova continua falhando fechada.

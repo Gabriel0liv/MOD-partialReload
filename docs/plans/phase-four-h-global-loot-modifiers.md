@@ -1,6 +1,6 @@
 # Plano — Fase 4H: Global Loot Modifiers
 
-Status: implementação concluída; promoção bloqueada no gate consolidado final.
+Status: concluída e promovida.
 
 1. Confirmar bytecode e mappings do Forge 47.4.10.
 2. Endurecer a guarda TOCTOU da transação 4G por igualdade exata.
@@ -13,11 +13,11 @@ Status: implementação concluída; promoção bloqueada no gate consolidado fin
 9. Cobrir unit tests, GameTests e acceptances dedicadas.
 10. Executar gates, inspecionar JAR e promover documentação somente com todos os resultados aprovados.
 
-Evidência: 78 testes Java e 84/84 GameTests (24 da 4H), acceptances GLM e
-conjunta aprovadas e uma execução do runner com 11 suítes aprovada. Depois da
-tentativa de promoção, a repetição final parou na acceptance 4G por
-`identity_mismatches=[29860]`, apesar de cleanup global sem resíduos. O contrato
-fail-closed mantém a promoção pendente. O smoke Arclight não foi executado por
-ausência de runtime configurado.
+Evidência final: 79 testes Java, 161 testes Python e 84/84 GameTests, com 24/24
+da 4G e 24/24 da 4H. A acceptance 4G foi repetida isoladamente após o hardening
+de PID reuse e passou sem mismatch ou residual. O runner consolidado aprovou
+as 11 suítes com `ALL_ACCEPTANCE_PASSED`, seguido de clean build e inspeção do
+JAR. O provider GLM foi então promovido para `COMMIT_SUPPORTED`. O smoke
+Arclight não foi executado por ausência de runtime configurado.
 
 Não fazem parte do plano live sync, LootJS, KubeJS loot, reload global ou regeneração retroativa.

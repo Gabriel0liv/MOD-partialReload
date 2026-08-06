@@ -12,6 +12,7 @@ import threading
 import time
 import uuid
 import argparse
+from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass, field
 from enum import Enum
 
@@ -303,17 +304,19 @@ def preflight_owned_processes(ownership_directory: pathlib.Path) -> dict[str, ob
     for manifest in ownership_directory.glob("*.json"):
         try:
             data = json.loads(manifest.read_text(encoding="utf-8"))
-            if not isinstance(data, dict) or not isinstance(data.get("processes", []), list):
+            if not isinstance(data, dict) or not isinstance(data.get("active_owned_identities", data.get("processes", [])), list):
                 raise ValueError("invalid manifest")
             live_mismatch = False
-            for item in data.get("processes", []):
+            active_processes = data.get("active_owned_identities", data.get("processes", []))
+            for item in active_processes:
                 if not isinstance(item, dict) or "pid" not in item:
                     raise ValueError("invalid process identity")
                 pid = int(item["pid"])
                 if process_alive(pid):
                     actual = next((p for p in process_tree(data.get("harness", {}).get("pid")) if int(p.get("pid", -1)) == pid), None)
                     expected = OwnedProcessIdentity(pid, item.get("parent_pid"), item.get("creation_time"),
-                                                    str(item.get("role", "unknown")), str(item.get("command_fingerprint", "UNKNOWN_OWNED_DESCENDANT")))
+                                                    str(item.get("role", "unknown")), str(item.get("command_fingerprint", "UNKNOWN_OWNED_DESCENDANT")),
+                                                    item.get("executable_path"), None, item.get("run_id"), item.get("attempt_id"))
                     if actual is None or not identity_matches(expected, actual):
                         live_mismatch = True
             if live_mismatch:
@@ -509,6 +512,17 @@ class OwnedProcessIdentity:
     creation_time: str | None
     role: str
     command_fingerprint: str
+    executable_path: str | None = None
+    command_line: str | None = None
+    run_id: str | None = None
+    attempt_id: str | None = None
+
+
+@dataclass(frozen=True)
+class ExitedOwnedProcessIdentity:
+    identity: OwnedProcessIdentity
+    last_valid_observation_time: str
+    confirmed_exit_time: str
 
 
 @dataclass(frozen=True)
@@ -520,6 +534,7 @@ class ProcessStopResult:
     reader_thread_stopped: bool
     residual_owned_pids: tuple[int, ...]
     identity_mismatches: tuple[int, ...]
+    pid_reuse_events: tuple[dict[str, object], ...] = ()
 
 
 def command_fingerprint(command: list[str]) -> str:
@@ -570,14 +585,133 @@ def normalize_creation_time(value: object) -> str | None:
     text = str(value).strip()
     if not text:
         return None
-    return text.replace(".", "").replace("+", "")
+    return text
+
+
+def process_timestamp_now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="microseconds")
+
+
+def parse_process_timestamp(value: object) -> datetime | None:
+    """Parse CIM/PowerShell timestamps without guessing when evidence is absent."""
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    epoch = re.fullmatch(r"/Date\((\d+)(?:[+-]\d+)?\)/", text)
+    if epoch:
+        return datetime.fromtimestamp(int(epoch.group(1)) / 1000, timezone.utc)
+    dmtf = re.fullmatch(r"(\d{14})(?:\.(\d{1,6}))?([+-])(\d{3})", text)
+    if dmtf:
+        base = datetime.strptime(dmtf.group(1), "%Y%m%d%H%M%S").replace(
+            microsecond=int((dmtf.group(2) or "0").ljust(6, "0")), tzinfo=timezone.utc)
+        offset = int(dmtf.group(4)) * 60
+        return base - timedelta(minutes=offset if dmtf.group(3) == "+" else -offset)
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed.astimezone(timezone.utc)
+    except ValueError:
+        normalized = re.sub(r"\D", "", text)
+        if len(normalized) >= 14 and normalized[:14].isdigit():
+            try:
+                return datetime.strptime(normalized[:14], "%Y%m%d%H%M%S").replace(tzinfo=timezone.utc)
+            except ValueError:
+                pass
+    return None
+
+
+def command_references_ownership(actual_process: dict[str, object], expected: OwnedProcessIdentity) -> bool:
+    command = str(actual_process.get("command_line") or "").lower()
+    tokens = tuple(str(value).lower() for value in (expected.run_id, expected.attempt_id)
+                   if value is not None and str(value).strip())
+    return any(token in command for token in tokens)
+
+
+def classify_pid_reuse_after_exit(
+        exited: ExitedOwnedProcessIdentity,
+        actual_process: dict[str, object], *,
+        owned_descendant: bool = False,
+        owned_tcp: bool = False,
+        reader_thread_alive: bool = False,
+        ownership_artifact_residual: bool = False,
+) -> tuple[bool, str, dict[str, object] | None]:
+    """Authorize only temporally proven reuse of an exited owned identity."""
+    expected = exited.identity
+    new_creation = parse_process_timestamp(actual_process.get("creation_time"))
+    confirmed_exit = parse_process_timestamp(exited.confirmed_exit_time)
+    original_creation = parse_process_timestamp(expected.creation_time)
+    if original_creation is None or confirmed_exit is None or new_creation is None:
+        return False, "PID_REUSE_TEMPORAL_EVIDENCE_MISSING", None
+    if new_creation <= confirmed_exit:
+        return False, "PID_REUSE_TEMPORAL_OVERLAP", None
+    if identity_matches(expected, actual_process):
+        return False, "OWNED_PROCESS_STILL_ACTIVE", None
+    if owned_descendant:
+        return False, "PID_REUSE_IS_OWNED_DESCENDANT", None
+    if command_references_ownership(actual_process, expected):
+        return False, "PID_REUSE_REFERENCES_OWNERSHIP", None
+    if owned_tcp:
+        return False, "PID_REUSE_HAS_OWNED_TCP", None
+    if reader_thread_alive:
+        return False, "PID_REUSE_READER_THREAD_ALIVE", None
+    if ownership_artifact_residual:
+        return False, "PID_REUSE_OWNERSHIP_ARTIFACT_RESIDUAL", None
+    event = {
+        "pid": expected.pid,
+        "classification": "PID_REUSED_AFTER_OWNED_PROCESS_EXIT",
+        "owned_creation_time": expected.creation_time,
+        "owned_last_valid_observation_time": exited.last_valid_observation_time,
+        "owned_confirmed_exit_time": exited.confirmed_exit_time,
+        "new_creation_time": actual_process.get("creation_time"),
+        "new_executable": actual_process.get("executable_path"),
+        "owned_descendant": False,
+        "owned_tcp": False,
+    }
+    return True, "PID_REUSED_AFTER_OWNED_PROCESS_EXIT", event
+
+
+def identity_manifest_payload(identity: OwnedProcessIdentity) -> dict[str, object]:
+    """Persist identity evidence without leaking a complete command line."""
+    return {
+        "pid": identity.pid,
+        "parent_pid": identity.parent_pid,
+        "creation_time": identity.creation_time,
+        "role": identity.role,
+        "command_fingerprint": identity.command_fingerprint,
+        "executable_path": identity.executable_path,
+        "run_id": identity.run_id,
+        "attempt_id": identity.attempt_id,
+    }
 
 
 def identity_matches(expected: OwnedProcessIdentity, actual_process: dict[str, object]) -> bool:
+    executable_matches = (expected.executable_path is None or actual_process.get("executable_path") is None
+                          or os.path.normcase(str(actual_process.get("executable_path")))
+                          == os.path.normcase(expected.executable_path))
     return (int(actual_process.get("pid", -1)) == expected.pid
             and expected.creation_time is not None
             and normalize_creation_time(actual_process.get("creation_time")) == normalize_creation_time(expected.creation_time)
-            and command_fingerprint([str(actual_process.get("command_line") or "")]) == expected.command_fingerprint)
+            and command_fingerprint([str(actual_process.get("command_line") or "")]) == expected.command_fingerprint
+            and executable_matches)
+
+
+def owned_tcp_pids(pids: set[int], ports: tuple[int, ...]) -> set[int]:
+    if not pids or not ports:
+        return set()
+    script = ("Get-NetTCPConnection -ErrorAction SilentlyContinue | "
+              "Select-Object LocalPort,RemotePort,OwningProcess | ConvertTo-Json -Compress")
+    try:
+        raw = subprocess.check_output(["powershell", "-NoProfile", "-Command", script], text=True,
+                                      stderr=subprocess.DEVNULL)
+        values = json.loads(raw) if raw.strip() else []
+        values = values if isinstance(values, list) else [values]
+        return {int(value.get("OwningProcess", -1)) for value in values if isinstance(value, dict)
+                and int(value.get("OwningProcess", -1)) in pids
+                and (int(value.get("LocalPort", -1)) in ports or int(value.get("RemotePort", -1)) in ports)}
+    except Exception:
+        # Missing TCP evidence cannot make PID reuse safe. Callers fail closed.
+        return set(pids)
 
 
 @dataclass
@@ -591,10 +725,22 @@ class OwnedProcess:
     thread: threading.Thread | None = None
     lines: list[str] = field(default_factory=list)
     owned_identities: dict[int, "OwnedProcessIdentity"] = field(default_factory=dict)
+    historical_owned_identities: list["ExitedOwnedProcessIdentity"] = field(default_factory=list)
+    last_valid_observation_times: dict[int, str] = field(default_factory=dict)
+    pid_reuse_events: list[dict[str, object]] = field(default_factory=list)
+    last_stop_result: "ProcessStopResult | None" = None
+    owned_ports: tuple[int, ...] = ()
 
     def write_manifest(self, path: pathlib.Path, run_id: str, state: str) -> None:
         payload = {"run_id": run_id, "harness": {"pid": os.getpid(), "creation_time": process_creation_time(os.getpid())},
-                   "processes": [identity.__dict__ for identity in self.owned_identities.values()], "state": state}
+                   "processes": [identity_manifest_payload(identity) for identity in self.owned_identities.values()],
+                   "active_owned_identities": [identity_manifest_payload(identity) for identity in self.owned_identities.values()],
+                   "historical_owned_identities": [
+                       {"identity": identity_manifest_payload(exited.identity),
+                        "last_valid_observation_time": exited.last_valid_observation_time,
+                        "confirmed_exit_time": exited.confirmed_exit_time}
+                       for exited in self.historical_owned_identities],
+                   "pid_reuse_events": self.pid_reuse_events, "state": state}
         path.parent.mkdir(parents=True, exist_ok=True)
         temporary = path.with_suffix(path.suffix + ".tmp")
         temporary.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -605,9 +751,17 @@ class OwnedProcess:
         self.process = subprocess.Popen(self.command, cwd=self.cwd, env=self.env,
                                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                         text=True, encoding="utf-8", errors="replace", bufsize=1)
+        run_id = self.env.get("PARTIALRELOAD_ACCEPTANCE_RUN_ID")
+        attempt_id = self.env.get("PARTIALRELOAD_ACCEPTANCE_ATTEMPT_ID")
+        actual = next((item for item in current_process_snapshot()
+                       if int(item.get("pid", -1)) == self.process.pid), {})
+        actual_command = str(actual.get("command_line") or " ".join(self.command))
         self.owned_identities[self.process.pid] = OwnedProcessIdentity(
-            self.process.pid, None, process_creation_time(self.process.pid), self.name,
-            command_fingerprint(self.command))
+            self.process.pid, int(actual.get("parent_pid") or 0) or None,
+            normalize_creation_time(actual.get("creation_time")) or process_creation_time(self.process.pid), self.name,
+            command_fingerprint([actual_command]), str(actual.get("executable_path") or "") or None,
+            actual_command, run_id, attempt_id)
+        self.last_valid_observation_times[self.process.pid] = process_timestamp_now()
 
         def read() -> None:
             assert self.process is not None and self.process.stdout is not None
@@ -623,7 +777,25 @@ class OwnedProcess:
         if self.process is None:
             return
         snapshot = current_process_snapshot()
-        descendants = process_tree(self.process.pid)
+        if not snapshot:
+            return
+        observed_at = process_timestamp_now()
+        by_pid = {int(item.get("pid", -1)): item for item in snapshot}
+        for pid, expected in list(self.owned_identities.items()):
+            actual = by_pid.get(pid)
+            if actual is None:
+                last_seen = self.last_valid_observation_times.get(pid, observed_at)
+                self.historical_owned_identities.append(
+                    ExitedOwnedProcessIdentity(expected, last_seen, observed_at))
+                del self.owned_identities[pid]
+                continue
+            if identity_matches(expected, actual):
+                self.last_valid_observation_times[pid] = observed_at
+        wrapper = self.owned_identities.get(self.process.pid)
+        wrapper_actual = by_pid.get(self.process.pid)
+        if wrapper is None or wrapper_actual is None or not identity_matches(wrapper, wrapper_actual):
+            return
+        descendants = descendant_processes(self.process.pid, snapshot)
         for item in descendants:
             pid = int(item.get("pid", 0) or 0)
             if pid <= 0 or pid in self.owned_identities:
@@ -634,7 +806,12 @@ class OwnedProcess:
             fingerprint = command_fingerprint(command)
             role = "client" if fingerprint == "FORGE_CLIENT_USERDEV" else "server" if fingerprint == "FORGE_SERVER_USERDEV" else "worker"
             self.owned_identities[pid] = OwnedProcessIdentity(pid, int(item.get("parent_pid") or 0),
-                                                               normalize_creation_time(item.get("creation_time")), role, fingerprint)
+                                                               normalize_creation_time(item.get("creation_time")), role, fingerprint,
+                                                               str(item.get("executable_path") or "") or None,
+                                                               str(item.get("command_line") or "") or None,
+                                                               self.env.get("PARTIALRELOAD_ACCEPTANCE_RUN_ID"),
+                                                               self.env.get("PARTIALRELOAD_ACCEPTANCE_ATTEMPT_ID"))
+            self.last_valid_observation_times[pid] = observed_at
 
     def cursor(self) -> int:
         return len(self.lines) - 1
@@ -663,68 +840,81 @@ class OwnedProcess:
             f"after_line={after_line}; running={status}; observed={observed}; tail={self.lines[-80:]}; log={self.log_path}")
 
     def stop(self, timeout: float = 40.0) -> "ProcessStopResult":
+        if self.last_stop_result is not None:
+            return self.last_stop_result
         if self.process is None:
             return ProcessStopResult("passed", True, True, True, True, (), ())
         self.refresh_owned_identities()
         graceful = True
         if self.process.poll() is None:
-            try:
-                self.process.wait(timeout=timeout)
-            except subprocess.TimeoutExpired:
+            deadline = time.monotonic() + timeout
+            while self.process.poll() is None and time.monotonic() < deadline:
+                self.refresh_owned_identities()
+                time.sleep(.25)
+            if self.process.poll() is None:
                 graceful = False
-                snapshot = current_process_snapshot()
-                by_pid = {int(p.get("pid", -1)): p for p in snapshot}
-                for pid in sorted(self.owned_identities, key=lambda value: value, reverse=True):
-                    actual = by_pid.get(pid)
-                    expected = self.owned_identities[pid]
-                    if actual is not None and identity_matches(expected, actual):
-                        subprocess.run(["taskkill", "/PID", str(pid), "/F"], stdout=subprocess.DEVNULL,
-                                       stderr=subprocess.DEVNULL, check=False)
-        try:
-            self.process.wait(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            pass
-        snapshot = current_process_snapshot()
-        by_pid = {int(p.get("pid", -1)): p for p in snapshot}
-        residual_after_wrapper = [pid for pid in self.owned_identities if pid in by_pid]
-        if residual_after_wrapper:
-            for pid in sorted(residual_after_wrapper, key=lambda value: value, reverse=True):
+        if not graceful:
+            self.refresh_owned_identities()
+            snapshot = current_process_snapshot()
+            by_pid = {int(p.get("pid", -1)): p for p in snapshot}
+
+            def depth(pid: int) -> int:
+                result, seen = 0, set()
+                current = self.owned_identities.get(pid)
+                while current is not None and current.parent_pid in self.owned_identities and current.parent_pid not in seen:
+                    seen.add(current.parent_pid)
+                    result += 1
+                    current = self.owned_identities.get(current.parent_pid)
+                return result
+
+            for pid in sorted(self.owned_identities, key=depth, reverse=True):
                 actual = by_pid.get(pid)
                 expected = self.owned_identities[pid]
                 if actual is not None and identity_matches(expected, actual):
                     subprocess.run(["taskkill", "/PID", str(pid), "/F"], stdout=subprocess.DEVNULL,
                                    stderr=subprocess.DEVNULL, check=False)
             deadline = time.monotonic() + timeout
-            while time.monotonic() < deadline:
-                snapshot = current_process_snapshot()
-                by_pid = {int(p.get("pid", -1)): p for p in snapshot}
-                if not any(pid in by_pid and identity_matches(self.owned_identities[pid], by_pid[pid])
-                           for pid in self.owned_identities):
+            while self.owned_identities and time.monotonic() < deadline:
+                self.refresh_owned_identities()
+                if not self.owned_identities:
                     break
                 time.sleep(.25)
         if self.thread is not None:
             self.thread.join(timeout=timeout)
+        self.refresh_owned_identities()
         snapshot = current_process_snapshot()
         by_pid = {int(p.get("pid", -1)): p for p in snapshot}
         residual = tuple(pid for pid in self.owned_identities
                          if pid in by_pid and identity_matches(self.owned_identities[pid], by_pid[pid]))
-        potential_mismatches = [pid for pid in self.owned_identities
-                                if pid in by_pid and not identity_matches(self.owned_identities[pid], by_pid[pid])]
-        if potential_mismatches:
-            deadline = time.monotonic() + 5
-            while time.monotonic() < deadline:
-                time.sleep(.25)
-                snapshot = current_process_snapshot()
-                by_pid = {int(p.get("pid", -1)): p for p in snapshot}
-                potential_mismatches = [pid for pid in potential_mismatches
-                                        if pid in by_pid and not identity_matches(self.owned_identities[pid], by_pid[pid])]
-                if not potential_mismatches:
-                    break
-        mismatches = tuple(potential_mismatches)
         reader_stopped = self.thread is None or not self.thread.is_alive()
-        result = ProcessStopResult("passed" if self.process.poll() is not None and not residual and reader_stopped else "failed",
-                                   graceful, self.process.poll() is not None, not residual, reader_stopped, residual, mismatches)
-        return result
+        mismatches = {pid for pid in self.owned_identities
+                      if pid in by_pid and not identity_matches(self.owned_identities[pid], by_pid[pid])}
+        current_descendants = {int(item.get("pid", -1)) for item in descendant_processes(self.process.pid, snapshot)} \
+            if self.process.pid in by_pid else set()
+        events: list[dict[str, object]] = []
+        reused_pids = {exited.identity.pid for exited in self.historical_owned_identities
+                       if exited.identity.pid in by_pid}
+        reused_with_owned_tcp = owned_tcp_pids(reused_pids, self.owned_ports)
+        for exited in self.historical_owned_identities:
+            actual = by_pid.get(exited.identity.pid)
+            if actual is None or identity_matches(exited.identity, actual):
+                continue
+            safe, _, event = classify_pid_reuse_after_exit(
+                exited, actual,
+                owned_descendant=exited.identity.pid in current_descendants,
+                owned_tcp=exited.identity.pid in reused_with_owned_tcp,
+                reader_thread_alive=not reader_stopped)
+            if safe and event is not None:
+                events.append(event)
+            else:
+                mismatches.add(exited.identity.pid)
+        self.pid_reuse_events = events
+        mismatch_tuple = tuple(sorted(mismatches))
+        wrapper_exited = self.process.poll() is not None
+        status = "passed" if wrapper_exited and not residual and not mismatch_tuple and reader_stopped else "failed"
+        self.last_stop_result = ProcessStopResult(status, graceful, wrapper_exited, not residual,
+                                                  reader_stopped, residual, mismatch_tuple, tuple(events))
+        return self.last_stop_result
 
     def entries(self) -> list[dict[str, object]]:
         return all_marker_entries(self.lines)
@@ -920,7 +1110,8 @@ def descendant_processes(root_pid: int, processes: list[dict[str, object]]) -> l
         if pid > 0 and parent > 0:
             by_parent.setdefault(parent, []).append({"pid": pid, "parent_pid": parent,
                                                        "command_line": item.get("command_line"),
-                                                       "creation_time": item.get("creation_time")})
+                                                       "creation_time": item.get("creation_time"),
+                                                       "executable_path": item.get("executable_path")})
     result: list[dict[str, object]] = []
     pending, seen = [root_pid], {root_pid}
     while pending:
@@ -939,7 +1130,7 @@ def process_tree(root_pid: int | None) -> list[dict[str, object]]:
     if root_pid is None or root_pid <= 0:
         return []
     script = ("Get-CimInstance Win32_Process | "
-              "Select-Object ProcessId,ParentProcessId,CommandLine,CreationDate | "
+              "Select-Object ProcessId,ParentProcessId,ExecutablePath,CommandLine,CreationDate | "
               "ConvertTo-Json -Compress")
     try:
         raw = subprocess.check_output(["powershell", "-NoProfile", "-Command", script], text=True,
@@ -947,6 +1138,7 @@ def process_tree(root_pid: int | None) -> list[dict[str, object]]:
         values = json.loads(raw) if raw.strip() else []
         values = values if isinstance(values, list) else [values]
         normalized = [{"pid": value.get("ProcessId"), "parent_pid": value.get("ParentProcessId"),
+                       "executable_path": value.get("ExecutablePath"),
                        "command_line": value.get("CommandLine"), "creation_time": value.get("CreationDate")}
                       for value in values if isinstance(value, dict)]
         return descendant_processes(int(root_pid), normalized)
@@ -955,7 +1147,7 @@ def process_tree(root_pid: int | None) -> list[dict[str, object]]:
 
 
 def current_process_snapshot() -> list[dict[str, object]]:
-    script = ("Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,CommandLine,CreationDate | "
+    script = ("Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,ExecutablePath,CommandLine,CreationDate | "
               "ConvertTo-Json -Compress")
     try:
         raw = subprocess.check_output(["powershell", "-NoProfile", "-Command", script], text=True,
@@ -963,6 +1155,7 @@ def current_process_snapshot() -> list[dict[str, object]]:
         values = json.loads(raw) if raw.strip() else []
         values = values if isinstance(values, list) else [values]
         return [{"pid": value.get("ProcessId"), "parent_pid": value.get("ParentProcessId"),
+                 "executable_path": value.get("ExecutablePath"),
                  "command_line": value.get("CommandLine"), "creation_time": normalize_creation_time(value.get("CreationDate"))}
                 for value in values if isinstance(value, dict)]
     except Exception:
@@ -1153,12 +1346,24 @@ class Acceptance:
 
     def _write_ownership_manifest(self, state: str) -> None:
         processes = []
+        historical = []
+        reuse_events = []
         for process in [self.server, *self.clients]:
             if process is not None:
                 processes.extend(process.owned_identities.values())
+                historical.extend(process.historical_owned_identities)
+                reuse_events.extend(process.pid_reuse_events)
         payload = {"run_id": self.run_id,
                    "harness": {"pid": os.getpid(), "creation_time": process_creation_time(os.getpid())},
-                   "processes": [identity.__dict__ for identity in processes], "state": state}
+                   "processes": [identity_manifest_payload(identity) for identity in processes],
+                   "active_owned_identities": [identity_manifest_payload(identity) for identity in processes],
+                   "historical_owned_identities": [
+                       {"identity": identity_manifest_payload(exited.identity),
+                        "last_valid_observation_time": exited.last_valid_observation_time,
+                        "confirmed_exit_time": exited.confirmed_exit_time}
+                       for exited in historical],
+                   "pid_reuse_events": reuse_events,
+                   "state": state}
         OWNERSHIP_ROOT.mkdir(parents=True, exist_ok=True)
         temporary = self.ownership_manifest.with_suffix(".json.tmp")
         temporary.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -1166,17 +1371,30 @@ class Acceptance:
 
     def release_lock(self) -> None:
         if self.lock_acquired:
+            release_errors: list[str] = []
             try:
-                ACCEPTANCE_LOCK.unlink(missing_ok=True)
+                try:
+                    ACCEPTANCE_LOCK.unlink(missing_ok=True)
+                except OSError as exc:
+                    release_errors.append(f"acceptance lock release failed: {exc}")
             finally:
                 self.lock_acquired = False
-                if self.ownership_manifest.exists():
+                if (self.ownership_manifest.exists()
+                        and getattr(self, "cleanup_result", {}).get("status") == "passed"):
                     try:
                         self.ownership_manifest.unlink()
-                    except OSError:
-                        pass
+                    except OSError as exc:
+                        release_errors.append(f"ownership manifest release failed: {exc}")
                 if hasattr(self, "cleanup_result"):
                     self.cleanup_result["lock_released"] = not ACCEPTANCE_LOCK.exists()
+                    if release_errors or self.ownership_manifest.exists():
+                        self.cleanup_result["status"] = "failed"
+                        self.cleanup_result.setdefault("errors", []).extend(release_errors)
+                        if self.ownership_manifest.exists():
+                            self.cleanup_result["errors"].append("ownership manifest remains")
+                        reused = [int(event["pid"]) for event in self.cleanup_result.get("pid_reuse_events", [])]
+                        self.cleanup_result["identity_mismatches"] = sorted(set(
+                            self.cleanup_result.get("identity_mismatches", [])) | set(reused))
 
     def env(self) -> dict[str, str]:
         result = os.environ.copy()
@@ -1303,6 +1521,7 @@ class Acceptance:
         server_env["PARTIALRELOAD_ACCEPTANCE_RUN_DIR"] = str(self.run_root / self.server_directory_name)
         self.server = OwnedProcess("server", command, server_env, ROOT,
                                    self.run_log_root / "server.stdout.log")
+        self.server.owned_ports = (self.server_port, self.rcon_port)
         self.server.start()
         self._write_ownership_manifest("running")
         if self.server_mod_mode == "with_mod":
@@ -1373,6 +1592,7 @@ class Acceptance:
         task = "runClient"
         process = OwnedProcess(name, [str(ROOT / "gradlew.bat"), "--no-daemon", "--console=plain", task],
                                environment, ROOT, self.run_log_root / f"{name}-control.stdout.log")
+        process.owned_ports = (self.server_port,)
         process.start()
         self.clients.append(process)
         self._write_ownership_manifest("running")
@@ -1456,6 +1676,7 @@ class Acceptance:
             "descendants_exited": stop_result.descendants_exited,
             "residual_owned_pids": list(stop_result.residual_owned_pids),
             "identity_mismatches": list(stop_result.identity_mismatches),
+            "pid_reuse_events": list(stop_result.pid_reuse_events),
         }
         return {"status": "passed" if physical_status else "failed",
                 "physical_cleanup": physical_cleanup,
@@ -1471,6 +1692,7 @@ class Acceptance:
                 "descendants_exited": stop_result.descendants_exited,
                 "residual_owned_pids": list(stop_result.residual_owned_pids),
                 "identity_mismatches": list(stop_result.identity_mismatches),
+                "pid_reuse_events": list(stop_result.pid_reuse_events),
                 "stop_result": stop_result.__dict__}
 
     def wait_player_present(self, username: str, timeout: float = 20.0) -> bool:
@@ -2034,9 +2256,14 @@ class Acceptance:
 
     def cleanup(self) -> None:
         errors = []
+        stop_results: list[ProcessStopResult] = []
+        try:
+            self._write_ownership_manifest("cleaning")
+        except Exception as exc:
+            errors.append(f"ownership manifest cleaning update failed: {exc}")
         for client in reversed(self.clients):
             try:
-                client.stop()
+                stop_results.append(client.stop())
             except Exception as exc:
                 errors.append(str(exc))
         if self.rcon is not None:
@@ -2047,7 +2274,7 @@ class Acceptance:
             self.rcon.close()
         if self.server is not None:
             try:
-                self.server.stop()
+                stop_results.append(self.server.stop())
             except Exception as exc:
                 errors.append(str(exc))
         try:
@@ -2064,21 +2291,34 @@ class Acceptance:
         except Exception as exc:
             errors.append(str(exc))
         owned_processes = [item for item in [self.server, *self.clients] if item is not None]
-        owned_absent = all(item.process is None or item.process.poll() is not None
-                           for item in owned_processes)
+        residual = sorted({pid for result in stop_results for pid in result.residual_owned_pids})
+        mismatches = sorted({pid for result in stop_results for pid in result.identity_mismatches})
+        reuse_events = [event for result in stop_results for event in result.pid_reuse_events]
+        active_readers = [item.name for item in owned_processes if item and item.thread and item.thread.is_alive()]
+        owned_absent = all(result.wrapper_exited and result.descendants_exited for result in stop_results) \
+            and not residual and not mismatches
         run_removed = not self.run_root.exists()
-        self.cleanup_result = {"status": "passed" if not errors and owned_absent and run_removed else "failed",
+        rcon_released = not port_open(self.rcon_port)
+        server_released = not port_open(self.server_port)
+        cleanup_passed = not errors and owned_absent and run_removed and not active_readers \
+            and rcon_released and server_released
+        self.cleanup_result = {"status": "passed" if cleanup_passed else "failed",
                                "owned_processes_absent": owned_absent,
-                               "residual_owned_processes": [],
-                               "identity_mismatches": [],
-                               "active_reader_threads": [item.name for item in owned_processes
-                                                          if item and item.thread and item.thread.is_alive()],
+                               "residual_owned_processes": residual,
+                               "identity_mismatches": mismatches,
+                               "pid_reuse_events": reuse_events,
+                               "active_reader_threads": active_readers,
                                "active_owned_tcp_connections": [],
-                               "rcon_port_released": not port_open(self.rcon_port),
-                               "server_port_released": not port_open(self.server_port),
+                               "rcon_port_released": rcon_released,
+                               "server_port_released": server_released,
                                "run_root_removed": run_removed,
                                "lock_released": not ACCEPTANCE_LOCK.exists(),
                                "errors": errors}
+        try:
+            self._write_ownership_manifest("cleaned" if cleanup_passed else "cleanup_failed")
+        except Exception as exc:
+            self.cleanup_result["status"] = "failed"
+            self.cleanup_result["errors"].append(f"ownership manifest final update failed: {exc}")
 
     def full_composite(self) -> dict[str, object]:
         def execute_subrun(mode: str, scenarios: set[str]) -> dict[str, object]:

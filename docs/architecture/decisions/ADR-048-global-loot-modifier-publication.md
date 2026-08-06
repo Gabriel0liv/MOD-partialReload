@@ -1,6 +1,6 @@
 # ADR-048 — publicação de Global Loot Modifiers
 
-Status: aceita para implementação; promoção da Fase 4H pendente
+Status: aceita e promovida
 
 ## Contexto confirmado
 
@@ -42,6 +42,9 @@ GLM antes de loot.
 
 O runtime confirmou preservação das identidades dos dois managers, ordem
 funcional dos modifiers, commit/rollback isolado e rollback conjunto após fault
-entre loot e GLM. Foram aprovados 84/84 GameTests e as duas acceptances
-dedicadas. A repetição final do runner foi interrompida por identity mismatch
-na cleanup da acceptance 4G; por isso a decisão ainda não promove o provider.
+entre loot e GLM. Foram aprovados 84/84 GameTests, as acceptances GLM e conjunta
+e a repetição isolada da acceptance 4G. O runner final aprovou 11 suítes com
+`ALL_ACCEPTANCE_PASSED`; o clean build passou com 79 testes Java. A reutilização
+de PID no Windows só deixa de ser mismatch quando o harness comprova exit
+anterior, criação posterior e ausência de ownership, TCP, threads e artefatos
+residuais. Com esses gates, o provider foi promovido para `COMMIT_SUPPORTED`.

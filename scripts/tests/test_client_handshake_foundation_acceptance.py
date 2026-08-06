@@ -197,6 +197,56 @@ class HandshakeAcceptanceReportTest(unittest.TestCase):
     def test_identity_missing_creation_time_rejected(self):
         expected = MODULE.OwnedProcessIdentity(1, None, None, "x", "UNKNOWN_OWNED_DESCENDANT")
         self.assertFalse(MODULE.identity_matches(expected, {"pid": 1, "creation_time": None, "command_line": "x"}))
+    def exited_identity(self, creation="2026-08-06T10:00:00+00:00", exit_time="2026-08-06T10:00:01+00:00"):
+        identity = MODULE.OwnedProcessIdentity(
+            29860, 100, creation, "client", "FORGE_CLIENT_USERDEV",
+            "C:/jdk/bin/java.exe", "forgeclientuserdev", "run-owned", "attempt-owned")
+        return MODULE.ExitedOwnedProcessIdentity(
+            identity, "2026-08-06T10:00:00.900000+00:00", exit_time)
+    def reused_process(self, creation="2026-08-06T10:00:02+00:00", command="unrelated.exe"):
+        return {"pid": 29860, "parent_pid": 900, "creation_time": creation,
+                "executable_path": "C:/Windows/unrelated.exe", "command_line": command}
+    def test_pid_reuse_after_confirmed_exit_is_diagnostic(self):
+        safe, reason, event = MODULE.classify_pid_reuse_after_exit(
+            self.exited_identity(), self.reused_process())
+        self.assertTrue(safe)
+        self.assertEqual(reason, "PID_REUSED_AFTER_OWNED_PROCESS_EXIT")
+        self.assertEqual(event["classification"], "PID_REUSED_AFTER_OWNED_PROCESS_EXIT")
+    def test_identity_change_while_expected_alive_is_not_reuse(self):
+        expected = self.exited_identity().identity
+        self.assertFalse(MODULE.identity_matches(expected, self.reused_process()))
+        process = MODULE.OwnedProcess("client", [], {}, pathlib.Path("."), pathlib.Path("test.log"))
+        process.owned_identities[expected.pid] = expected
+        process.process = type("P", (), {"pid": expected.pid, "poll": lambda self: 0})()
+        old_snapshot = MODULE.current_process_snapshot
+        MODULE.current_process_snapshot = lambda: [self.reused_process()]
+        try:
+            result = process.stop(timeout=.01)
+        finally:
+            MODULE.current_process_snapshot = old_snapshot
+        self.assertEqual(result.status, "failed")
+        self.assertEqual(result.identity_mismatches, (expected.pid,))
+        self.assertEqual(result.pid_reuse_events, ())
+    def test_pid_reuse_temporal_overlap_fails_closed(self):
+        safe, reason, _ = MODULE.classify_pid_reuse_after_exit(
+            self.exited_identity(), self.reused_process("2026-08-06T10:00:01+00:00"))
+        self.assertFalse(safe)
+        self.assertEqual(reason, "PID_REUSE_TEMPORAL_OVERLAP")
+    def test_pid_reuse_without_creation_time_fails_closed(self):
+        safe, reason, _ = MODULE.classify_pid_reuse_after_exit(
+            self.exited_identity(), self.reused_process(None))
+        self.assertFalse(safe)
+        self.assertEqual(reason, "PID_REUSE_TEMPORAL_EVIDENCE_MISSING")
+    def test_pid_reuse_owned_descendant_fails_closed(self):
+        safe, reason, _ = MODULE.classify_pid_reuse_after_exit(
+            self.exited_identity(), self.reused_process(), owned_descendant=True)
+        self.assertFalse(safe)
+        self.assertEqual(reason, "PID_REUSE_IS_OWNED_DESCENDANT")
+    def test_pid_reuse_with_owned_tcp_fails_closed(self):
+        safe, reason, _ = MODULE.classify_pid_reuse_after_exit(
+            self.exited_identity(), self.reused_process(), owned_tcp=True)
+        self.assertFalse(safe)
+        self.assertEqual(reason, "PID_REUSE_HAS_OWNED_TCP")
     def test_fingerprint_is_canonical(self):
         evidence = MODULE.AttemptEvidence(True, True, False, False, False, False, False, False, None, None)
         self.assertEqual(MODULE.infrastructure_fingerprint(evidence, {}), MODULE.infrastructure_fingerprint(evidence, {}))

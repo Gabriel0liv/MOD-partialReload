@@ -41,8 +41,8 @@ anterior é retida em memória para rollback único.
 A fase 3B fornece a preparação conjunta de predicates, item modifiers e loot
 tables. A Fase 4G publica esse bundle completo transacionalmente no
 `LootDataManager` ativo, preserva sua identidade e permite jogadores
-conectados. A implementação 4H para GLM e transação conjunta permanece pendente
-do gate final e o provider não pode ser promovido além de `PREPARE_SUPPORTED`.
+conectados. A Fase 4H publica GLMs ordenados e exige transação conjunta quando
+loot data também mudou; o provider GLM é `COMMIT_SUPPORTED`.
 
 A Fase 4F-A foi promovida: a fundação opcional de protocolo e handshake está aceita por evidência funcional. Clientes sem canal compatível entram normalmente, clientes com mod entram em servidor Forge sem Partial Reload, reconnects e SILENT foram validados. A Fase 4F-R acrescenta o opt-in `SERVER_COMMIT_DEFERRED_CLIENT_REFRESH`: o servidor publica tags + recipes imediatamente com jogadores conectados, fecha todos os menus antes da primeira mutação e marca aquelas sessões stale até relog. O comando normal continua `SERVER_ONLY_NO_PLAYERS`. As fases 4F-B/C/D permanecem fora do escopo: nenhum payload, recipe-book live refresh, ACK transacional, quiescência ou rollback compensatório é permitido.
 
@@ -113,8 +113,9 @@ total), acceptance dedicada e runner consolidado aprovados. Predicates, item
 modifiers e loot tables são publicados sempre juntos; jogadores conectados são
 permitidos, GLMs ficam intactos e apenas uma geração anterior é retida.
 
-Atualização 2026-08-04: a candidata da Fase 4H passou 24 novos GameTests
-(84/84), as acceptances GLM e loot+GLM e uma execução consolidada. A repetição
-final parou fail-closed em identity mismatch durante cleanup da acceptance 4G;
-portanto a promoção 4H permanece pendente. Não há client sync nem alteração
-retroativa de loot já gerado.
+Atualização 2026-08-06: a Fase 4H foi promovida após 79 testes Java, 161 testes
+Python, 84/84 GameTests, acceptances GLM, loot+GLM e 4G e runner consolidado com
+11 suítes (`ALL_ACCEPTANCE_PASSED`). O harness preserva identidades históricas:
+PID reutilizado depois de exit temporalmente comprovado é diagnóstico, nunca
+ownership residual; evidência ambígua continua fail-closed. Não há client sync,
+alteração retroativa de loot já gerado nem compatibilidade Arclight declarada.
