@@ -2,10 +2,14 @@ package com.gabriel0liv.partialreload.advancement;
 
 import com.google.common.collect.ImmutableMultimap;
 import com.gabriel0liv.partialreload.loot.ActiveLootDataGeneration;
+import com.gabriel0liv.partialreload.api.ProviderCompatibility;
+import com.gabriel0liv.partialreload.api.ReloadEnvironment;
+import com.gabriel0liv.partialreload.resource.ResourceScanner;
 import net.minecraft.advancements.*;
 import net.minecraft.resources.ResourceLocation;
 import org.junit.jupiter.api.*;
 import java.time.Instant;
+import java.time.Clock;
 import java.util.*;
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -22,6 +26,7 @@ class AdvancementTransactionModelTest {
     @Test void allTransactionStatesExist(){assertArrayEquals(new AdvancementTransactionStatus[]{AdvancementTransactionStatus.PREPARING,AdvancementTransactionStatus.READY,AdvancementTransactionStatus.QUIESCING,AdvancementTransactionStatus.COMMITTING,AdvancementTransactionStatus.REBINDING_PLAYERS,AdvancementTransactionStatus.SYNCING_CLIENTS,AdvancementTransactionStatus.VERIFYING,AdvancementTransactionStatus.SUCCESS,AdvancementTransactionStatus.ROLLING_BACK,AdvancementTransactionStatus.ROLLED_BACK,AdvancementTransactionStatus.FAILED,AdvancementTransactionStatus.DEGRADED},AdvancementTransactionStatus.values());}
     @Test void allFaultPointsExist(){assertEquals(8,AdvancementFaultPoint.values().length);}
     @Test void faultIsOneShot(){AdvancementFaultInjection.arm(AdvancementFaultPoint.AFTER_MANAGER_PUBLICATION);assertThrows(IllegalStateException.class,()->AdvancementFaultInjection.hit(AdvancementFaultPoint.AFTER_MANAGER_PUBLICATION));assertDoesNotThrow(()->AdvancementFaultInjection.hit(AdvancementFaultPoint.AFTER_MANAGER_PUBLICATION));}
+    @Test void providerIsPromotedAfterFinalAcceptance(){var provider=new VanillaAdvancementProvider(new ResourceScanner(Clock.systemUTC()));assertEquals(ProviderCompatibility.COMMIT_SUPPORTED,provider.compatibility(new ReloadEnvironment(true,Set.of())));}
     @Test void transactionTracksPlayersAndSync(){var tx=transaction();UUID player=UUID.randomUUID();tx.playerRebound(player);tx.clientSynced();assertEquals(Set.of(player),tx.playersRebound());assertEquals(1,tx.clientsSynced());}
     @Test void transactionPreservesFailureAndRollback(){var tx=transaction();tx.failure("boom");tx.rollbackPerformed(true);tx.status(AdvancementTransactionStatus.ROLLED_BACK);assertEquals("boom",tx.failure());assertTrue(tx.rollbackPerformed());assertEquals(AdvancementTransactionStatus.ROLLED_BACK,tx.status());}
     @Test void snapshotDefensivelyCopiesFileBytes(){byte[] bytes={1,2};var s=new PlayerAdvancementStateSnapshot(UUID.randomUUID(),"p",1,java.nio.file.Path.of("x"),true,bytes,Map.of(),Set.of(),Set.of(),Set.of(),Set.of(),null,false,true);bytes[0]=9;assertEquals(1,s.fileBytes()[0]);byte[] returned=s.fileBytes();returned[0]=8;assertEquals(1,s.fileBytes()[0]);}

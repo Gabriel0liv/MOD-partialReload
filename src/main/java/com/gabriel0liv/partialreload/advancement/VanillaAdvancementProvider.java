@@ -27,7 +27,7 @@ public final class VanillaAdvancementProvider implements ReloadProvider {
     public VanillaAdvancementProvider(ResourceScanner scanner){this.scanner=scanner;}
     @Override public ResourceLocation id(){return ID;}
     @Override public Set<ReloadCategory> categories(){return Set.of(ReloadCategory.ADVANCEMENTS);}
-    @Override public ProviderCompatibility compatibility(ReloadEnvironment environment){return ProviderCompatibility.PREPARE_SUPPORTED;}
+    @Override public ProviderCompatibility compatibility(ReloadEnvironment environment){return ProviderCompatibility.COMMIT_SUPPORTED;}
     @Override public ScanResult scan(ScanContext context)throws PartialReloadException{return new ScanResult(scanner.scan(context));}
     @Override public ValidationReport validate(com.gabriel0liv.partialreload.api.ValidationContext context,ChangeSet changes){return ValidationReport.VALID;}
     @Override public ProviderPlan createPlan(PlanningContext context,ChangeSet changes){
@@ -57,7 +57,9 @@ public final class VanillaAdvancementProvider implements ReloadProvider {
                 }
                 if(bytes>context.maxJsonBytes())throw new IllegalStateException("ADVANCEMENT_LIMIT_EXCEEDED: JSON byte limit exceeded");
                 JsonObject json=JsonParser.parseString(new String(Objects.requireNonNull(winnerBytes),StandardCharsets.UTF_8)).getAsJsonObject();
-                Advancement.Builder builder=Advancement.Builder.fromJson(json,new DeserializationContext(id,active.lootData),active.context);
+                Advancement.Builder builder=Advancement.Builder.fromJson(json,
+                        new DeserializationContext(id,active.lootData),
+                        ServerAdvancementManagerBridge.context(active));
                 if(builder!=null){builders.put(id,builder);jsonById.put(id,json);}
                 String winnerPack=packs.isEmpty()?entry.getValue().sourcePackId():packs.get(packs.size()-1);
                 String winnerHash=hashes.isEmpty()?"":hashes.get(hashes.size()-1);

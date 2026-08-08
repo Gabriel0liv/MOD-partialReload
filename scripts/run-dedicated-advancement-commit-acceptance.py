@@ -26,6 +26,20 @@ def require(pattern: str, value: str, message: str) -> str:
     return value
 
 
+def is_transient_client_bootstrap_abort(lines: list[str]) -> bool:
+    """Recognize the observed Forge Early Display abort before product startup."""
+    joined = "\n".join(lines)
+    return (
+        "HANDSHAKE_ACCEPTANCE_CLIENT_READY" not in joined
+        and "HANDSHAKE_ACCEPTANCE_CLIENT_NETWORK_LOGIN" not in joined
+        and "CLIENT_HANDSHAKE_" not in joined
+        and "Unknown custom packet" not in joined
+        and re.search(r"rejected.*partialreload:client_sync", joined, re.I) is None
+        and re.search(r"Failed to initialize graphics window", joined, re.I) is not None
+        and re.search(r"EARLYDISPLAY|glfwInit", joined, re.I) is not None
+    )
+
+
 def advancement_json(generation: str) -> dict[str, dict[str, object]]:
     b = generation == "B"
     root = {
@@ -99,7 +113,27 @@ def connect_client(acceptance, name: str, username: str,
     for launch in range(1, maximum_launches + 1):
         launch_name = name if launch == 1 else f"{name}-retry-{launch}"
         client = acceptance.start_client(launch_name, username, with_mod=False)
-        ready = client.wait_marker("HANDSHAKE_ACCEPTANCE_CLIENT_READY", 420)
+        try:
+            ready = client.wait_marker("HANDSHAKE_ACCEPTANCE_CLIENT_READY", 420)
+        except Exception:
+            retryable = is_transient_client_bootstrap_abort(client.lines)
+            cleanup = acceptance.cleanup_attempt(
+                client, launch_name, username, False, False, expect_exit_request=False
+            )
+            if not retryable or cleanup.get("status") != "passed":
+                raise
+            transient_aborts.append({
+                "client": launch_name,
+                "launch": launch,
+                "classification": "INFRASTRUCTURE_FAILURE",
+                "infrastructure_subtype": "TRANSIENT_CLIENT_EARLY_DISPLAY_ABORT",
+                "cleanup": cleanup,
+            })
+            if launch == maximum_launches:
+                raise AssertionError(
+                    f"{username} exhausted {maximum_launches} launches after transient client bootstrap aborts"
+                )
+            continue
         control = acceptance.run_root / launch_name / "control"
         (control / "connect.request").write_text("connect\n", encoding="utf-8")
         try:

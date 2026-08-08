@@ -13,6 +13,7 @@ assert SPEC.loader is not None
 sys.modules[SPEC.name] = MODULE
 SPEC.loader.exec_module(MODULE)
 import handshake_infrastructure_policy as POLICY
+import dedicated_server_bootstrap_policy as BOOTSTRAP
 
 
 def report(status="passed", complete=True, scenarios=None, cleanup="passed"):
@@ -1098,6 +1099,86 @@ def load_causal_analyzer():
     assert spec.loader is not None
     spec.loader.exec_module(module)
     return module
+
+
+def load_advancement_acceptance():
+    script = pathlib.Path(__file__).resolve().parents[1] / "run-dedicated-advancement-commit-acceptance.py"
+    spec = importlib.util.spec_from_file_location("advancement_acceptance", script)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
+class DedicatedServerBootstrapPolicyTest(unittest.TestCase):
+    def test_process_exit_before_rcon_is_harness_failure(self):
+        value = BOOTSTRAP.classify_startup(
+            ["ModLauncher running", "Launching target 'forgeserveruserdev'"],
+            exited=True, exit_code=1)
+        self.assertEqual(BOOTSTRAP.StartupClassification.HARNESS_FAILURE, value.classification)
+
+    def test_done_without_rcon_timeout_is_harness_failure(self):
+        value = BOOTSTRAP.classify_startup(["Done (7.0s)! For help"], timed_out=True)
+        self.assertEqual(BOOTSTRAP.StartupClassification.HARNESS_FAILURE, value.classification)
+        self.assertIn(BOOTSTRAP.StartupState.SERVER_DONE_OBSERVED, value.states)
+
+    def test_rcon_authenticated_passes(self):
+        value = BOOTSTRAP.classify_startup(
+            ["Done (7.0s)! For help", "RCON running on 0.0.0.0:12345"], authenticated=True)
+        self.assertEqual(BOOTSTRAP.StartupClassification.PASSED, value.classification)
+        self.assertIn(BOOTSTRAP.StartupState.RCON_AUTHENTICATED, value.states)
+
+    def test_bind_race_is_retryable_infrastructure(self):
+        value = BOOTSTRAP.classify_startup([
+            "Done (7.0s)! For help", "Unable to initialise RCON on 0.0.0.0:54560",
+            "java.net.BindException: Address already in use: bind"])
+        self.assertEqual(BOOTSTRAP.StartupClassification.INFRA_TRANSIENT, value.classification)
+        self.assertTrue(BOOTSTRAP.retry_allowed(value.classification, True, 1, 3))
+
+    def test_product_failure_is_not_retried(self):
+        value = BOOTSTRAP.classify_startup([
+            "com.gabriel0liv.partialreload.BridgeException: TAG_REGISTRY_COMMIT_UNSUPPORTED"])
+        self.assertEqual(BOOTSTRAP.StartupClassification.PRODUCT_FAILURE, value.classification)
+        self.assertFalse(BOOTSTRAP.retry_allowed(value.classification, True, 1, 3))
+
+    def test_harness_failure_is_not_retried(self):
+        self.assertFalse(BOOTSTRAP.retry_allowed(
+            BOOTSTRAP.StartupClassification.HARNESS_FAILURE, True, 1, 3))
+
+    def test_incomplete_cleanup_prevents_retry(self):
+        self.assertFalse(BOOTSTRAP.retry_allowed(
+            BOOTSTRAP.StartupClassification.INFRA_TRANSIENT, False, 1, 3))
+
+    def test_retry_quota_is_three_total_attempts(self):
+        self.assertTrue(BOOTSTRAP.retry_allowed(
+            BOOTSTRAP.StartupClassification.INFRA_TRANSIENT, True, 2, 3))
+        self.assertFalse(BOOTSTRAP.retry_allowed(
+            BOOTSTRAP.StartupClassification.INFRA_TRANSIENT, True, 3, 3))
+
+
+class AdvancementClientBootstrapPolicyTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.acceptance = load_advancement_acceptance()
+
+    def test_early_display_abort_before_ready_is_transient(self):
+        self.assertTrue(self.acceptance.is_transient_client_bootstrap_abort([
+            "[main/ERROR] [EARLYDISPLAY/] ERROR DISPLAY",
+            "Failed to initialize graphics window with current settings.",
+            "glfwInit took 2.6 seconds to start.",
+        ]))
+
+    def test_product_marker_prevents_bootstrap_retry(self):
+        self.assertFalse(self.acceptance.is_transient_client_bootstrap_abort([
+            "[main/ERROR] [EARLYDISPLAY/] Failed to initialize graphics window",
+            "CLIENT_HANDSHAKE_CLIENT_INVALID error=bad",
+        ]))
+
+    def test_ready_marker_prevents_bootstrap_retry(self):
+        self.assertFalse(self.acceptance.is_transient_client_bootstrap_abort([
+            "[main/ERROR] [EARLYDISPLAY/] Failed to initialize graphics window",
+            "HANDSHAKE_ACCEPTANCE_CLIENT_READY",
+        ]))
 
 
 if __name__ == "__main__":

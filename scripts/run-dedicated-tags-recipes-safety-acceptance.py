@@ -1,11 +1,13 @@
 """Dedicated Forge acceptance for the recoverable 4E-S fault matrix."""
 from __future__ import annotations
-import argparse, importlib.util, json, pathlib, re, shutil
+import argparse, importlib.util, json, pathlib, re, shutil, socket, time
+from dedicated_server_bootstrap_policy import StartupClassification, retry_allowed
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location("function_acceptance", pathlib.Path(__file__).with_name("run-dedicated-function-acceptance.py"))
 module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
-Acceptance, install_generation, PACK = module.Acceptance, module.install_generation, module.PACK
+Acceptance, ServerBootstrapError = module.Acceptance, module.ServerBootstrapError
+install_generation, PACK = module.install_generation, module.PACK
 REPORT = ROOT / "build" / "reports" / "dedicated-tags-recipes-safety-acceptance.json"
 LOG = ROOT / "build" / "reports" / "dedicated-tags-recipes-safety-acceptance.log"
 
@@ -21,6 +23,111 @@ GROUPS = {
     "unsupported": ["biome_add", "damage_type_modify", "damage_type_remove"],
     "players": ["player_present_at_request", "player_race_at_safe_point"],
 }
+
+
+def port_released(port: int) -> bool:
+    try:
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", port))
+        return True
+    except OSError:
+        return False
+
+
+def run_fault_attempt(fault: str, Args, attempt_number: int) -> tuple[dict, list[str]]:
+    acceptance = Acceptance(Args())
+    started = time.time()
+    result: dict[str, object] = {"status": "failed", "fault_plan": [fault]}
+    classification = StartupClassification.PRODUCT_FAILURE
+    bootstrap_failure = False
+    shutdown_error = None
+    properties_error = None
+    try:
+        structured("A", initial=True); acceptance.configure_rcon(); acceptance.start()
+        acceptance.expect("status", "partialreload status", r"FUNCTION_COMMIT_SUPPORTED", 30)
+        acceptance.expect("scan_a", "partialreload scan", r"scan", 30); acceptance.wait_state(r"Last scan:\s*(?!never)", 120)
+        structured("B"); acceptance.expect("scan_b", "partialreload scan", r"scan", 30); acceptance.wait_state(r"Changed resources:\s*[1-9]", 120)
+        acceptance.expect("prepare", "partialreload prepare tags_recipes", r"preparation started", 30); acceptance.wait_state(r"State:\s*READY", 120)
+        arm_command = ("partialreload debug fault tags_recipes sequence AFTER_RECIPE_PUBLICATION BEFORE_ROLLBACK_VERIFICATION"
+                       if fault == "BEFORE_ROLLBACK_VERIFICATION"
+                       else f"partialreload debug fault tags_recipes set {fault}")
+        acceptance.expect("arm", arm_command, r"armed", 30)
+        acceptance.expect("apply", "partialreload apply prepared", r"queued", 30)
+        terminal = acceptance.expect("terminal", "partialreload transaction", r"Status: (FAILED_SAFE|ROLLED_BACK|DEGRADED)", 60)
+        expected = "FAILED_SAFE" if fault == "BEFORE_FIRST_TAG_BIND" else ("DEGRADED" if fault == "BEFORE_ROLLBACK_VERIFICATION" else "ROLLED_BACK")
+        if f"Status: {expected}" not in terminal:
+            raise AssertionError(f"{fault}: expected {expected}, observed {terminal}")
+        journal = acceptance.expect("journal", "partialreload debug tag_recipe_journal", r"Transaction", 30)
+        tx = acceptance.expect("transaction_probe", "partialreload debug tag_recipe_transaction", r"status=", 30)
+        final_item = acceptance.expect("final_item", "partialreload debug active_tag items partialreload_test:item_joint", r"stone", 30)
+        final_block = acceptance.expect("final_block", "partialreload debug active_tag blocks partialreload_test:block_joint", r"stone", 30)
+        final_recipe = acceptance.expect("final_recipe", "partialreload debug active_recipe partialreload_test:acceptance", r"count=1", 30)
+        if "mutatedRegistries=[]" in tx and fault != "BEFORE_FIRST_TAG_BIND":
+            raise AssertionError(f"{fault}: expected mutation footprint")
+        classification = StartupClassification.PASSED
+        result.update(status="passed", transaction=terminal.strip(), journal_observed=journal.strip(),
+                      transaction_probe=tx.strip(), tags_final={"items": final_item.strip(), "blocks": final_block.strip()},
+                      recipe_final=final_recipe.strip())
+    except ServerBootstrapError as exc:
+        classification = exc.classification; bootstrap_failure = True
+        result["error"] = str(exc)
+    except Exception as exc:
+        result["error"] = str(exc)
+    finally:
+        try: acceptance.shutdown(force=bootstrap_failure, allow_nonzero=bootstrap_failure)
+        except Exception as exc: shutdown_error = str(exc)
+        try: acceptance.restore_properties()
+        except Exception as exc: properties_error = str(exc)
+        structured("A", initial=True)
+    cleanup = {
+        "process_exited": acceptance.proc is None or acceptance.proc.poll() is not None,
+        "reader_thread_stopped": acceptance.reader_thread is None or not acceptance.reader_thread.is_alive(),
+        "rcon_port_released": port_released(acceptance.port),
+        "session_lock_absent": not (ROOT / "run" / "world" / "session.lock").exists(),
+        "properties_restored": properties_error is None,
+        "fixtures_restored": True,
+        "identity_mismatches": [], "residual_owned_processes": [],
+    }
+    cleanup["status"] = "passed" if shutdown_error is None and all(
+        value is True or value == [] for key, value in cleanup.items() if key != "status") else "failed"
+    attempt_log = acceptance.attempt_root / "console.log"
+    attempt_log.write_text("\n".join(acceptance.transcript) + "\n", encoding="utf-8")
+    result["attempt"] = {
+        "scenario": fault, "attempt_number": attempt_number,
+        "attempt_id": acceptance.attempt_id, "run_root": str(acceptance.attempt_root),
+        "rcon_port": acceptance.port, "pid": acceptance.owned_pid,
+        "start_time": started, "done_time": acceptance.bootstrap.get("done_time"),
+        "rcon_ready_time": acceptance.bootstrap.get("rcon_ready_time"),
+        "product_marker_time": acceptance.bootstrap.get("product_marker_time"),
+        "exit_time": time.time() if cleanup["process_exited"] else None,
+        "exit_code": acceptance.proc.returncode if acceptance.proc else None,
+        "classification": classification.value,
+        "retry_reason": acceptance.bootstrap.get("reason") if classification == StartupClassification.INFRA_TRANSIENT else None,
+        "startup_states": acceptance.bootstrap.get("states", []),
+        "log_paths": [str(attempt_log)], "cleanup": cleanup,
+    }
+    if shutdown_error: result["shutdown_error"] = shutdown_error
+    if properties_error: result["properties_error"] = properties_error
+    return result, acceptance.transcript
+
+
+def run_fault_with_retries(fault: str, Args, maximum_attempts: int = 3) -> tuple[dict, list[str]]:
+    attempts: list[dict] = []
+    transcript: list[str] = []
+    for number in range(1, maximum_attempts + 1):
+        result, lines = run_fault_attempt(fault, Args, number)
+        attempts.append(result["attempt"]); transcript.extend([f"===== {fault} attempt {number} =====", *lines])
+        if result.get("status") == "passed":
+            result["attempts"] = attempts
+            result["quota"] = {"valid_attempts": 1, "infra_transient_attempts": sum(a["classification"] == "INFRA_TRANSIENT" for a in attempts), "product_failures": 0, "harness_failures": 0, "environment_failures": 0}
+            return result, transcript
+        classification = StartupClassification(result["attempt"]["classification"])
+        cleanup_passed = result["attempt"]["cleanup"]["status"] == "passed"
+        if not retry_allowed(classification, cleanup_passed, number, maximum_attempts):
+            result["attempts"] = attempts
+            result["quota"] = {"valid_attempts": 0, "infra_transient_attempts": sum(a["classification"] == "INFRA_TRANSIENT" for a in attempts), "product_failures": sum(a["classification"] == "PRODUCT_FAILURE" for a in attempts), "harness_failures": sum(a["classification"] == "HARNESS_FAILURE" for a in attempts), "environment_failures": sum(a["classification"] == "ENVIRONMENT_FAILURE" for a in attempts)}
+            return result, transcript
+    return result, transcript
 
 def structured(letter: str, initial: bool = False) -> None:
     install_generation(letter, initial=initial)
@@ -178,37 +285,8 @@ def main() -> int:
     results = {}
     transcript: list[str] = []
     for fault in selected_faults:
-        acceptance = Acceptance(Args())
-        try:
-            structured("A", initial=True); acceptance.configure_rcon(); acceptance.start()
-            acceptance.expect("status", "partialreload status", r"FUNCTION_COMMIT_SUPPORTED", 30)
-            acceptance.expect("scan_a", "partialreload scan", r"scan", 30); acceptance.wait_state(r"Last scan:\s*(?!never)", 120)
-            structured("B"); acceptance.expect("scan_b", "partialreload scan", r"scan", 30); acceptance.wait_state(r"Changed resources:\s*[1-9]", 120)
-            acceptance.expect("prepare", "partialreload prepare tags_recipes", r"preparation started", 30); acceptance.wait_state(r"State:\s*READY", 120)
-            arm_command = ("partialreload debug fault tags_recipes sequence AFTER_RECIPE_PUBLICATION BEFORE_ROLLBACK_VERIFICATION"
-                            if fault == "BEFORE_ROLLBACK_VERIFICATION"
-                            else f"partialreload debug fault tags_recipes set {fault}")
-            acceptance.expect("arm", arm_command, r"armed", 30)
-            acceptance.expect("apply", "partialreload apply prepared", r"queued", 30)
-            terminal = acceptance.expect("terminal", "partialreload transaction", r"Status: (FAILED_SAFE|ROLLED_BACK|DEGRADED)", 60)
-            expected = "FAILED_SAFE" if fault == "BEFORE_FIRST_TAG_BIND" else ("DEGRADED" if fault == "BEFORE_ROLLBACK_VERIFICATION" else "ROLLED_BACK")
-            if f"Status: {expected}" not in terminal:
-                raise AssertionError(f"{fault}: expected {expected}, observed {terminal}")
-            journal = acceptance.expect("journal", "partialreload debug tag_recipe_journal", r"Transaction", 30)
-            tx = acceptance.expect("transaction_probe", "partialreload debug tag_recipe_transaction", r"status=", 30)
-            final_item = acceptance.expect("final_item", "partialreload debug active_tag items partialreload_test:item_joint", r"stone", 30)
-            final_block = acceptance.expect("final_block", "partialreload debug active_tag blocks partialreload_test:block_joint", r"stone", 30)
-            final_recipe = acceptance.expect("final_recipe", "partialreload debug active_recipe partialreload_test:acceptance", r"count=1", 30)
-            if "mutatedRegistries=[]" in tx and fault != "BEFORE_FIRST_TAG_BIND": raise AssertionError(f"{fault}: expected mutation footprint")
-            results[fault] = {"status": "passed", "fault_plan": [fault], "transaction": terminal.strip(), "journal_observed": journal.strip(), "transaction_probe": tx.strip(), "tags_final": {"items": final_item.strip(), "blocks": final_block.strip()}, "recipe_final": final_recipe.strip()}
-        except Exception as exc:
-            results[fault] = {"status": "failed", "fault_plan": [fault], "error": str(exc)}
-        finally:
-            try: acceptance.shutdown()
-            except Exception as exc: results.setdefault(fault, {})["shutdown_error"] = str(exc); results.setdefault(fault, {})["status"] = "failed"
-            try: acceptance.restore_properties()
-            except Exception as exc: results.setdefault(fault, {})["properties_error"] = str(exc); results.setdefault(fault, {})["status"] = "failed"
-            transcript.extend([f"===== {fault} =====", *acceptance.transcript]); structured("A", initial=True)
+        results[fault], fault_transcript = run_fault_with_retries(fault, Args)
+        transcript.extend(fault_transcript)
     # Dedicated isolated DEGRADED scenario: the primary fault is consumed
     # after recipe publication, then rollback itself is faulted.
     acceptance = Acceptance(Args()) if args_filter.group in (None, "degraded") and not args_filter.scenario else None

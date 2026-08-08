@@ -119,3 +119,11 @@ Python, 84/84 GameTests, acceptances GLM, loot+GLM e 4G e runner consolidado com
 PID reutilizado depois de exit temporalmente comprovado é diagnóstico, nunca
 ownership residual; evidência ambígua continua fail-closed. Não há client sync,
 alteração retroativa de loot já gerado nem compatibilidade Arclight declarada.
+
+Atualização 2026-08-08: a Fase 4I foi promovida após 92 testes Java, 172 testes
+Python, 116/116 GameTests (32/32 advancements), acceptance dedicada e runner
+consolidado com 12 suítes. O rebind usa sincronização vanilla, preserva
+progresso/aba e não repete rewards. A regressão histórica 4E-S era colisão de
+porta RCON depois de `Done`; retry é limitado a três tentativas somente para
+infraestrutura pré-produto comprovada e com cleanup integral. Advancements não
+possuem packet customizado, rollback manual ou suporte Arclight declarado.

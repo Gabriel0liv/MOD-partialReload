@@ -2,7 +2,7 @@
 
 ## Estado
 
-Proposta, implementação em validação.
+Aceita e implementada.
 
 ## Contexto confirmado
 
@@ -17,8 +17,10 @@ vanilla.
 
 Usar Access Transformer mínimo para o campo exato do manager e para o estado
 estritamente necessário de `PlayerAdvancements`, encapsulado em bridges
-tipadas. Não usar reflexão, `setAccessible`, Unsafe, Mixin ou troca da instância
-do manager.
+tipadas. Para campos Forge-patched que não são transformados de forma confiável
+no classpath do `javac`, o bridge usa somente reflexão sobre o contrato público
+criado pelo AT (`getField`), com owner e tipo exatos. Não usa `setAccessible`,
+Unsafe, Mixin ou troca da instância do manager.
 
 A preparação usa `Advancement.Builder.fromJson` e o mesmo LootDataManager e
 contexto Forge da instância ativa. O safe point salva cada jogador pelo caminho
@@ -38,3 +40,10 @@ rollback manual é rejeitado porque apagaria progresso legítimo posterior.
 - exatamente os packets vanilla de advancement são usados;
 - mudanças concorrentes nas dependências exigem novo scan/preparo sequencial;
 - a decisão é específica para Minecraft 1.20.1/Forge 47.4.10.
+
+## Evidência final
+
+O gate final aprovou 116/116 GameTests (32/32 da 4I), acceptance dedicada de
+commit e rollback com clientes vanilla, runner consolidado com 12 suítes e
+clean build. O provider foi promovido para `COMMIT_SUPPORTED` somente depois
+dessas evidências.

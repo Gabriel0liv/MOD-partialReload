@@ -116,6 +116,16 @@ read-only conhecida enquanto nenhum commit existe. Sem baseline anterior, a
 captura corrente é tratada como referência ativa e o delta inicial é zero; ela
 não é promovida por uma preparação.
 
+## Commit transacional de advancements
+
+`PreparedAdvancements` contém a lista e árvore completas e um snapshot exato
+das dependências. No safe point, o mesmo `ServerAdvancementManager` recebe a
+geração candidata; cada `PlayerAdvancements` conectado é salvo, revinculado e
+sincronizado por packets vanilla. Progresso/aba compatíveis são preservados e
+rewards concluídas não são repetidas. Falha restaura manager, arquivos e estado
+dos jogadores ou entra em `DEGRADED`. O provider está `COMMIT_SUPPORTED` após
+116/116 GameTests e runner de 12 suítes.
+
 ## Commit transacional de functions
 
 `apply prepared` valida a compatibilidade, cria uma transação e entra em

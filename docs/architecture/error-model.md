@@ -82,6 +82,24 @@ ao run, TCP, reader threads, locks e manifests residuais permitem classificar
 `PID_REUSED_AFTER_OWNED_PROCESS_EXIT`. Esse evento fica em `pid_reuse_events` e
 não é processo residual.
 
+Bootstrap dedicado registra `PROCESS_STARTED`, `FORGE_BOOTSTRAP_OBSERVED`,
+`SERVER_DONE_OBSERVED`, `RCON_LISTENING`, `RCON_AUTHENTICATED`,
+`PRODUCT_MARKER_OBSERVED`, `PROCESS_EXITED` e `TIMEOUT`. Colisão comprovada de
+porta RCON antes do produto é `INFRA_TRANSIENT` e pode repetir até três
+tentativas, sempre com nova identidade/porta e cleanup aprovado. Erro de
+produto, harness, ambiente persistente ou cleanup incompleto nunca é repetido.
+
+## Códigos de advancements
+
+`ADVANCEMENT_COMMIT_ARTIFACT_INVALID`, `ADVANCEMENT_COMMIT_SNAPSHOT_STALE`,
+`ADVANCEMENT_COMMIT_MANAGER_CHANGED`, `ADVANCEMENT_MANAGER_LAYOUT_UNSUPPORTED`,
+`ADVANCEMENT_PREPARATION_DEPENDENCIES_CHANGED`,
+`ADVANCEMENT_AUTOMATIC_REWARD_NOT_TRANSACTION_SAFE`,
+`ADVANCEMENT_COMMIT_VERIFICATION_FAILED`,
+`ADVANCEMENT_COMMIT_FAILED_ROLLED_BACK` e
+`ADVANCEMENT_TRANSACTION_DEGRADED`. Falhas pré-mutação são fail-safe; falhas
+posteriores exigem restauração verificada do manager e dos jogadores.
+
 WARNING não invalida candidato. ERROR e BLOCKER tornam
 `PreparedReloadArtifact.isApplicable()` falso.
 

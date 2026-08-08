@@ -3,13 +3,43 @@ package com.gabriel0liv.partialreload.advancement;
 import net.minecraft.advancements.*;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.ServerAdvancementManager;
+import net.minecraftforge.common.crafting.conditions.ICondition;
+import java.lang.reflect.Field;
+import java.lang.reflect.Modifier;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.*;
 
 /** Exact 1.20.1 bridge. Field visibility is supplied only by the minimal AT. */
 public final class ServerAdvancementManagerBridge {
+    private static final Field CONTEXT_FIELD = resolvePublicField(
+            ServerAdvancementManager.class, "context", ICondition.IContext.class);
     private ServerAdvancementManagerBridge(){}
+
+    public static ICondition.IContext context(ServerAdvancementManager manager) {
+        try {
+            Object value = CONTEXT_FIELD.get(Objects.requireNonNull(manager, "manager"));
+            if (!(value instanceof ICondition.IContext context)) {
+                throw new IllegalStateException("ADVANCEMENT_MANAGER_LAYOUT_UNSUPPORTED: context value type");
+            }
+            return context;
+        } catch (IllegalAccessException error) {
+            throw new IllegalStateException("ADVANCEMENT_MANAGER_LAYOUT_UNSUPPORTED: context access", error);
+        }
+    }
+
+    private static Field resolvePublicField(Class<?> owner, String name, Class<?> type) {
+        try {
+            Field field = owner.getField(name);
+            if (field.getDeclaringClass() != owner || field.getType() != type
+                    || !Modifier.isPublic(field.getModifiers())) {
+                throw new IllegalStateException("ADVANCEMENT_MANAGER_LAYOUT_UNSUPPORTED: field=" + name);
+            }
+            return field;
+        } catch (ReflectiveOperationException error) {
+            throw new IllegalStateException("ADVANCEMENT_MANAGER_LAYOUT_UNSUPPORTED: field=" + name, error);
+        }
+    }
     public static void validateLayout(ServerAdvancementManager manager){
         if(manager==null||manager.advancements==null||manager.advancements.getClass()!=AdvancementList.class)
             throw new IllegalStateException("ADVANCEMENT_MANAGER_LAYOUT_UNSUPPORTED");

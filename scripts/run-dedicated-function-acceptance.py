@@ -20,9 +20,11 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 from typing import Callable
 
 from minecraft_rcon import RconClient, RconError
+from dedicated_server_bootstrap_policy import classify_startup, StartupClassification
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 # DedicatedServer loads world datapacks from the level directory.  Using this
@@ -117,6 +119,13 @@ def install_generation(letter: str, initial: bool = False) -> None:
         shutil.rmtree(staging)
 
 
+class ServerBootstrapError(RuntimeError):
+    def __init__(self, classification: StartupClassification, reason: str):
+        super().__init__(f"{classification.value}:{reason}")
+        self.classification = classification
+        self.reason = reason
+
+
 class Acceptance:
     def __init__(self, args: argparse.Namespace):
         self.args = args
@@ -135,6 +144,17 @@ class Acceptance:
         self.port = free_port()
         self.password = secrets.token_urlsafe(32)
         self.owned_pid: int | None = None
+        self.attempt_id = uuid.uuid4().hex
+        self.attempt_root = ROOT / "build" / "reports" / "dedicated-server-attempts" / self.attempt_id
+        self.attempt_root.mkdir(parents=True, exist_ok=True)
+        self.bootstrap: dict[str, object] = {
+            "attempt_id": self.attempt_id,
+            "run_root": str(self.attempt_root),
+            "rcon_port": self.port,
+            "startup_timeout_seconds": self.args.server_startup_timeout,
+            "rcon_timeout_seconds": self.args.rcon_startup_timeout,
+            "states": [],
+        }
 
     def assert_test_world_unlocked(self) -> None:
         """Remove a stale disposable-world lock only after ownership checks."""
@@ -207,6 +227,7 @@ class Acceptance:
             creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
         )
         self.owned_pid = self.proc.pid
+        self.bootstrap.update(pid=self.proc.pid, start_time=time.time())
         assert self.proc.stdout is not None
         def reader() -> None:
             for line in self.proc.stdout:
@@ -214,16 +235,60 @@ class Acceptance:
                 self.events.put(line); self.log(line)
         self.reader_thread = threading.Thread(target=reader, name=f"partialreload-reader-{self.proc.pid}", daemon=True)
         self.reader_thread.start()
-        self.wait_log(r"Done \([0-9.]+s\)! For help", self.args.server_startup_timeout)
+        startup_deadline = time.time() + self.args.server_startup_timeout
+        done = False
+        while time.time() < startup_deadline and not done:
+            if self.proc.poll() is not None:
+                self._raise_bootstrap(exited=True, exit_code=self.proc.returncode)
+            try: line = self.events.get(timeout=0.25)
+            except queue.Empty: continue
+            if ("PartialReloadMod" in line or "CLIENT_HANDSHAKE_FOUNDATION_CHANNEL_REGISTERED" in line) and "product_marker_time" not in self.bootstrap:
+                self.bootstrap["product_marker_time"] = time.time()
+            if re.search(r"Done \([0-9.]+s\)! For help", line):
+                self.bootstrap["done_time"] = time.time(); done = True
+            if "Unable to initialise RCON" in line:
+                self._drain_bootstrap_events(.75); self._raise_bootstrap()
+        if not done:
+            self._raise_bootstrap(timed_out=True)
         deadline = time.time() + self.args.rcon_startup_timeout
         last: Exception | None = None
         while time.time() < deadline:
+            if self.proc.poll() is not None:
+                self._raise_bootstrap(exited=True, exit_code=self.proc.returncode)
+            self._drain_bootstrap_events(0)
+            if any("RCON running on " in line for line in self.transcript) and "rcon_listening_time" not in self.bootstrap:
+                self.bootstrap["rcon_listening_time"] = time.time()
+            if any("Unable to initialise RCON" in line for line in self.transcript):
+                self._raise_bootstrap()
             try:
                 self.rcon = RconClient("127.0.0.1", self.port, self.password, self.args.command_timeout)
-                self.rcon.connect(); self.log("RCON_AUTHENTICATED"); return
+                self.rcon.connect(); self.log("RCON_AUTHENTICATED")
+                self.bootstrap.update(rcon_ready_time=time.time(), classification="PASSED")
+                self.bootstrap["states"] = [state.value for state in classify_startup(
+                    self.transcript, authenticated=True).states]
+                return
             except (OSError, RconError) as exc:
                 last = exc; time.sleep(0.5)
-        raise RuntimeError(f"RCON startup timeout: {last}")
+        self.bootstrap["last_rcon_error"] = str(last)
+        self._raise_bootstrap(timed_out=True)
+
+    def _drain_bootstrap_events(self, duration: float) -> None:
+        deadline = time.time() + duration
+        while True:
+            try: self.events.get(timeout=max(0, min(.05, deadline-time.time())))
+            except (queue.Empty, ValueError):
+                if time.time() >= deadline: return
+
+    def _raise_bootstrap(self, *, exited: bool = False, exit_code: int | None = None,
+                         timed_out: bool = False) -> None:
+        assessment = classify_startup(self.transcript, exited=exited,
+                                      exit_code=exit_code, timed_out=timed_out)
+        self.bootstrap.update(classification=assessment.classification.value,
+                              reason=assessment.reason,
+                              states=[state.value for state in assessment.states],
+                              exit_time=time.time() if exited else None,
+                              exit_code=exit_code)
+        raise ServerBootstrapError(assessment.classification, assessment.reason)
 
     def wait_log(self, pattern: str, timeout: float) -> str:
         rx = re.compile(pattern); end = time.time() + timeout
@@ -294,12 +359,16 @@ class Acceptance:
         after = self.scores(*players)
         return {name: after[name] - before[name] for name in players}
 
-    def shutdown(self) -> None:
+    def shutdown(self, *, force: bool = False, allow_nonzero: bool = False) -> None:
         if self.rcon is not None:
             try: self.command("stop")
             except Exception as exc: self.log("stop failed: " + str(exc))
             self.rcon.close(); self.rcon = None
         if self.proc is not None:
+            if force and self.proc.poll() is None:
+                self.log("SHUTDOWN_FORCED owned_pid=" + str(self.proc.pid))
+                subprocess.run(["taskkill", "/PID", str(self.proc.pid), "/T", "/F"],
+                               check=False, capture_output=True, text=True)
             try: self.proc.wait(timeout=self.args.shutdown_timeout)
             except subprocess.TimeoutExpired:
                 self.log("SHUTDOWN_FORCED owned_pid=" + str(self.proc.pid))
@@ -311,7 +380,8 @@ class Acceptance:
                 try: self.proc.wait(timeout=15)
                 except subprocess.TimeoutExpired:
                     self.proc.kill(); self.proc.wait(timeout=10)
-            if self.proc.returncode != 0: raise RuntimeError(f"server exit code {self.proc.returncode}")
+            if self.proc.returncode != 0 and not allow_nonzero:
+                raise RuntimeError(f"server exit code {self.proc.returncode}")
             if self.proc.stdout is not None:
                 try: self.proc.stdout.close()
                 except OSError: pass
@@ -327,7 +397,6 @@ class Acceptance:
             if lock.exists() and self.proc.poll() is not None:
                 lock.unlink()
         self.results["shutdown"] = "passed"
-
     def run(self) -> None:
         install_generation("A", initial=True); self.configure_rcon(); self.start()
         try:

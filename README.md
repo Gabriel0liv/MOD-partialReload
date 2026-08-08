@@ -159,6 +159,19 @@ O projeto segue Spec-Driven Development. Leia `AGENTS.md`,
 `docs/specs/010-loot-data-prepare.md` e as ADRs antes de alterar
 comportamento.
 
+## Advancements transacionais (Fase 4I)
+
+Advancements são preparados como uma geração completa e publicados no
+`ServerAdvancementManager` ativo no safe point. Jogadores conectados são
+revinculados pelo fluxo vanilla: progresso e aba compatíveis são preservados,
+rewards não são repetidas e somente packets vanilla são enviados. Falha após a
+publicação executa rollback automático; rollback manual não é suportado.
+
+A fase foi promovida após 92 testes Java, 172 testes Python, 116/116 GameTests
+(32/32 da 4I), acceptance dedicada e runner consolidado com 12 suítes. O
+provider `VanillaAdvancementProvider` é `COMMIT_SUPPORTED`. Não há packet
+customizado de advancement nem compatibilidade Arclight declarada.
+
 A acceptance de loot data mantém um cliente real sem o mod principal online,
 publica uma geração completa nova, prova comportamento determinístico pelos
 comandos vanilla de predicate/item/loot, remove IDs e executa rollback manual.

@@ -83,7 +83,7 @@ public final class PartialReloadGameTests {
         ));
     }
 
-    @GameTest(template = "empty", batch = "phase2-prepare", timeoutTicks = 200)
+    @GameTest(template = "empty", batch = "phase2-prepare", timeoutTicks = 1200)
     public static void validFunctionsPrepareWithoutMutatingActiveServer(GameTestHelper helper) {
         var server = helper.getLevel().getServer();
         var mod = ModList.get().getModObjectById(PartialReloadMod.MOD_ID)

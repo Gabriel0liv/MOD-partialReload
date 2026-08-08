@@ -2,7 +2,7 @@
 
 ## Estado
 
-`IMPLEMENTATION_IN_PROGRESS`
+`IMPLEMENTED_AND_ACCEPTED`
 
 ## Objetivo
 
@@ -26,6 +26,11 @@ constrói uma lista completa, resolve parents e executa `TreeNodePosition`.
 `checkForAutomaticTriggers` e registra listeners. `flushDirty` envia
 `ClientboundUpdateAdvancementsPacket`; `setSelectedTab` usa
 `ClientboundSelectAdvancementsTabPacket`.
+
+Os bridges não dependem de o `javac` enxergar membros transformados. O AT torna
+o contrato mínimo público no runtime e o acesso refletivo tipado usa somente
+`getField`/`getMethod`, sem `setAccessible`, validando owner e tipo antes de
+qualquer mutação.
 
 ## Artefato e dependências
 
@@ -101,6 +106,13 @@ publicação, progresso, aba, rewards, dois jogadores, faults e rollback. Uma
 acceptance com servidor e cliente Forge real sem o mod principal comprova
 árvore A→B, progresso, reward não repetida, sync vanilla e rollback. O runner,
 clean build e inspeção do JAR precisam passar antes de promover o provider a
+`COMMIT_SUPPORTED`.
+
+Gate final de 2026-08-08: 92 testes Java e 172 testes Python passaram; o
+servidor executou 116/116 GameTests, incluindo 32/32 da Fase 4I; a acceptance
+dedicada comprovou commit, rollback, progresso, aba, ausência de reward
+duplicada, dois jogadores revinculados e terceiro jogador na geração atual; o
+runner consolidado aprovou 12 suítes. O provider foi então promovido a
 `COMMIT_SUPPORTED`.
 
 ## Fora do escopo

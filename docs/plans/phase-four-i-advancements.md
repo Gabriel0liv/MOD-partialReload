@@ -12,3 +12,13 @@
 
 Gates são fail-closed e sequenciais. Não há rollback manual, packet próprio ou
 transação conjunta com dependências nesta fase.
+
+## Encerramento
+
+Concluído em 2026-08-08. A regressão 4E-S `AFTER_FIRST_TAG_BIND` foi atribuída
+a uma colisão de porta RCON depois de `Done`, antes de qualquer marker
+transacional. O harness passou a observar bootstrap, `Done`, RCON, exit e
+timeout em paralelo e permite no máximo três tentativas somente para
+`INFRA_TRANSIENT` com cleanup integral. A acceptance 4E-S, 92 testes Java, 172
+testes Python, 116/116 GameTests, a acceptance 4I e o runner de 12 suítes
+passaram. O provider está `COMMIT_SUPPORTED`.

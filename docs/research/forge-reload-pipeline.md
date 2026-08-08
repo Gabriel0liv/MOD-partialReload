@@ -79,3 +79,9 @@ mutação. `flushDirty` constrói `ClientboundUpdateAdvancementsPacket` e
 existentes e remove/adiciona critérios conforme a definição nova; as datas são
 serializadas no arquivo vanilla. Essa é a base do rebind por ID sem parser de
 progresso próprio.
+
+O gate final também confirmou que campos Forge-patched podem não aparecer
+públicos ao `javac` numa recompilação completa, mesmo com AT configurado. O
+contrato mantém o AT no runtime e resolve o campo `context` por
+`Class.getField`, validando classe, tipo e visibilidade e falhando fechado. A
+execução real de 32 GameTests e a acceptance com clientes comprovaram o layout.
