@@ -114,11 +114,15 @@ não foi implementado.
 ## Códigos de KubeJS
 
 `KUBEJS_NOT_PRESENT`, `KUBEJS_VERSION_UNSUPPORTED`,
-`KUBEJS_RUNTIME_UNAVAILABLE`, `KUBEJS_STARTUP_SCRIPT_CHANGED_RESTART_REQUIRED`,
+`KUBEJS_RECIPE_STAGING_NOT_ISOLATABLE`,
+`KUBEJS_RECIPE_SCRIPT_SIDE_EFFECT_UNSAFE`,
+`KUBEJS_STARTUP_SCRIPT_CHANGED_RESTART_REQUIRED`,
 `KUBEJS_CLIENT_SCRIPT_IGNORED`, `KUBEJS_MIXED_SCRIPT_UNSAFE` e
 `KUBEJS_SCRIPT_CHANGED_DURING_PREPARATION` são diagnósticos da fronteira
 opcional. Ausência do runtime torna somente a camada KubeJS não aplicável; não
-invalida o baseline vanilla já preparado.
+invalida o baseline vanilla já preparado. `KUBEJS_RECIPE_STAGING_NOT_ISOLATABLE`
+é o resultado da auditoria 2001.6.5: o runtime existe, mas seus managers,
+listeners e bindings globais impedem preparar scripts editados sem side effects.
 
 ## Códigos de tags
 

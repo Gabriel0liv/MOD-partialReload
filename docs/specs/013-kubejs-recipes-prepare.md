@@ -2,62 +2,104 @@
 
 ## 1. Contexto
 
-Recipes vanilla/Forge já produzem `PreparedRecipes` read-only. KubeJS pode transformar recipes por scripts, mas o runtime disponível no ambiente é NeoForge 1.21.1 e não corresponde ao alvo Forge 1.20.1.
+Recipes vanilla/Forge produzem `PreparedRecipes` read-only. A Fase 4J auditou
+o runtime exato KubeJS Forge `2001.6.5-build.26` para Minecraft 1.20.1 e os
+builds de comparação `.16` e `.24`. O runtime existe, mas não oferece uma
+fronteira isolada para recompilar `server_scripts` e capturar somente handlers
+de recipes.
 
 ## 2. Problema
 
-Executar `server_scripts` ou `RecipesKubeEvent.post` sem runtime isolado pode disparar comandos, eventos, registries e mutações no servidor ativo.
+`ScriptManager.reload` limpa caches de plugins e os listeners SERVER globais.
+`ScriptType.SERVER` resolve `ServerScriptManager.instance`; a chamada
+`ServerEvents.recipes(...)` registra callbacks nos `EventHandler` estáticos.
+`RecipesEventJS.post` usa esses callbacks e publica diretamente em um
+`RecipeManager`. Um manager Rhino secundário não recebe um registry de eventos
+local e os bindings normais expõem o servidor ativo.
 
 ## 3. Objetivos
 
-- identificar scripts e dependências relevantes;
+- identificar scripts e dependências relevantes sem executá-los;
 - preservar hashes e classificações em snapshots imutáveis;
 - manter `VanillaRecipesProvider` como baseline;
-- definir provider KubeJS versionado e isolável;
-- produzir candidato final somente quando houver contrato seguro;
-- preservar `RecipeManager` e runtime ativos.
+- auditar versões reais do runtime opcional;
+- produzir candidato somente quando houver staging isolado comprovado;
+- preservar `RecipeManager`, script manager, listeners, globals e plugins ativos.
 
 ## 4. Não objetivos
 
-Não executar KubeJS sem runtime Forge 1.20.1; não chamar `ServerScriptManager.reload`, `RecipesKubeEvent.post`, startup ou client scripts; não fazer commit, sincronização, tags, registries ou reflection genérica.
+Não chamar `reload`, `fullReload`, `/reload`, `/kubejs reload server_scripts` ou
+`RecipesEventJS.post` como preparação. Não trocar temporariamente globals,
+listeners ou managers; não executar startup/client scripts; não implementar
+tags, loot, addons, client sync ou reflection exploratória.
 
 ## 5. Terminologia
 
-`baseline`: `PreparedRecipes` vanilla/Forge; `script snapshot`: hashes e classificação dos scripts; `handler`: callback de recipe; `candidate`: coleção independente; `side effect`: alteração fora da coleção candidata.
+`baseline`: `PreparedRecipes` vanilla/Forge; `script snapshot`: hashes e
+classificação; `active runtime`: `ServerScriptManager.instance`, seus contextos,
+listeners e globals; `staging`: execução descartável sem escrita fora do
+candidato; `candidate`: coleção independente de recipes.
 
 ## 6. Requisitos funcionais
 
-RF-013-1 detectar ausência/versão do KubeJS; RF-013-2 classificar `server_scripts`, `startup_scripts` e `client_scripts`; RF-013-3 gerar snapshots SHA-256 e grafo conservador de imports; RF-013-4 usar sempre `PreparedRecipes` como baseline; RF-013-5 separar `KubeJsRecipesProvider`; RF-013-6 bloquear startup/client/mixed scripts perigosos; RF-013-7 diagnosticar runtime indisponível; RF-013-8 recusar apply e manter runtime/manager ativos.
+RF-013-1 detectar ausência/versão; RF-013-2 classificar scripts; RF-013-3 gerar
+snapshot SHA-256 e grafo conservador; RF-013-4 preservar o baseline; RF-013-5
+manter provider separado; RF-013-6 bloquear startup/client/mixed/unsafe; RF-013-7
+falhar fechado quando staging não for isolável; RF-013-8 não produzir candidato
+nem permitir apply nessa condição.
 
 ## 7. Requisitos não funcionais
 
-Java 17, server-side, sem dependência obrigatória, sem reflection genérica, hash SHA-256, tipos imutáveis, limites configuráveis e IO fora da server thread.
+Java 17, server-side, sem dependência obrigatória, sem `setAccessible`, Unsafe,
+Mixin genérico ou swap global; tipos imutáveis, limites configuráveis e IO fora
+da server thread.
 
 ## 8. Invariantes
 
-O baseline nunca é mutado; scripts não recebem manager ativo; preparação não executa scripts; startup/client scripts nunca são executados; ausência de runtime torna o resultado não aplicável; `RecipeManager` e listeners não mudam; candidate e snapshots são descartáveis e imutáveis.
+O baseline nunca é mutado; scripts não recebem o manager ativo; preparação não
+limpa listeners/caches; `ServerScriptManager.instance`, `ScriptType.SERVER`,
+`EventGroup`, `UtilsJS.staticServer`, `KubeJSReloadListener.resources`, schemas e
+plugins mantêm identidade e conteúdo. Falta de prova de isolamento bloqueia.
 
 ## 9. Modelo de erros
 
-`KUBEJS_NOT_PRESENT`, `KUBEJS_VERSION_UNSUPPORTED`, `KUBEJS_RUNTIME_UNAVAILABLE`, `KUBEJS_RECIPE_API_UNAVAILABLE`, `KUBEJS_STARTUP_SCRIPT_CHANGED_RESTART_REQUIRED`, `KUBEJS_CLIENT_SCRIPT_IGNORED`, `KUBEJS_MIXED_SCRIPT_UNSAFE`, `KUBEJS_IMPORT_MISSING`, `KUBEJS_SCRIPT_CHANGED_DURING_PREPARATION` e `KUBEJS_PREPARATION_TIMEOUT`.
+`KUBEJS_NOT_PRESENT`, `KUBEJS_VERSION_UNSUPPORTED`,
+`KUBEJS_RECIPE_STAGING_NOT_ISOLATABLE`,
+`KUBEJS_RECIPE_SCRIPT_SIDE_EFFECT_UNSAFE`,
+`KUBEJS_STARTUP_SCRIPT_CHANGED_RESTART_REQUIRED`,
+`KUBEJS_CLIENT_SCRIPT_IGNORED`, `KUBEJS_MIXED_SCRIPT_UNSAFE`,
+`KUBEJS_RECIPE_IMPORT_UNSAFE` e `KUBEJS_SCRIPT_CHANGED_DURING_PREPARATION`.
 
-## 10. Riscos
+## 10. Evidência da Fase 4J
 
-O event atual é mutável, o runtime possui globals/caches e o lifecycle completo faz reload global. Addons podem registrar handlers sem contrato. APIs do build 2101 não são evidência para Forge 1.20.1.
+Os POMs `.16`, `.24` e `.26` declaram Architectury Forge `9.1.12` e Rhino Forge
+`2001.2.2-build.17`. Nas três versões, `ServerScriptManager`, `ScriptManager`,
+`ScriptType`, `EventHandler`, `RecipesEventJS` e `RecipeManagerMixin` são
+idênticos. O contrato necessário — contexto Rhino com listeners locais,
+bindings restritos e captura de callbacks — não existe.
 
 ## 11. Critérios de aceitação
 
-Versão alvo e incompatibilidade documentadas; snapshot e classificação testados; ausência de KubeJS não quebra recipes vanilla; scripts não são executados; provider retorna blocker seguro; apply continua recusado; manager e runtime permanecem inalterados.
+Runtime e dependências exatos auditados; blocker identificado por classe e
+estado; ausência de KubeJS não quebra recipes vanilla; scripts não são
+executados; provider permanece não aplicável; nenhuma acceptance de commit é
+simulada; builds e testes existentes permanecem verdes.
 
 ## 12. Cenários de teste
 
-KubeJS ausente, versão incompatível, script recipe-only, script misto, startup/client script, hash/import ausente, TOCTOU, limite, timeout, artefato imutável e apply recusado.
+KubeJS ausente, script recipe-only, misto, startup/client, import, limites e
+snapshot continuam cobertos. Execução, equivalência, isolamento e commit só
+serão adicionados quando uma API upstream ou adapter externo fornecer staging
+real.
 
-## 13. Decisões pendentes
+## 13. Decisão
 
-Obter e auditar uma distribuição KubeJS Forge 1.20.1 exata; identificar API de staging oficial ou definir módulo compat versionado. Só então testar handlers, addons, mutações e candidate final.
+`KUBEJS_RECIPE_RUNTIME_2001_AUDITED` e
+`KUBEJS_RECIPE_STAGING_NOT_ISOLATABLE`. O commit KubeJS não foi implementado.
+Rollback do runtime ativo não tornaria a preparação atômica: scripts poderiam
+ter observado/mutado mundo, IO, threads ou globals antes da restauração.
 
 ## 14. Relação com outras specs
 
-Evolui 012 e ADR-012–014; depende de 003/004/006/007; preserva 009–011. Preparação de tags continua requisito anterior à integração completa.
-
+Evolui 012 e ADR-014–018; a análise detalhada está na Spec 021 e ADR-050.
+Preserva integralmente os commits vanilla/Forge das fases 4E/4F-R.

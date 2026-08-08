@@ -25,7 +25,8 @@ A fundação opcional de handshake client-side da Fase 4F-A foi aceita: o canal 
 - supressão `DO_NOT_RUN` de load functions, verificação e rollback em memória.
 - preparação read-only de recipes com serializers reais, conditions, índices,
   dependências e delta.
-- snapshot/classificação read-only de scripts KubeJS e diagnóstico fechado.
+- snapshot/classificação read-only de scripts KubeJS e auditoria fechada do
+  runtime Forge 2001.6.5.
 - preparação read-only de tags gerais por registry, com stack de datapacks,
   `replace`, entries opcionais, nested tags, grafo e delta imutável.
 - preparação conjunta read-only de tags + recipes com snapshot compartilhado,
@@ -50,7 +51,8 @@ A fundação opcional de handshake client-side da Fase 4F-A foi aceita: o canal 
 - políticas de load diferentes de `DO_NOT_RUN`;
 - rollback após restart ou histórico de gerações;
 - integrações KubeJS, Origins e Silent Gear.
-- execução de handlers KubeJS e candidato combinado de recipes (**bloqueado** sem runtime Forge 1.20.1 exato);
+- execução de handlers KubeJS e candidato combinado de recipes (**bloqueado**:
+  o runtime 2001.6.5 não oferece staging isolável);
 
 Os commits transacionais de functions e loot data foram validados em servidor
 dedicado headless no alvo exato Forge 47.4.10.
@@ -93,11 +95,12 @@ Requerem nível de operador configurável (padrão 4):
 exclusivo de tags + recipes, mantém os jogadores online e exige relog para o
 refresh visual. Loot data publica os três tipos juntos, aceita jogadores
 conectados e não requer client sync.
-Quando KubeJS não está presente na versão alvo, `prepared` informa
-explicitamente `KubeJS integration: not loaded` e mantém apenas o baseline
-vanilla/Forge.
-KubeJS recipe preparation status: `KUBEJS_RECIPE_PREPARATION_BLOCKED`. Nenhum
-handler foi executado e nenhuma aceitação com runtime alvo foi realizada.
+Quando KubeJS não está presente, `prepared` mantém apenas o baseline
+vanilla/Forge. A Fase 4J auditou KubeJS Forge `2001.6.5-build.26`, Rhino Forge
+`2001.2.2-build.17` e Architectury Forge `9.1.12`. O lifecycle usa manager,
+listeners e bindings globais e não oferece um registry de staging injetável.
+Estado: `KUBEJS_RECIPE_STAGING_NOT_ISOLATABLE`; nenhum handler foi executado,
+nenhum adapter/candidato/commit foi criado e a dependência continua opcional.
 
 Tags gerais possuem preparação read-only; binding, sincronização e commit ainda
 não são implementados.

@@ -11,7 +11,7 @@
 | Forge GLM | Detecção própria | Não | `PLANNED` | ADR-007: listener/codec/estado ativo separados |
 | tags | Sim | Sim, isolada e conjunta com recipes | `PREPARE_SUPPORTED` | bind de registries, caches, packets/events |
 | Origins/Apoli | Sim | Não | `PLANNED` | Calio registries + migração/sync |
-| KubeJS | Scripts fora de ResourceManager não entram no scanner vanilla; recursos data entram como `UNKNOWN`/categoria estrutural | Não | `KUBEJS_RECIPE_PREPARATION_BLOCKED` | não existe runtime Forge 1.20.1 exato; apenas artefato NeoForge 1.21.1 local |
+| KubeJS | Scripts fora de ResourceManager não entram no scanner vanilla; recursos data entram como `UNKNOWN`/categoria estrutural | Não | `KUBEJS_RECIPE_STAGING_NOT_ISOLATABLE` | runtime Forge 2001.6.5-build.26 auditado; singleton, listeners e bindings globais impedem staging isolado |
 | Silent Gear | Sim para materials/traits | Não | `PLANNED` | managers, login packets, NBT/caches |
 | worldgen/damage type | Sim | Não | `RESTART_REQUIRED` | registries dinâmicos e mundo existente |
 | desconhecido | Sim, quando encontrado dentro dos roots observados | Não | `UNKNOWN` | contrato inexistente; descoberta de novos roots será parte da SPI futura |

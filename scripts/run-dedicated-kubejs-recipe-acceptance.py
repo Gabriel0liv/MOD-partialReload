@@ -1,8 +1,8 @@
-"""Acceptance preflight for KubeJS recipes.
+"""Fail-closed research gate for KubeJS recipes.
 
-The exact Forge 1.20.1 KubeJS runtime is intentionally required. When it is
-not installed, this harness records a blocked result instead of pretending
-that a dedicated acceptance ran.
+The exact 2001 runtime was audited, but it cannot stage edited scripts without
+mutating process-wide managers/listeners.  This script records that architectural
+stop gate and deliberately does not start a server or call KubeJS.
 """
 from __future__ import annotations
 
@@ -15,10 +15,31 @@ def main() -> int:
     report = root / "build" / "reports" / "dedicated-kubejs-recipe-acceptance.json"
     report.parent.mkdir(parents=True, exist_ok=True)
     result = {
-        "runtime_available": False,
+        "runtime_audited": True,
+        "server_started": False,
+        "scripts_executed": False,
         "target": "Minecraft 1.20.1 / Forge 47.4.10",
-        "status": "KUBEJS_RECIPE_PREPARATION_BLOCKED",
-        "reason": "No exact KubeJS Forge 1.20.1 runtime is installed; no server was started and no script was executed.",
+        "kubejs_version": "2001.6.5-build.26",
+        "rhino_version": "2001.2.2-build.17",
+        "architectury_version": "9.1.12",
+        "comparison_builds": [
+            "2001.6.5-build.16",
+            "2001.6.5-build.24",
+            "2001.6.5-build.26",
+        ],
+        "status": "KUBEJS_RECIPE_STAGING_NOT_ISOLATABLE",
+        "commit_implemented": False,
+        "reason": (
+            "ScriptType.SERVER resolves the active ServerScriptManager and "
+            "ServerEvents stores process-wide listeners; loading edited scripts "
+            "would clear or replace active runtime state."
+        ),
+        "evidence": {
+            "active_manager_unchanged": True,
+            "active_event_handlers_unchanged": True,
+            "active_recipe_manager_unchanged": True,
+            "functional_acceptance_executed": False,
+        },
     }
     report.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
     print(result["status"])

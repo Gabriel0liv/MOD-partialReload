@@ -149,16 +149,17 @@ players conectados; Ingredient é invalidado, o evento de tags é emitido e uma
 geração anterior fica retida para rollback. Sincronização de clientes continua
 fora do escopo.
 
-## KubeJS recipes (Fase 4B)
+## KubeJS recipes (Fases 4B/4J)
 
-O provider KubeJS é uma fronteira opcional. O ambiente atual não contém o
-runtime Forge 1.20.1: o único JAR local é NeoForge 2101.7.2. Scripts podem ser
-fingerprintados/classificados, mas não são executados. `prepare recipes` mantém
-o baseline vanilla e informa que a integração não está carregada; nenhum
-runtime ativo, listener ou `RecipeManager` é tocado.
+O provider KubeJS é uma fronteira opcional. A Fase 4J auditou os artefatos
+Forge 2001.6.5 builds 16, 24 e 26 com suas dependências exatas. Scripts podem
+ser fingerprintados/classificados, mas não são executados. `prepare recipes`
+mantém o baseline vanilla/Forge; nenhum listener, global, script manager ou
+`RecipeManager` ativo é tocado.
 
-O estado oficial da integração KubeJS é `KUBEJS_RECIPE_PREPARATION_BLOCKED`:
-não há runtime Forge 1.20.1 nem API de staging comprovada.
+O runtime registra callbacks em `ServerEvents` globais por meio do singleton
+`ServerScriptManager` e expõe bindings com acesso ao servidor. Como não existe
+registry/contexto isolado, o estado é `KUBEJS_RECIPE_STAGING_NOT_ISOLATABLE`.
 
 ## Preparação de tags (Fase 4C)
 

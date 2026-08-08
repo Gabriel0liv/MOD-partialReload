@@ -55,12 +55,12 @@ memória para rollback único. O safety gate 4E-S foi aprovado após cobertura d
 preflight stale, fault injection, player race, registries vazios/não suportados
 e regressão dedicada completa.
 
-A Fase 4A prepara recipes vanilla/Forge read-only. A Fase 4B possui apenas
-pesquisa e snapshot/classificação segura de KubeJS até existir um runtime Forge
-1.20.1 exato e uma API de staging isolada; nunca execute `ServerScriptManager`
-ou `RecipesKubeEvent` no runtime ativo.
-O estado oficial da integração é `KUBEJS_RECIPE_PREPARATION_BLOCKED`, não
-pending acceptance.
+A Fase 4A prepara recipes vanilla/Forge read-only. A Fase 4J auditou KubeJS
+Forge 2001.6.5-build.26 e confirmou que `ScriptType.SERVER`, `ServerEvents` e os
+bindings são globais; não existe staging isolável. Nunca execute
+`ServerScriptManager.reload`, `fullReload` ou `RecipesEventJS.post` como
+preparação. O estado oficial é `KUBEJS_RECIPE_RUNTIME_2001_AUDITED` /
+`KUBEJS_RECIPE_STAGING_NOT_ISOLATABLE`; não há adapter, candidate ou commit.
 
 A Fase 4C prepara tags gerais em `PreparedTags` read-only. `tags/functions` são
 delegadas ao provider de functions; nunca chame `Registry.bindTags`, eventos de
@@ -76,8 +76,9 @@ solicitadas juntas. O artefato usa um snapshot compartilhado e
 da Fase 4E. Serializers ou conditions que dependam de holders ativos falham
 fechado.
 
-A Fase 4A prepara recipes com serializers reais, mas continua PREPARE_ONLY:
-não trocar `RecipeManager`, sincronizar clientes ou executar KubeJS.
+A Fase 4A prepara recipes com serializers reais; o commit vanilla/Forge usa o
+fluxo conjunto já aprovado. Não trocar `RecipeManager`, sincronizar clientes ou
+executar KubeJS fora de uma futura seam upstream isolada.
 
 ## Aceitação dedicada
 

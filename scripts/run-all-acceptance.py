@@ -16,7 +16,7 @@ SUITES = [
     ("glm_commit_acceptance", "run-dedicated-glm-commit-acceptance.py", "dedicated-glm-commit-acceptance.json", "GLM_COMMIT_ACCEPTANCE_PASSED"),
     ("loot_glm_joint_commit_acceptance", "run-dedicated-loot-glm-joint-acceptance.py", "dedicated-loot-glm-joint-acceptance.json", "LOOT_GLM_JOINT_COMMIT_ACCEPTANCE_PASSED"),
     ("advancement_commit_acceptance", "run-dedicated-advancement-commit-acceptance.py", "dedicated-advancement-commit-acceptance.json", "ADVANCEMENT_COMMIT_ACCEPTANCE_PASSED"),
-    ("kubejs_expected_block", "run-dedicated-kubejs-recipe-acceptance.py", "dedicated-kubejs-recipe-acceptance.json", "KUBEJS_RECIPE_PREPARATION_BLOCKED"),
+    ("kubejs_expected_block", "run-dedicated-kubejs-recipe-acceptance.py", "dedicated-kubejs-recipe-acceptance.json", "KUBEJS_RECIPE_STAGING_NOT_ISOLATABLE"),
 ]
 SUITE_TIMEOUT_SECONDS = 1800
 
@@ -71,7 +71,7 @@ def report_ok(data: object, key: str) -> bool:
     if not isinstance(data, dict):
         return False
     if key == "kubejs_expected_block":
-        return data.get("status") == "KUBEJS_RECIPE_PREPARATION_BLOCKED"
+        return data.get("status") == "KUBEJS_RECIPE_STAGING_NOT_ISOLATABLE"
     if data.get("status") == "passed":
         return True
     values = list(data.values())
@@ -125,7 +125,7 @@ def main() -> int:
             valid = False
         marker_ok = marker in proc.stdout
         if key == "kubejs_expected_block":
-            valid = valid and data is not None and data.get("status") == "KUBEJS_RECIPE_PREPARATION_BLOCKED"
+            valid = valid and data is not None and data.get("status") == "KUBEJS_RECIPE_STAGING_NOT_ISOLATABLE"
         cleanup = {"owned_processes_absent": not bool(owned_processes()),
                    "session_lock_absent": not (ROOT / "run" / "world" / "session.lock").exists(),
                    "properties_backup_absent": not (ROOT / "run" / "server.properties.partialreload.bak").exists(),

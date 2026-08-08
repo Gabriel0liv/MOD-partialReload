@@ -1,44 +1,64 @@
-# Investigação KubeJS
+# Investigação KubeJS recipes
 
-## Versão e fonte
+## Runtime real
 
-Fonte [`KubeJS-Mods/KubeJS`](https://github.com/KubeJS-Mods/KubeJS), branch `2001`, commit `ba142541dcc1d230383f4a55e38dd92ff10d1029`. `gradle.properties` declara Minecraft `1.20.1` e KubeJS `2001.6.5`. Esta é a versão candidata pesquisada, não uma dependência adicionada.
+A auditoria deixou de depender apenas da branch GitHub. Foram inspecionados os
+JARs, sources, POMs e Gradle metadata publicados de KubeJS Forge
+`2001.6.5-build.16`, `.24` e `.26`. O alvo `.26` usa Rhino Forge
+`2001.2.2-build.17` e Architectury Forge `9.1.12`.
 
-## Carregamento de scripts
+## Registro de eventos
 
-`ScriptType.SERVER` aponta para `server_scripts` e `ServerScriptManager`. Durante o pipeline global, Mixins envolvem o `CloseableResourceManager`, criam packs virtuais, executam `ScriptManager.reload`, eventos de geração de data, hooks de plugins, pre-tags e inicializam o evento de recipes.
+`ServerEvents.RECIPES` é um `EventHandler` estático criado no `EventGroup`
+global `ServerEvents`. Ao executar `ServerEvents.recipes(callback)`, Rhino chama
+`EventHandler.call`; este usa `ScriptType` do contexto, resolve
+`type.manager.get()` e anexa o callback ao container global daquele handler.
+Não há argumento para um event registry local.
 
-`ScriptManager.reload` chama `unload`, limpa caches de plugins, carrega arquivos do diretório e recursos `kubejs/`, cria um novo contexto Rhino e executa scripts. `ScriptType.unload` percorre todos os `EventGroup`/`EventHandler` e remove os containers do tipo SERVER. Portanto listeners antigos do próprio KubeJS são removíveis, mas somente pelo lifecycle interno completo; chamar APIs de evento isoladas não é equivalente.
+O registro só é aceito quando `type.manager.get().canListenEvents` está ativo.
+Para `ScriptType.SERVER`, o supplier é
+`ServerScriptManager::getScriptManager`, que retorna o singleton. Logo um
+`ServerScriptManager` secundário não controla o destino do callback.
 
-## Recipes e baseline
+## RecipesEventJS
 
-O Mixin de `RecipeManager` entrega a `RecipesEventJS` o mapa JSON de recipes do datapack antes da aplicação vanilla. Cada instância nova mantém:
+A instância mantém `originalRecipes`, `addedRecipes`, IDs tomados e funções de
+schemas. `post(recipeManager, jsonMap)`:
 
-- `originalRecipes`, reconstruído do mapa JSON baseline;
-- `addedRecipes`, novo por ciclo;
-- IDs tomados e callbacks específicos do evento.
+1. avalia conditions e desserializa o baseline em wrappers KubeJS;
+2. dispara os listeners globais de `ServerEvents.RECIPES`;
+3. materializa recipes vanilla/modded com schemas e serializers registrados;
+4. chama hooks `injectRuntimeRecipes` de todos os plugins;
+5. reconstrói `byName`/`byType` e os grava no `RecipeManager` recebido.
 
-Após `ServerEvents.RECIPES`, KubeJS materializa um mapa novo e substitui `recipeManager.byName` e `recipeManager.recipes` via Mixin. Um reload parcial futuro precisa reconstituir o baseline do `ResourceManager`, não partir do `RecipeManager` já modificado, ou alterações acumularão.
+Isso descreve corretamente `shaped`, `shapeless`, cooking, stonecutting,
+smithing, `custom`, `remove`, `replaceInput` e `replaceOutput`, mas não constitui
+uma função pura. O baseline correto de uma integração futura continua sendo a
+visão vanilla/Forge do `ResourceManager`, nunca o manager já transformado.
 
-## Tags, loot e addons
+## Estado compartilhado relevante
 
-- pre-tag events são reunidos pelo `ServerScriptManager` antes dos loaders;
-- eventos de loot operam sobre o mapa JSON antes da desserialização do `LootDataManager`, por Mixins;
-- plugins recebem `clearCaches`, `onServerReload` e podem injetar recipes runtime;
-- addons podem registrar handlers, schemas, wrappers e hooks, tornando a compatibilidade dependente do conjunto e versão instalados.
+- `ServerScriptManager.instance` e `ScriptType.SERVER.manager`;
+- registry de `EventGroup` e containers de `EventHandler`;
+- `KubeJSPlugins` e seus caches/hooks;
+- `RecipeNamespace`/schemas e mappings estáticos;
+- `KubeJSReloadListener.resources` e `recipeContext`;
+- `UtilsJS.staticServer` e `staticRegistryAccess`;
+- `RecipesEventJS.instance`, custom ingredients e result callbacks;
+- serializers especiais, actions e packs virtuais.
 
-## Startup scripts
+`ScriptManager.reload` altera vários desses itens antes mesmo de um callback de
+recipe ser invocado. Rollback posterior não desfaz IO, threads, comandos ou
+mutações no servidor acessíveis pelos bindings.
 
-`startup_scripts` têm lifecycle separado e registram conteúdo, tipos e modificações de startup. Apesar de existir mensagem de reload de startup para desenvolvimento, esse domínio não é seguro para hot reload transacional do servidor e permanece `RESTART_REQUIRED`.
+## Estratégias avaliadas
 
-## Superfície de integração
+**A — API oficial isolável:** inexistente no build `.26`.
 
-As classes centrais são públicas em Java, mas os pontos que interceptam managers/mapas dependem de Mixins e campos expostos pelo KubeJS. Não há um contrato público único que prepare, valide e faça commit de apenas `server_scripts`/recipes com rollback.
+**B — clone tipado:** bloqueado porque `ScriptType.SERVER` e `ServerEvents` não
+são injetáveis. Um clone exigiria trocar globals ou copiar estado privado e
+continuaria oferecendo bindings do servidor ativo.
 
-Opções futuras:
-
-1. `compileOnly` + runtime opcional contra `2001.6.5`, com adapter tipado;
-2. módulo separado por versão;
-3. Mixin versionado apenas se uma lacuna exata for comprovada.
-
-Reflection genérica foi rejeitada. Nenhuma dependência KubeJS entra na fase 1.
+Conclusão: não executar handlers, não criar adapter, não produzir candidate e
+não reutilizar o commit existente. O erro é
+`KUBEJS_RECIPE_STAGING_NOT_ISOLATABLE`.
